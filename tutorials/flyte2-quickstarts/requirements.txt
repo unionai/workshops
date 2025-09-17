@@ -1,0 +1,7 @@
+flyte>=2.0.0b21
+scikit-learn
+unionai-reuse==0.1.5
+joblib==1.3.2
+matplotlib==3.8.3
+seaborn==0.13.2
+python-dotenv
