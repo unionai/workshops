@@ -11,9 +11,9 @@
   </colgroup>
   <thead>
     <tr>
-      <th align="left">Tutorial</th>
-      <th align="left">What you’ll learn</th>
-      <th align="left">Open in:</th>
+      <th align="left"style="width: 30%;">Tutorial</th>
+      <th align="left"style="width: 40%;">What you’ll learn</th>
+      <th align="left"style="width: 30%;">Open in:</th>
     </tr>
   </thead>
   <tbody>
