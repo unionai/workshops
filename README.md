@@ -4,16 +4,11 @@
 ## Tutorial list
 
 <table>
-  <colgroup>
-    <col style="width: 40%;">
-    <col style="width: 30%;">
-    <col style="width: 30%;">
-  </colgroup>
   <thead>
     <tr>
-      <th align="left"style="width: 30%;">Tutorial</th>
-      <th align="left"style="width: 40%;">What you’ll learn</th>
-      <th align="left"style="width: 30%;">Open in:</th>
+      <th align="left">Tutorial&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</th>
+      <th align="left">What you’ll learn</th>
+      <th align="left">Open in:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</th>
     </tr>
   </thead>
   <tbody>
