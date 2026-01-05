@@ -1,0 +1,9 @@
+openai
+python-dotenv
+ddgs
+beautifulsoup4==4.14.2
+flyte==2.0.0b43
+httpx
+unionai-reuse
+ipython
+tavily-python
