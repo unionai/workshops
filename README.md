@@ -18,9 +18,9 @@
       <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/flyte2-quickstarts/00_flyte2-starter.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Colab"></a></td>
     </tr>
     <tr>
-      <td><a href="https://github.com/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb">Planner Multi-Agent System</a></td>
+      <td><a href="">Planner Multi-Agent System</a></td>
       <td>create a scalable planner multi-agent system using Flyte</td>
-      <td><a target="_blank" href="https://github.com/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb">
+      <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
 </a></td>
     </tr>
