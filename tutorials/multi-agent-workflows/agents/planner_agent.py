@@ -128,11 +128,6 @@ IMPORTANT: Always include 'dependencies' field for each step, even if empty [].
     result = json.loads(res.choices[0].message.content)
     print(f"[Planner Agent] Raw result: {result}")
 
-    # Handle old format (single step without "steps" wrapper)
-    if "agent" in result and "task" in result:
-        print(f"[Planner Agent] Converting old format to new format")
-        result = {"steps": [{"agent": result["agent"], "task": result["task"]}]}
-
     # Convert to dataclass
     steps = [
         AgentStep(
