@@ -47,8 +47,8 @@ class WebSearchAgentResult:
 
 env = base_env
 
-@env.task
 @agent("web_search")
+@env.task
 async def web_search_agent(task: str) -> WebSearchAgentResult:
     """
     Simple web search agent - searches the web and returns results.

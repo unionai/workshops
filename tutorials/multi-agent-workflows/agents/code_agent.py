@@ -48,8 +48,8 @@ env = base_env
 # )
 
 
-@env.task
 @agent("code")
+@env.task
 async def code_agent(task: str) -> CodeAgentResult:
     """
     Code agent that can write and execute Python code.

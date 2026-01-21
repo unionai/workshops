@@ -22,6 +22,8 @@ sys.path.insert(0, str(workflows_dir))
 
 # Import agents (they are now Flyte tasks with their own environments)
 from agents.planner_agent import planner_agent, PlannerDecision, AgentStep
+# Import all specialist agents to register them via @agent decorator
+# The @agent decorator now runs AFTER @env.task, so it stores Flyte-wrapped versions
 from agents.math_agent import math_agent, MathAgentResult
 from agents.string_agent import string_agent, StringAgentResult
 from agents.web_search_agent import web_search_agent, WebSearchAgentResult
@@ -133,13 +135,22 @@ async def execute_dynamic_task(user_request: str) -> TaskResult:
                 dep_results = []
                 for dep_idx in step.dependencies:
                     dep_exec = completed_results[dep_idx]
-                    dep_results.append(f"Step {dep_idx} ({dep_exec.agent}): {dep_exec.result_summary}")
+                    dep_results.append(f"  - Step {dep_idx} ({dep_exec.agent} agent): {dep_exec.result_summary}")
 
-                # Prepend dependency results to the task
-                task = f"Context from previous steps:\n" + "\n".join(dep_results) + f"\n\nYour task: {task}"
+                # Prepend dependency results to the task with clear formatting
+                context_header = "=" * 60 + "\nRESULTS FROM PREVIOUS STEPS:\n" + "=" * 60
+                context_footer = "=" * 60
+                task = (
+                    f"{context_header}\n" +
+                    "\n".join(dep_results) +
+                    f"\n{context_footer}\n\n"
+                    f"YOUR TASK:\n{task}"
+                )
                 print(f"[Orchestrator]     Augmented task with {len(step.dependencies)} dependency result(s)")
+                print(f"[Orchestrator]     Context provided: {[f'Step {i}' for i in step.dependencies]}")
 
             # Route to appropriate agent task using agent registry
+            # The registry now contains Flyte-wrapped versions thanks to decorator order
             agent_func = agent_registry.get(step.agent)
             if not agent_func:
                 # Unknown agent - the planner hallucinated or requested invalid agent

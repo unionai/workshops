@@ -48,8 +48,8 @@ env = base_env
 # )
 
 
-@env.task
 @agent("string")
+@env.task
 async def string_agent(task: str) -> StringAgentResult:
     """
     String analysis agent that can count letters, words, and analyze text.

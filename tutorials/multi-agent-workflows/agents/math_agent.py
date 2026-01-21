@@ -48,8 +48,8 @@ env = base_env
 # )
 
 
-@env.task
 @agent("math")
+@env.task
 async def math_agent(task: str) -> MathAgentResult:
     """
     Math agent that processes user prompts to solve arithmetic and multi-step problems.
