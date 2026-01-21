@@ -1,4 +1,3 @@
-tool_registry = {}
 agent_tools = {}
 agent_registry = {}
 
@@ -8,12 +7,20 @@ def agent(name):
         return fn
     return decorator
 
-def tool(agent=None):
+def tool(agent):
+    """
+    Register a tool for a specific agent.
+
+    Args:
+        agent (str): The agent this tool belongs to (e.g., "math", "string")
+
+    Example:
+        @tool(agent="math")
+        async def add(a, b):
+            return a + b
+    """
     def decorator(fn):
         name = fn.__name__
-        if agent:
-            agent_tools.setdefault(agent, {})[name] = fn
-        else:
-            tool_registry[name] = fn
+        agent_tools.setdefault(agent, {})[name] = fn
         return fn
     return decorator

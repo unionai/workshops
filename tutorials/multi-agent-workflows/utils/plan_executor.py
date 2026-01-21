@@ -1,7 +1,8 @@
 import json
 import asyncio
+import re
 from utils.logger import Logger
-from utils.decorators import agent_tools, tool_registry
+from utils.decorators import agent_tools
 
 logger = Logger()
 
@@ -25,8 +26,6 @@ def parse_plan_from_response(raw_plan: str) -> list:
         return json.loads(raw_plan)
     except json.JSONDecodeError as e:
         # If that fails, try to extract JSON from markdown code blocks or surrounding text
-        import re
-
         print(f"[WARN] Direct JSON parse failed: {e}")
         print(f"[WARN] Attempting to extract JSON from response...")
 
@@ -70,7 +69,14 @@ async def execute_tool_plan(plan: list, agent: str) -> dict:
     Returns:
         dict: {"final_result": ..., "steps": [...]} or {"error": ..., "steps": [...]}
     """
-    toolset = agent_tools.get(agent, tool_registry)
+    toolset = agent_tools.get(agent)
+    if not toolset:
+        available = list(agent_tools.keys())
+        raise ValueError(
+            f"No tools registered for agent '{agent}'. "
+            f"Available agents with tools: {available}. "
+            f"Did you import the tools file?"
+        )
 
     steps_log = []
     last_result = None
@@ -83,6 +89,7 @@ async def execute_tool_plan(plan: list, agent: str) -> dict:
             tool_name = step["tool"]
             args = step["args"]
             reasoning = step.get("reasoning", "")
+            # Replace "previous" keyword with result from last tool call (enables chaining)
             args = [last_result if str(a).lower() == "previous" else a for a in args]
 
             if tool_name in toolset:
