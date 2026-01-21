@@ -29,6 +29,7 @@ from agents.code_agent import code_agent, CodeAgentResult
 from agents.weather_agent import weather_agent, WeatherAgentResult
 from config import base_env
 from utils.logger import Logger
+from utils.decorators import agent_registry
 
 # Initialize logger for orchestrator
 logger = Logger(path="agent_trace_log.jsonl", verbose=False)
@@ -138,39 +139,21 @@ async def execute_dynamic_task(user_request: str) -> TaskResult:
                 task = f"Context from previous steps:\n" + "\n".join(dep_results) + f"\n\nYour task: {task}"
                 print(f"[Orchestrator]     Augmented task with {len(step.dependencies)} dependency result(s)")
 
-            # Route to appropriate agent task (use augmented task if dependencies exist)
-            if step.agent == "math":
-                agent_result = await math_agent(task)
-                result_full = agent_result.final_result
-                result_summary = agent_result.final_result  # Math results are already concise
-                error = agent_result.error
-            elif step.agent == "string":
-                agent_result = await string_agent(task)
-                result_full = agent_result.final_result
-                result_summary = agent_result.final_result  # String results are already concise
-                error = agent_result.error
-            elif step.agent == "web_search":
-                agent_result = await web_search_agent(task)
-                result_full = agent_result.final_result
-                # Web search results can be large, use summary if available
-                result_summary = getattr(agent_result, 'summary', agent_result.final_result)
-                error = agent_result.error
-            elif step.agent == "code":
-                agent_result = await code_agent(task)
-                result_full = agent_result.final_result
-                result_summary = agent_result.final_result  # Code results are typically concise
-                error = agent_result.error
-            elif step.agent == "weather":
-                agent_result = await weather_agent(task)
-                result_full = agent_result.final_result
-                result_summary = agent_result.final_result  # Weather results are already concise
-                error = agent_result.error
-            else:
-                # Fallback for unknown agent
+            # Route to appropriate agent task using agent registry
+            agent_func = agent_registry.get(step.agent)
+            if not agent_func:
+                # Unknown agent - the planner hallucinated or requested invalid agent
                 print(f"[Orchestrator] WARNING: Unknown agent '{step.agent}'")
                 result_full = ""
                 result_summary = ""
                 error = f"Unknown agent: {step.agent}"
+            else:
+                # Call the agent and extract results
+                agent_result = await agent_func(task)
+                result_full = agent_result.final_result
+                # Use summary field if available, otherwise use final_result
+                result_summary = getattr(agent_result, 'summary', agent_result.final_result)
+                error = agent_result.error
 
             print(f"[Orchestrator]   Step {step_idx} completed: {result_summary[:100]}...")
 
