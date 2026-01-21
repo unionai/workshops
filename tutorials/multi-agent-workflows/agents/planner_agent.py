@@ -71,8 +71,6 @@ async def planner_agent(user_request: str) -> PlannerDecision:
     # Initialize client inside task for Flyte secret injection
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-    memory_log = []  # No memory persistence for now
-    context = "\n".join([f"- {q} → {r}" for q, r in memory_log[-5:]]) or "No history."
     available_agents = [a for a in agent_registry if a != "planner"]
     agent_list = "\n".join([f"- {a}" for a in available_agents])
 
@@ -80,9 +78,6 @@ async def planner_agent(user_request: str) -> PlannerDecision:
 You are a routing agent.
 Available agents:
 {agent_list}
-
-Recent memory:
-{context}
 
 Analyze the user's request and decide which agent(s) to use.
 

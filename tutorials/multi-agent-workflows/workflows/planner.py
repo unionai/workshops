@@ -16,9 +16,9 @@ from dataclasses import dataclass
 import flyte
 import asyncio
 
-# Add project root to Python path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+# Add workflows directory to Python path for imports
+workflows_dir = Path(__file__).parent
+sys.path.insert(0, str(workflows_dir))
 
 # Import agents (they are now Flyte tasks with their own environments)
 from agents.planner_agent import planner_agent, PlannerDecision, AgentStep
@@ -76,7 +76,8 @@ env = base_env
 async def execute_dynamic_task(user_request: str) -> TaskResult:
     """
     Execute a task dynamically by first asking the planner which agent(s) to use.
-    This is the main orchestration task that calls other agent tasks sequentially.
+    This is the main orchestration task that calls other agent tasks with
+    dependency-aware parallelism (independent steps run in parallel).
 
     Args:
         user_request (str): The user's request
@@ -210,7 +211,9 @@ async def execute_dynamic_task(user_request: str) -> TaskResult:
     # Collect final results
     final_results = []
     for execution in agent_executions:
-        if execution.result_summary and not execution.error:
+        if execution.error:
+            final_results.append(f"{execution.agent}: ERROR - {execution.error}")
+        elif execution.result_summary:
             final_results.append(f"{execution.agent}: {execution.result_summary}")
 
     # Combine all results
