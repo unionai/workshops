@@ -4,7 +4,7 @@ import flyte
 from typing import Optional
 import httpx
 from bs4 import BeautifulSoup
-from config import TAVILY_API_KEY
+# from config import TAVILY_API_KEY
 
 # ----------------------------------
 # Tavily Search Tool

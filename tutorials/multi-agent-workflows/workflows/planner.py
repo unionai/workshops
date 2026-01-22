@@ -22,8 +22,6 @@ sys.path.insert(0, str(workflows_dir))
 
 # Import agents (they are now Flyte tasks with their own environments)
 from agents.planner_agent import planner_agent, PlannerDecision, AgentStep
-# Import all specialist agents to register them via @agent decorator
-# The @agent decorator now runs AFTER @env.task, so it stores Flyte-wrapped versions
 from agents.math_agent import math_agent, MathAgentResult
 from agents.string_agent import string_agent, StringAgentResult
 from agents.web_search_agent import web_search_agent, WebSearchAgentResult
