@@ -13,7 +13,7 @@ async def execute_python(
     code: str,
     timeout: int = 5,
     description: Optional[str] = None
-) -> dict:
+) -> dict[str, str]:
     """
     Execute Python code in a safe, sandboxed environment.
 

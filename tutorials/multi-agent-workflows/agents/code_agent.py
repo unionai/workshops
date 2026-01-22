@@ -39,7 +39,6 @@ class CodeAgentResult:
 # Code Agent Task Environment
 # ----------------------------------
 env = base_env
-# Future: If you need agent-specific dependencies, create separate environments:
 # env = flyte.TaskEnvironment(
 #     name="code_agent_env",
 #     image=base_env.image.with_pip_packages(["numpy", "pandas"]),

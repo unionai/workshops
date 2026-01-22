@@ -1,10 +1,15 @@
 from utils.decorators import tool
 from ddgs import DDGS
 import flyte
-from typing import Optional
+from typing import Optional, Any
 import httpx
 from bs4 import BeautifulSoup
-from config import TAVILY_API_KEY
+# from config import TAVILY_API_KEY
+
+# Type aliases for clarity (Python 3.9+ style)
+SearchResult = dict[str, str]  # Dict with 'title', 'href', 'body' keys
+WebpageResult = dict[str, str]  # Dict with 'url', 'title', 'content', 'error' keys
+TavilySearchResult = dict[str, Any]  # Dict with 'query' (str), 'results' (list), optional 'answer' (str)
 
 # ----------------------------------
 # Tavily Search Tool
@@ -17,7 +22,7 @@ async def tavily_search(
     include_answer: bool = False,
     include_raw_content: bool = False,
     search_depth: str = "basic"
-) -> dict:
+) -> TavilySearchResult:
     """
     Search the web using Tavily for web results.
 
@@ -29,7 +34,7 @@ async def tavily_search(
         search_depth (str): Search depth - "basic" or "advanced" (default: "basic").
 
     Returns:
-        dict: Dictionary with 'results' (list), 'answer' (str if include_answer=True), and 'query' (str).
+        TavilySearchResult: Dict with 'query' (str), 'results' (list), and 'answer' (str, if requested).
     """
     from tavily import TavilyClient
 
@@ -77,7 +82,7 @@ async def duck_duck_go(
     region: str = "us-en",
     safesearch: str = "moderate",
     timelimit: Optional[str] = None
-) -> list[dict]:
+) -> list[SearchResult]:
     """
     Search DuckDuckGo for web results.
 
@@ -92,7 +97,7 @@ async def duck_duck_go(
             Options: "d" (day), "w" (week), "m" (month), "y" (year)
 
     Returns:
-        list[dict]: List of search results with 'title', 'href', and 'body' keys.
+        list[SearchResult]: List of dicts with 'title', 'href', and 'body' keys.
     """
     ddgs = DDGS()
 
@@ -121,16 +126,16 @@ async def duck_duck_go(
 # ----------------------------------
 @tool(agent="web_search")
 @flyte.trace
-async def fetch_webpage(url: str, max_length: int = 5000) -> dict:
+async def fetch_webpage(url: str, max_length: int = 5000) -> WebpageResult:
     """
     Fetch and extract text content from a webpage.
 
     Args:
-        url (str): The URL of the webpage to fetch.
-        max_length (int): Maximum length of content to return (default: 5000 chars).
+        url: The URL of the webpage to fetch.
+        max_length: Maximum length of content to return (default: 5000 chars).
 
     Returns:
-        dict: Dictionary with 'url', 'title', 'content', and 'error' keys.
+        WebpageResult: Dict with 'url', 'title', 'content', and 'error' keys.
     """
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
