@@ -16,12 +16,14 @@ from dataclasses import dataclass
 import flyte
 import asyncio
 
-# Add project root to Python path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+# Add workflows directory to Python path for imports
+workflows_dir = Path(__file__).parent
+sys.path.insert(0, str(workflows_dir))
 
 # Import agents (they are now Flyte tasks with their own environments)
 from agents.planner_agent import planner_agent, PlannerDecision, AgentStep
+# Import all specialist agents to register them via @agent decorator
+# The @agent decorator now runs AFTER @env.task, so it stores Flyte-wrapped versions
 from agents.math_agent import math_agent, MathAgentResult
 from agents.string_agent import string_agent, StringAgentResult
 from agents.web_search_agent import web_search_agent, WebSearchAgentResult
@@ -29,9 +31,64 @@ from agents.code_agent import code_agent, CodeAgentResult
 from agents.weather_agent import weather_agent, WeatherAgentResult
 from config import base_env
 from utils.logger import Logger
+from utils.decorators import agent_registry
 
 # Initialize logger for orchestrator
 logger = Logger(path="agent_trace_log.jsonl", verbose=False)
+
+# ----------------------------------
+# Helper Functions
+# ----------------------------------
+
+def build_task_with_context(
+    task: str,
+    dependencies: List[int],
+    completed_results: Dict
+) -> str:
+    """
+    Build a task prompt with context from dependent steps.
+
+    This is how results flow between agents: when a step depends on previous steps,
+    we prepend their results to the task prompt so the agent has the context it needs.
+
+    Args:
+        task: The original task description from the planner
+        dependencies: List of step indices this task depends on
+        completed_results: Dictionary of completed step results
+
+    Returns:
+        If no dependencies: returns task unchanged
+        If has dependencies: returns task with context section prepended
+
+    Example output:
+        ============================================================
+        RESULTS FROM PREVIOUS STEPS:
+        ============================================================
+          - Step 0 (web_search agent): France's GDP is €2.6 trillion
+        ============================================================
+
+        YOUR TASK:
+        Calculate 5% of the GDP from step 0
+    """
+    if not dependencies:
+        return task
+
+    # Build context section with results from dependent steps
+    context_lines = [
+        f"  - Step {dep_idx} ({completed_results[dep_idx].agent} agent): {completed_results[dep_idx].result_summary}"
+        for dep_idx in dependencies
+    ]
+
+    # Format with clear visual separators
+    context_header = "=" * 60 + "\nRESULTS FROM PREVIOUS STEPS:\n" + "=" * 60
+    context_footer = "=" * 60
+
+    return (
+        f"{context_header}\n"
+        f"{chr(10).join(context_lines)}\n"
+        f"{context_footer}\n\n"
+        f"YOUR TASK:\n{task}"
+    )
 
 # ----------------------------------
 # Data Models for Orchestrator
@@ -76,7 +133,8 @@ env = base_env
 async def execute_dynamic_task(user_request: str) -> TaskResult:
     """
     Execute a task dynamically by first asking the planner which agent(s) to use.
-    This is the main orchestration task that calls other agent tasks sequentially.
+    This is the main orchestration task that calls other agent tasks with
+    dependency-aware parallelism (independent steps run in parallel).
 
     Args:
         user_request (str): The user's request
@@ -125,51 +183,29 @@ async def execute_dynamic_task(user_request: str) -> TaskResult:
             print(f"[Orchestrator]   Step {step_idx}: Calling {step.agent} agent...")
             print(f"[Orchestrator]     Task: {step.task}")
 
-            # If this step has dependencies, augment the task with dependency results
-            task = step.task
+            # Build task with context from dependencies (if any)
+            # This is how results flow between agents - previous results get prepended to the prompt
+            task = build_task_with_context(step.task, step.dependencies, completed_results)
+
             if step.dependencies:
-                dep_results = []
-                for dep_idx in step.dependencies:
-                    dep_exec = completed_results[dep_idx]
-                    dep_results.append(f"Step {dep_idx} ({dep_exec.agent}): {dep_exec.result_summary}")
+                print(f"[Orchestrator]     Context from steps {step.dependencies} added to task")
 
-                # Prepend dependency results to the task
-                task = f"Context from previous steps:\n" + "\n".join(dep_results) + f"\n\nYour task: {task}"
-                print(f"[Orchestrator]     Augmented task with {len(step.dependencies)} dependency result(s)")
-
-            # Route to appropriate agent task (use augmented task if dependencies exist)
-            if step.agent == "math":
-                agent_result = await math_agent(task)
-                result_full = agent_result.final_result
-                result_summary = agent_result.final_result  # Math results are already concise
-                error = agent_result.error
-            elif step.agent == "string":
-                agent_result = await string_agent(task)
-                result_full = agent_result.final_result
-                result_summary = agent_result.final_result  # String results are already concise
-                error = agent_result.error
-            elif step.agent == "web_search":
-                agent_result = await web_search_agent(task)
-                result_full = agent_result.final_result
-                # Web search results can be large, use summary if available
-                result_summary = getattr(agent_result, 'summary', agent_result.final_result)
-                error = agent_result.error
-            elif step.agent == "code":
-                agent_result = await code_agent(task)
-                result_full = agent_result.final_result
-                result_summary = agent_result.final_result  # Code results are typically concise
-                error = agent_result.error
-            elif step.agent == "weather":
-                agent_result = await weather_agent(task)
-                result_full = agent_result.final_result
-                result_summary = agent_result.final_result  # Weather results are already concise
-                error = agent_result.error
-            else:
-                # Fallback for unknown agent
+            # Route to appropriate agent task using agent registry
+            # The registry now contains Flyte-wrapped versions thanks to decorator order
+            agent_func = agent_registry.get(step.agent)
+            if not agent_func:
+                # Unknown agent - the planner hallucinated or requested invalid agent
                 print(f"[Orchestrator] WARNING: Unknown agent '{step.agent}'")
                 result_full = ""
                 result_summary = ""
                 error = f"Unknown agent: {step.agent}"
+            else:
+                # Call the agent and extract results
+                agent_result = await agent_func(task)
+                result_full = agent_result.final_result
+                # Use summary field if available, otherwise use final_result
+                result_summary = getattr(agent_result, 'summary', agent_result.final_result)
+                error = agent_result.error
 
             print(f"[Orchestrator]   Step {step_idx} completed: {result_summary[:100]}...")
 
@@ -210,7 +246,9 @@ async def execute_dynamic_task(user_request: str) -> TaskResult:
     # Collect final results
     final_results = []
     for execution in agent_executions:
-        if execution.result_summary and not execution.error:
+        if execution.error:
+            final_results.append(f"{execution.agent}: ERROR - {execution.error}")
+        elif execution.result_summary:
             final_results.append(f"{execution.agent}: {execution.result_summary}")
 
     # Combine all results

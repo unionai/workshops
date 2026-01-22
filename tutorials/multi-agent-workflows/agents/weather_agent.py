@@ -48,8 +48,8 @@ env = base_env
 # )
 
 
-@env.task
 @agent("weather")
+@env.task
 async def weather_agent(task: str) -> WeatherAgentResult:
     """
     Weather agent that can get current weather information for locations.

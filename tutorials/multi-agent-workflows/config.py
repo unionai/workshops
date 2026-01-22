@@ -15,7 +15,6 @@ base_env = flyte.TaskEnvironment(
     image=flyte.Image.from_debian_base().with_requirements("requirements.txt"),
     secrets=[
         flyte.Secret(key="SAGE_OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
-        flyte.Secret(key="SAGE_TAVILY_API_KEY", as_env_var="TAVILY_API_KEY"),
     ],
     resources=flyte.Resources(cpu=2, memory="2Gi"),
     reusable=flyte.ReusePolicy(
@@ -30,4 +29,3 @@ base_env = flyte.TaskEnvironment(
 # Local API Keys
 # ----------------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")

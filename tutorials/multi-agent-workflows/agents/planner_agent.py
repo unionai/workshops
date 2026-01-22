@@ -54,8 +54,8 @@ env = base_env
 # )
 
 
-@env.task
 @agent("planner")
+@env.task
 async def planner_agent(user_request: str) -> PlannerDecision:
     """
     Planner agent that analyzes requests and creates execution plans.
@@ -71,8 +71,6 @@ async def planner_agent(user_request: str) -> PlannerDecision:
     # Initialize client inside task for Flyte secret injection
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-    memory_log = []  # No memory persistence for now
-    context = "\n".join([f"- {q} → {r}" for q, r in memory_log[-5:]]) or "No history."
     available_agents = [a for a in agent_registry if a != "planner"]
     agent_list = "\n".join([f"- {a}" for a in available_agents])
 
@@ -81,16 +79,16 @@ You are a routing agent.
 Available agents:
 {agent_list}
 
-Recent memory:
-{context}
-
 Analyze the user's request and decide which agent(s) to use.
 
 DEPENDENCIES: Use 'dependencies' to specify which steps must complete before this step.
 - dependencies is a list of step indices (0-indexed)
 - Empty list [] means the step can run immediately (no dependencies)
 - Steps with no dependencies can run in PARALLEL
-- Steps with dependencies will wait for those steps to complete
+- Steps with dependencies will wait for those steps to complete and receive their results
+
+IMPORTANT: When a step depends on previous steps, the results will be automatically
+provided in the prompt. Write clear task descriptions that reference what to do with those results.
 
 Examples:
 
@@ -101,17 +99,23 @@ INDEPENDENT TASKS (can run in parallel):
   {{"agent": "web_search", "task": "Search for Python tutorials", "dependencies": []}}
 ]}}
 
-DEPENDENT TASKS (step 1 must complete before step 2):
+DEPENDENT TASKS (step 1 uses result from step 0):
 {{"steps": [
   {{"agent": "math", "task": "Calculate 5 times 3", "dependencies": []}},
-  {{"agent": "math", "task": "Add 10 to the previous result", "dependencies": [0]}}
+  {{"agent": "math", "task": "Add 10 to the result from step 0", "dependencies": [0]}}
 ]}}
 
-MIXED (steps 0 and 1 run in parallel, step 2 waits for both):
+CROSS-AGENT DEPENDENCIES (web search then math):
+{{"steps": [
+  {{"agent": "web_search", "task": "Search for USA GDP in 2023", "dependencies": []}},
+  {{"agent": "math", "task": "Calculate 10% of the GDP value from step 0", "dependencies": [0]}}
+]}}
+
+MULTIPLE DEPENDENCIES (step 2 waits for both 0 and 1):
 {{"steps": [
   {{"agent": "math", "task": "Calculate 5 factorial", "dependencies": []}},
   {{"agent": "string", "task": "Count letters in 'test'", "dependencies": []}},
-  {{"agent": "code", "task": "Combine the results", "dependencies": [0, 1]}}
+  {{"agent": "code", "task": "Multiply the factorial from step 0 by the letter count from step 1", "dependencies": [0, 1]}}
 ]}}
 
 IMPORTANT: Always include 'dependencies' field for each step, even if empty [].
@@ -139,8 +143,8 @@ IMPORTANT: Always include 'dependencies' field for each step, even if empty [].
     ]
 
     print(f"[Planner Agent] Plan has {len(steps)} step(s)")
-    for i, step in enumerate(steps, 1):
-        deps_str = f" (depends on: {step.dependencies})" if step.dependencies else " (no dependencies)"
-        print(f"[Planner Agent]   Step {i}: {step.agent} - {step.task}{deps_str}")
+    for i, step in enumerate(steps):
+        deps_str = f" → depends on steps {step.dependencies}" if step.dependencies else " → independent (can run in parallel)"
+        print(f"[Planner Agent]   Step {i}: [{step.agent}] {step.task}{deps_str}")
 
     return PlannerDecision(steps=steps)
