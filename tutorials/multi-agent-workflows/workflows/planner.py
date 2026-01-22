@@ -37,6 +37,60 @@ from utils.decorators import agent_registry
 logger = Logger(path="agent_trace_log.jsonl", verbose=False)
 
 # ----------------------------------
+# Helper Functions
+# ----------------------------------
+
+def build_task_with_context(
+    task: str,
+    dependencies: List[int],
+    completed_results: Dict
+) -> str:
+    """
+    Build a task prompt with context from dependent steps.
+
+    This is how results flow between agents: when a step depends on previous steps,
+    we prepend their results to the task prompt so the agent has the context it needs.
+
+    Args:
+        task: The original task description from the planner
+        dependencies: List of step indices this task depends on
+        completed_results: Dictionary of completed step results
+
+    Returns:
+        If no dependencies: returns task unchanged
+        If has dependencies: returns task with context section prepended
+
+    Example output:
+        ============================================================
+        RESULTS FROM PREVIOUS STEPS:
+        ============================================================
+          - Step 0 (web_search agent): France's GDP is €2.6 trillion
+        ============================================================
+
+        YOUR TASK:
+        Calculate 5% of the GDP from step 0
+    """
+    if not dependencies:
+        return task
+
+    # Build context section with results from dependent steps
+    context_lines = [
+        f"  - Step {dep_idx} ({completed_results[dep_idx].agent} agent): {completed_results[dep_idx].result_summary}"
+        for dep_idx in dependencies
+    ]
+
+    # Format with clear visual separators
+    context_header = "=" * 60 + "\nRESULTS FROM PREVIOUS STEPS:\n" + "=" * 60
+    context_footer = "=" * 60
+
+    return (
+        f"{context_header}\n"
+        f"{chr(10).join(context_lines)}\n"
+        f"{context_footer}\n\n"
+        f"YOUR TASK:\n{task}"
+    )
+
+# ----------------------------------
 # Data Models for Orchestrator
 # ----------------------------------
 
@@ -129,25 +183,12 @@ async def execute_dynamic_task(user_request: str) -> TaskResult:
             print(f"[Orchestrator]   Step {step_idx}: Calling {step.agent} agent...")
             print(f"[Orchestrator]     Task: {step.task}")
 
-            # If this step has dependencies, augment the task with dependency results
-            task = step.task
-            if step.dependencies:
-                dep_results = []
-                for dep_idx in step.dependencies:
-                    dep_exec = completed_results[dep_idx]
-                    dep_results.append(f"  - Step {dep_idx} ({dep_exec.agent} agent): {dep_exec.result_summary}")
+            # Build task with context from dependencies (if any)
+            # This is how results flow between agents - previous results get prepended to the prompt
+            task = build_task_with_context(step.task, step.dependencies, completed_results)
 
-                # Prepend dependency results to the task with clear formatting
-                context_header = "=" * 60 + "\nRESULTS FROM PREVIOUS STEPS:\n" + "=" * 60
-                context_footer = "=" * 60
-                task = (
-                    f"{context_header}\n" +
-                    "\n".join(dep_results) +
-                    f"\n{context_footer}\n\n"
-                    f"YOUR TASK:\n{task}"
-                )
-                print(f"[Orchestrator]     Augmented task with {len(step.dependencies)} dependency result(s)")
-                print(f"[Orchestrator]     Context provided: {[f'Step {i}' for i in step.dependencies]}")
+            if step.dependencies:
+                print(f"[Orchestrator]     Context from steps {step.dependencies} added to task")
 
             # Route to appropriate agent task using agent registry
             # The registry now contains Flyte-wrapped versions thanks to decorator order
