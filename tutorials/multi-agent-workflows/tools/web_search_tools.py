@@ -1,15 +1,15 @@
 from utils.decorators import tool
 from ddgs import DDGS
 import flyte
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 import httpx
 from bs4 import BeautifulSoup
 # from config import TAVILY_API_KEY
 
-# Type aliases for clarity
-SearchResult = Dict[str, str]  # Dict with 'title', 'href', 'body' keys
-WebpageResult = Dict[str, str]  # Dict with 'url', 'title', 'content', 'error' keys
-TavilySearchResult = Dict[str, Any]  # Dict with 'query' (str), 'results' (list), optional 'answer' (str)
+# Type aliases for clarity (Python 3.9+ style)
+SearchResult = dict[str, str]  # Dict with 'title', 'href', 'body' keys
+WebpageResult = dict[str, str]  # Dict with 'url', 'title', 'content', 'error' keys
+TavilySearchResult = dict[str, Any]  # Dict with 'query' (str), 'results' (list), optional 'answer' (str)
 
 # ----------------------------------
 # Tavily Search Tool
@@ -82,7 +82,7 @@ async def duck_duck_go(
     region: str = "us-en",
     safesearch: str = "moderate",
     timelimit: Optional[str] = None
-) -> List[SearchResult]:
+) -> list[SearchResult]:
     """
     Search DuckDuckGo for web results.
 
@@ -97,7 +97,7 @@ async def duck_duck_go(
             Options: "d" (day), "w" (week), "m" (month), "y" (year)
 
     Returns:
-        List[SearchResult]: List of dicts with 'title', 'href', and 'body' keys.
+        list[SearchResult]: List of dicts with 'title', 'href', and 'body' keys.
     """
     ddgs = DDGS()
 

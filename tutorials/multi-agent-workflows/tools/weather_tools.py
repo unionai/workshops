@@ -4,7 +4,7 @@ from utils.decorators import tool
 
 @tool(agent="weather")
 @flyte.trace
-async def get_weather(location: str) -> dict:
+async def get_weather(location: str) -> dict[str, str]:
     """
     Gets the current weather for a given location using the wttr.in API.
     
