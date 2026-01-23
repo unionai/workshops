@@ -11,64 +11,64 @@ SearchResult = dict[str, str]  # Dict with 'title', 'href', 'body' keys
 WebpageResult = dict[str, str]  # Dict with 'url', 'title', 'content', 'error' keys
 TavilySearchResult = dict[str, Any]  # Dict with 'query' (str), 'results' (list), optional 'answer' (str)
 
-# ----------------------------------
-# Tavily Search Tool
-# ----------------------------------
-@tool(agent="web_search")
-@flyte.trace
-async def tavily_search(
-    query: str,
-    max_results: int = 10,
-    include_answer: bool = False,
-    include_raw_content: bool = False,
-    search_depth: str = "basic"
-) -> TavilySearchResult:
-    """
-    Search the web using Tavily for web results.
+# # ----------------------------------
+# # Tavily Search Tool
+# # ----------------------------------
+# @tool(agent="web_search")
+# @flyte.trace
+# async def tavily_search(
+#     query: str,
+#     max_results: int = 10,
+#     include_answer: bool = False,
+#     include_raw_content: bool = False,
+#     search_depth: str = "basic"
+# ) -> TavilySearchResult:
+#     """
+#     Search the web using Tavily for web results.
 
-    Args:
-        query (str): The search query.
-        max_results (int): Maximum number of results to return (default: 10).
-        include_answer (bool): Include AI-generated answer to the query (default: False).
-        include_raw_content (bool): Include raw HTML content (default: False).
-        search_depth (str): Search depth - "basic" or "advanced" (default: "basic").
+#     Args:
+#         query (str): The search query.
+#         max_results (int): Maximum number of results to return (default: 10).
+#         include_answer (bool): Include AI-generated answer to the query (default: False).
+#         include_raw_content (bool): Include raw HTML content (default: False).
+#         search_depth (str): Search depth - "basic" or "advanced" (default: "basic").
 
-    Returns:
-        TavilySearchResult: Dict with 'query' (str), 'results' (list), and 'answer' (str, if requested).
-    """
-    from tavily import TavilyClient
+#     Returns:
+#         TavilySearchResult: Dict with 'query' (str), 'results' (list), and 'answer' (str, if requested).
+#     """
+#     from tavily import TavilyClient
 
-    tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-    response = tavily_client.search(
-        query=query,
-        max_results=max_results,
-        include_answer=include_answer,
-        include_raw_content=include_raw_content,
-        search_depth=search_depth
-    )
+#     tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+#     response = tavily_client.search(
+#         query=query,
+#         max_results=max_results,
+#         include_answer=include_answer,
+#         include_raw_content=include_raw_content,
+#         search_depth=search_depth
+#     )
 
-    search_results = []
-    for result in response.get("results", []):
-        search_results.append({
-            "title": result.get("title", ""),
-            "href": result.get("url", ""),
-            "body": result.get("content", "")
-        })
+#     search_results = []
+#     for result in response.get("results", []):
+#         search_results.append({
+#             "title": result.get("title", ""),
+#             "href": result.get("url", ""),
+#             "body": result.get("content", "")
+#         })
 
-    result_dict = {
-        "query": query,
-        "results": search_results
-    }
+#     result_dict = {
+#         "query": query,
+#         "results": search_results
+#     }
 
-    # Add answer if requested
-    if include_answer and "answer" in response:
-        result_dict["answer"] = response["answer"]
+#     # Add answer if requested
+#     if include_answer and "answer" in response:
+#         result_dict["answer"] = response["answer"]
 
-    print(f"[Tavily] Found {len(search_results)} results for: {query}")
-    if include_answer and "answer" in result_dict:
-        print(f"[Tavily] Answer: {result_dict['answer'][:100]}...")
+#     print(f"[Tavily] Found {len(search_results)} results for: {query}")
+#     if include_answer and "answer" in result_dict:
+#         print(f"[Tavily] Answer: {result_dict['answer'][:100]}...")
 
-    return result_dict
+#     return result_dict
 
 
 # ----------------------------------
