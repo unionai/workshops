@@ -128,14 +128,16 @@ env = base_env
 # ----------------------------------
 
 @env.task
-async def execute_dynamic_task(user_request: str) -> TaskResult:
+async def planner_agent_workflow(user_request: str) -> TaskResult:
     """
-    Execute a task dynamically by first asking the planner which agent(s) to use.
-    This is the main orchestration task that calls other agent tasks with
-    dependency-aware parallelism (independent steps run in parallel).
+    Planner-based multi-agent workflow with dynamic routing and parallel execution.
+
+    This workflow uses a planner agent to analyze the request and create an execution
+    plan with dependencies, then orchestrates specialist agents accordingly. Steps
+    with no dependencies run in parallel (fanout pattern).
 
     Args:
-        user_request (str): The user's request
+        user_request: The user's request to fulfill
 
     Returns:
         TaskResult: Combined result from all agent executions
@@ -298,11 +300,11 @@ if __name__ == "__main__":
         print("Running workflow REMOTELY with flyte.init_from_config()")
         flyte.init_from_config(".flyte/config.yaml")
 
-    print(f"\n=== Dynamic Multi-Agent Workflow ===")
+    print(f"\n=== Planner Agent Workflow ===")
     print(f"Request: {args.request}\n")
 
     execution = flyte.run(
-        execute_dynamic_task,
+        planner_agent_workflow,
         user_request=args.request
     )
 
