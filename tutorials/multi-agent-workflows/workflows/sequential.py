@@ -1,0 +1,331 @@
+"""
+Sequential workflow - predefined agent pipeline execution.
+
+This workflow implements a static sequential pattern where agents are called
+in a predetermined order with results passed from one to the next.
+
+Unlike dynamic patterns (planner, ReAct, reflection), this uses no LLM planning -
+just executes agents in the exact sequence you define. This is:
+- Simpler and more predictable
+- Faster (no planning overhead)
+- Cheaper (fewer LLM calls)
+- Perfect for known workflows like write → review → edit
+
+Usage:
+    python -m workflows.sequential --local --pipeline write-review-edit --input "Write a poem about AI"
+"""
+
+import sys
+from pathlib import Path
+from typing import List, Dict
+from dataclasses import dataclass
+import flyte
+
+# Add workflows directory to Python path for imports
+workflows_dir = Path(__file__).parent
+sys.path.insert(0, str(workflows_dir))
+
+# Import agents (imports register them in agent_registry via decorators)
+from agents.math_agent import math_agent
+from agents.string_agent import string_agent
+from agents.web_search_agent import web_search_agent
+from agents.code_agent import code_agent
+from agents.weather_agent import weather_agent
+from config import base_env
+from utils.logger import Logger
+from utils.decorators import agent_registry
+
+# Initialize logger
+logger = Logger(path="sequential_trace_log.jsonl", verbose=False)
+
+# ----------------------------------
+# Data Models
+# ----------------------------------
+
+@dataclass
+class PipelineStep:
+    """Single step in the pipeline"""
+    step_number: int
+    agent: str
+    task_template: str  # Can use {input} or {previous} placeholders
+    actual_task: str    # Task after placeholder substitution
+    result: str
+    error: str = ""
+
+@dataclass
+class SequentialResult:
+    """Final result from sequential workflow"""
+    pipeline_name: str
+    initial_input: str
+    steps: List[PipelineStep]
+    final_result: str
+    total_steps: int
+    success: bool
+
+# ----------------------------------
+# Pipeline Definitions
+# ----------------------------------
+
+PIPELINES = {
+    "write-review-edit": [
+        {"agent": "code", "task": "Write Python code for: {input}"},
+        {"agent": "string", "task": "Review this code and count how many lines: {previous}"},
+        {"agent": "code", "task": "Add docstrings to this code: {previous_0}"}
+    ],
+    "search-summarize": [
+        {"agent": "web_search", "task": "Search for: {input}"},
+        {"agent": "string", "task": "Count words in this search result: {previous}"}
+    ],
+    "calculate-explain": [
+        {"agent": "math", "task": "{input}"},
+        {"agent": "string", "task": "Analyze this number and describe it: {previous}"}
+    ],
+    "weather-analyze": [
+        {"agent": "weather", "task": "Get weather for: {input}"},
+        {"agent": "string", "task": "Count the words in this weather report: {previous}"}
+    ],
+    "multi-calc": [
+        {"agent": "math", "task": "Calculate: {input}"},
+        {"agent": "math", "task": "Multiply the previous result by 2: {previous}"},
+        {"agent": "math", "task": "Add 10 to the previous result: {previous}"}
+    ]
+}
+
+# ----------------------------------
+# Helper Functions
+# ----------------------------------
+
+def substitute_placeholders(
+    task_template: str,
+    user_input: str,
+    previous_results: List[str]
+) -> str:
+    """
+    Substitute placeholders in task template.
+
+    Placeholders:
+        {input} - Original user input
+        {previous} - Result from immediately previous step
+        {previous_0}, {previous_1}, etc. - Result from specific step index
+
+    Args:
+        task_template: Template with placeholders
+        user_input: Original user input
+        previous_results: List of results from all previous steps
+
+    Returns:
+        Task string with placeholders replaced
+    """
+    task = task_template
+
+    # Substitute {input}
+    task = task.replace("{input}", user_input)
+
+    # Substitute {previous} - most recent result
+    if previous_results and "{previous}" in task:
+        task = task.replace("{previous}", str(previous_results[-1]))
+
+    # Substitute {previous_N} - specific step result
+    for i, result in enumerate(previous_results):
+        placeholder = f"{{previous_{i}}}"
+        if placeholder in task:
+            task = task.replace(placeholder, str(result))
+
+    return task
+
+# ----------------------------------
+# Sequential Orchestrator
+# ----------------------------------
+
+env = base_env
+
+@env.task
+async def sequential_workflow(
+    user_input: str,
+    pipeline_name: str = "write-review-edit"
+) -> SequentialResult:
+    """
+    Sequential workflow that executes agents in a predefined order.
+
+    Args:
+        user_input: The user's input/request
+        pipeline_name: Name of the pipeline to execute (see PIPELINES dict)
+
+    Returns:
+        SequentialResult: Complete execution trace and final result
+    """
+    print("=" * 80)
+    print(f"SEQUENTIAL WORKFLOW - Pipeline: {pipeline_name}")
+    print(f"Input: {user_input}")
+    print("=" * 80)
+
+    # Get pipeline definition
+    if pipeline_name not in PIPELINES:
+        available = list(PIPELINES.keys())
+        raise ValueError(
+            f"Unknown pipeline '{pipeline_name}'. "
+            f"Available pipelines: {available}"
+        )
+
+    pipeline_definition = PIPELINES[pipeline_name]
+    print(f"\n[Sequential] Pipeline has {len(pipeline_definition)} step(s)")
+
+    # Display pipeline
+    for i, step_def in enumerate(pipeline_definition):
+        print(f"  Step {i}: {step_def['agent']} - {step_def['task'][:60]}...")
+
+    # Execute pipeline sequentially
+    steps = []
+    previous_results = []
+    success = True
+
+    for step_num, step_def in enumerate(pipeline_definition):
+        print(f"\n{'='*80}")
+        print(f"STEP {step_num}")
+        print(f"{'='*80}")
+
+        agent_name = step_def["agent"]
+        task_template = step_def["task"]
+
+        # Substitute placeholders
+        actual_task = substitute_placeholders(task_template, user_input, previous_results)
+
+        print(f"\n[Sequential] Agent: {agent_name}")
+        print(f"[Sequential] Task: {actual_task[:200]}...")
+
+        # Route to appropriate agent using agent registry
+        agent_func = agent_registry.get(agent_name)
+        if not agent_func:
+            error_msg = f"Unknown agent: {agent_name}"
+            print(f"[Sequential] ERROR: {error_msg}")
+
+            # Record failed step
+            steps.append(PipelineStep(
+                step_number=step_num,
+                agent=agent_name,
+                task_template=task_template,
+                actual_task=actual_task,
+                result="",
+                error=error_msg
+            ))
+
+            success = False
+            break
+
+        # Execute agent
+        try:
+            result = await agent_func(actual_task)
+            # Use summary field if available, otherwise use final_result
+            output = getattr(result, 'summary', result.final_result)
+            error_msg = ""
+
+            print(f"[Sequential] Result: {str(output)[:200]}...")
+
+        except Exception as e:
+            output = ""
+            error_msg = str(e)
+            success = False
+            print(f"[Sequential] ERROR: {error_msg}")
+
+        # Record step
+        step_record = PipelineStep(
+            step_number=step_num,
+            agent=agent_name,
+            task_template=task_template,
+            actual_task=actual_task,
+            result=str(output),
+            error=error_msg
+        )
+        steps.append(step_record)
+        previous_results.append(output)
+
+        # Log to file
+        await logger.log(
+            step=step_num,
+            agent=agent_name,
+            task_template=task_template,
+            actual_task=actual_task,
+            result=str(output)[:500],  # Truncate for logging
+            error=error_msg
+        )
+
+        # Stop if step failed
+        if error_msg:
+            break
+
+    # Get final result
+    final_result = previous_results[-1] if previous_results else "No result"
+
+    print(f"\n{'='*80}")
+    print(f"WORKFLOW COMPLETE")
+    print(f"Steps executed: {len(steps)}, Success: {success}")
+    print(f"Final result: {str(final_result)[:200]}...")
+    print(f"{'='*80}")
+
+    return SequentialResult(
+        pipeline_name=pipeline_name,
+        initial_input=user_input,
+        steps=steps,
+        final_result=str(final_result),
+        total_steps=len(steps),
+        success=success
+    )
+
+
+# ----------------------------------
+# CLI Entry Point
+# ----------------------------------
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Sequential workflow with predefined agent pipelines",
+        epilog=f"Available pipelines: {', '.join(PIPELINES.keys())}\n\n"
+               "Example: python -m workflows.sequential --local --pipeline calculate-explain --input 'Calculate 5 factorial'"
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Run workflow locally using flyte.init() instead of remote execution"
+    )
+    parser.add_argument(
+        "--input",
+        type=str,
+        required=True,
+        help="Your input/request"
+    )
+    parser.add_argument(
+        "--pipeline",
+        type=str,
+        default="write-review-edit",
+        choices=list(PIPELINES.keys()),
+        help=f"Pipeline to execute (default: write-review-edit)"
+    )
+
+    args = parser.parse_args()
+
+    # Initialize Flyte based on local/remote flag
+    if args.local:
+        print("Running workflow LOCALLY with flyte.init()")
+        flyte.init()
+    else:
+        print("Running workflow REMOTELY with flyte.init_from_config()")
+        flyte.init_from_config(".flyte/config.yaml")
+
+    print(f"\n=== Sequential Multi-Agent Workflow ===")
+    print(f"Pipeline: {args.pipeline}")
+    print(f"Input: {args.input}\n")
+
+    # Execute the workflow
+    execution = flyte.run(
+        sequential_workflow,
+        user_input=args.input,
+        pipeline_name=args.pipeline
+    )
+
+    print(f"\n{'='*80}")
+    print(f"Execution: {execution.name}")
+    print(f"URL: {execution.url}")
+    print("Click the link above to view execution details in the Flyte UI")
+    print(f"{'='*80}\n")
