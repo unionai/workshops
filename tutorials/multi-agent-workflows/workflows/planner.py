@@ -144,20 +144,34 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
     """
     print(f"[Orchestrator] User request: {user_request}")
 
-    # Step 1: Call planner task to create execution plan
+    # ----------------------------------
+    # PHASE 1: Planning - Generate Execution Plan
+    # ----------------------------------
+    # Planner agent analyzes request and creates DAG (directed acyclic graph) of agent steps
     print("[Orchestrator] Step 1: Calling planner agent...")
     planner_decision = await planner_agent(user_request)
     print(f"[Orchestrator] Planner created plan with {len(planner_decision.steps)} step(s)")
 
-    # Step 2: Execute agent tasks with dependency-aware parallelism
-    # Store completed results indexed by step number
+    # ----------------------------------
+    # PHASE 2: Execution - Dependency-Aware Parallel Orchestration
+    # ----------------------------------
+    # Execute steps in waves: all independent steps run in parallel, dependent steps wait
+
+    # Store completed results indexed by step number (enables dependency lookup)
     completed_results: Dict[int, AgentExecution] = {}
 
-    # Track which steps are ready to execute (no pending dependencies)
+    # Track which steps still need execution
     pending_steps = list(enumerate(planner_decision.steps))
 
+    # ----------------------------------
+    # Main Orchestration Loop
+    # ----------------------------------
+    # Continue until all steps complete or circular dependency detected
     while pending_steps:
-        # Find all steps that can execute now (dependencies satisfied)
+        # ----------------------------------
+        # Identify Ready Steps (Dependencies Satisfied)
+        # ----------------------------------
+        # Partition pending steps into: ready to execute vs waiting on dependencies
         ready_steps = []
         remaining_steps = []
 
@@ -170,28 +184,36 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
             else:
                 remaining_steps.append((step_idx, step))
 
+        # Circular dependency detection
         if not ready_steps:
-            # This shouldn't happen with valid dependency graphs, but handle it gracefully
             print("[Orchestrator] ERROR: No steps ready to execute, but pending steps remain (circular dependency?)")
             break
 
         print(f"[Orchestrator] Executing {len(ready_steps)} step(s) in parallel...")
 
-        # Execute all ready steps in parallel
+        # ----------------------------------
+        # Parallel Step Execution
+        # ----------------------------------
+        # Define nested async function to execute a single step (enables parallel gather)
         async def execute_step(step_idx: int, step: AgentStep) -> tuple:
-            """Execute a single agent step"""
+            """Execute a single agent step with context injection"""
             print(f"[Orchestrator]   Step {step_idx}: Calling {step.agent} agent...")
             print(f"[Orchestrator]     Task: {step.task}")
 
-            # Build task with context from dependencies (if any)
-            # This is how results flow between agents - previous results get prepended to the prompt
+            # ----------------------------------
+            # Context Injection - How Results Flow Between Agents
+            # ----------------------------------
+            # If this step depends on previous steps, inject their results into the task prompt
+            # Example: "Step 0 result: 120\nStep 1 result: Factorial...\n\nYOUR TASK: Add these"
             task = build_task_with_context(step.task, step.dependencies, completed_results)
 
             if step.dependencies:
                 print(f"[Orchestrator]     Context from steps {step.dependencies} added to task")
 
-            # Route to appropriate agent task using agent registry
-            # The registry now contains Flyte-wrapped versions thanks to decorator order
+            # ----------------------------------
+            # Dynamic Agent Routing
+            # ----------------------------------
+            # Look up agent function from registry (populated at import time via decorators)
             agent_func = agent_registry.get(step.agent)
             if not agent_func:
                 # Unknown agent - the planner hallucinated or requested invalid agent
@@ -200,16 +222,16 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
                 result_summary = ""
                 error = f"Unknown agent: {step.agent}"
             else:
-                # Call the agent and extract results
+                # Execute the agent with the (potentially context-enriched) task
                 agent_result = await agent_func(task)
                 result_full = agent_result.final_result
-                # Use summary field if available, otherwise use final_result
+                # Use summary field if available (e.g., web_search), otherwise use final_result
                 result_summary = getattr(agent_result, 'summary', agent_result.final_result)
                 error = agent_result.error
 
             print(f"[Orchestrator]   Step {step_idx} completed: {result_summary[:100]}...")
 
-            # Log to trace file
+            # Persist execution details to log file for debugging and analysis
             await logger.log(
                 step_idx=step_idx,
                 agent=step.agent,
@@ -222,6 +244,7 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
                 dependencies=step.dependencies
             )
 
+            # Return tuple: (step_idx, execution_result) for results collection
             return step_idx, AgentExecution(
                 agent=step.agent,
                 task=step.task,
@@ -230,20 +253,37 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
                 error=error
             )
 
-        # Execute all ready steps concurrently
+        # ----------------------------------
+        # Execute All Ready Steps Concurrently
+        # ----------------------------------
+        # asyncio.gather runs all ready steps in parallel (fanout pattern)
+        # This is where the speedup comes from: independent steps don't wait for each other
         results = await asyncio.gather(*[execute_step(idx, step) for idx, step in ready_steps])
 
-        # Store completed results
+        # ----------------------------------
+        # Store Completed Results
+        # ----------------------------------
+        # Index by step number so dependent steps can look up results
         for step_idx, execution in results:
             completed_results[step_idx] = execution
 
-        # Update pending steps
+        # Update pending steps list (remove completed, keep waiting)
         pending_steps = remaining_steps
 
-    # Convert to list in original order
+    # ----------------------------------
+    # PHASE 3: Results Collection and Synthesis
+    # ----------------------------------
+
+    # ----------------------------------
+    # Reconstruct Execution Order
+    # ----------------------------------
+    # Convert dict back to list in original plan order for result presentation
     agent_executions = [completed_results[i] for i in range(len(planner_decision.steps))]
 
-    # Collect final results
+    # ----------------------------------
+    # Aggregate Results from All Agents
+    # ----------------------------------
+    # Collect summaries from each step, handling errors gracefully
     final_results = []
     for execution in agent_executions:
         if execution.error:
@@ -251,19 +291,23 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
         elif execution.result_summary:
             final_results.append(f"{execution.agent}: {execution.result_summary}")
 
-    # Combine all results
+    # Combine all agent outputs into single result string
     combined_result = " | ".join(final_results) if final_results else "No results"
     print(f"[Orchestrator] All agents completed. Combined result: {combined_result}")
 
-    # Create summary of planner decision
+    # Create human-readable summary of what was executed
     planner_summary = f"{len(planner_decision.steps)} step(s): " + ", ".join(
         [f"{s.agent}" for s in planner_decision.steps]
     )
 
+    # ----------------------------------
+    # Return Complete Execution Trace
+    # ----------------------------------
+    # Package plan summary, individual executions, and final result
     return TaskResult(
-        planner_decision_summary=planner_summary,
-        agent_executions=agent_executions,
-        final_result=combined_result
+        planner_decision_summary=planner_summary,  # "3 step(s): math, string, code"
+        agent_executions=agent_executions,         # Full per-step execution details
+        final_result=combined_result               # Aggregated final answer
     )
 
 
