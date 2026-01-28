@@ -99,14 +99,20 @@ async def debate_workflow(
     print(f"Participants: {agent_names}, Debate rounds: {num_debate_rounds}")
     print("=" * 80)
 
-    # Initialize OpenAI client for judge/synthesis
+    # ----------------------------------
+    # Initialization
+    # ----------------------------------
+    # Set up LLM client for debate facilitation and final synthesis
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-    # Default to 3 math agents if not specified
+    # Default configuration: 3 agents (can be same type for diversity via randomness)
     if not agent_names:
         agent_names = ["math", "math", "code"]
 
-    # Validate agents exist
+    # ----------------------------------
+    # Validate Participating Agents
+    # ----------------------------------
+    # Ensure all requested agents exist in registry
     for agent_name in agent_names:
         if agent_name not in agent_registry:
             available = list(agent_registry.keys())
@@ -118,14 +124,21 @@ async def debate_workflow(
     num_agents = len(agent_names)
     print(f"\n[Debate] {num_agents} agents will participate")
 
-    # Round 0: Initial responses (parallel)
+    # ----------------------------------
+    # ROUND 0: Independent Initial Responses
+    # ----------------------------------
+    # All agents solve the same task in parallel WITHOUT seeing each other's work
+    # This prevents groupthink and ensures diverse initial perspectives
     print(f"\n{'='*80}")
     print(f"ROUND 0 - INITIAL RESPONSES")
     print(f"{'='*80}")
     print(f"\n[Debate] All agents solving task in parallel...")
 
+    # ----------------------------------
+    # Collect Initial Responses in Parallel
+    # ----------------------------------
     async def get_initial_response(agent_name: str, agent_id: str) -> AgentResponse:
-        """Get initial response from an agent"""
+        """Execute single agent to get their independent initial response"""
         agent_func = agent_registry[agent_name]
         result = await agent_func(user_task)
         response_text = getattr(result, 'summary', result.final_result)
@@ -138,38 +151,50 @@ async def debate_workflow(
             response=str(response_text)
         )
 
-    # Create agent IDs like "math_0", "math_1", "code_2"
+    # Create unique IDs for tracking (e.g., "math_0", "math_1", "code_2")
     agent_ids = [f"{agent_names[i]}_{i}" for i in range(num_agents)]
 
+    # Execute all agents in parallel - no coordination, pure independent thinking
     initial_responses = await asyncio.gather(*[
         get_initial_response(agent_names[i], agent_ids[i])
         for i in range(num_agents)
     ])
 
-    # Store initial round
+    # ----------------------------------
+    # Record Round 0 (Initial Responses)
+    # ----------------------------------
     initial_round = DebateRound(
         round_number=0,
         responses=initial_responses,
-        critiques=[]
+        critiques=[]  # No critiques in round 0
     )
 
-    # Log initial round
     await logger.log(
         round=0,
         phase="initial_responses",
         num_responses=len(initial_responses)
     )
 
-    # Debate rounds
+    # ----------------------------------
+    # Setup for Debate Rounds
+    # ----------------------------------
+    # Track all debate rounds and maintain current responses for next iteration
     debate_rounds = []
     current_responses = initial_responses
 
+    # ----------------------------------
+    # ROUNDS 1-N: Iterative Debate and Refinement
+    # ----------------------------------
+    # Each round: agents see all responses → critique others → refine their own
     for round_num in range(1, num_debate_rounds + 1):
         print(f"\n{'='*80}")
         print(f"ROUND {round_num} - DEBATE & REFINEMENT")
         print(f"{'='*80}")
 
-        # Build context showing all current responses
+        # ----------------------------------
+        # Build Shared Context for All Agents
+        # ----------------------------------
+        # Each agent sees ALL responses (including their own) from previous round
         responses_context = "\n\n".join([
             f"{resp.agent_id} ({resp.agent_type}) says:\n{resp.response}"
             for resp in current_responses
@@ -177,10 +202,20 @@ async def debate_workflow(
 
         print(f"\n[Debate] Agents reviewing each other's responses...")
 
+        # ----------------------------------
+        # Critique and Refinement Phase
+        # ----------------------------------
         async def debate_response(agent_name: str, agent_id: str, my_response: str) -> tuple:
-            """Agent critiques others and refines their own response"""
+            """
+            Single agent critiques peer responses and refines their own answer.
 
-            # Show this agent all responses including their own
+            Returns: (critique_text, refined_response_with_confidence)
+            """
+
+            # ----------------------------------
+            # Peer Review Prompt
+            # ----------------------------------
+            # Agent sees all responses and must critique others + refine their own
             debate_prompt = f"""You are participating in a multi-agent debate to solve this task:
 
 TASK: {user_task}
@@ -211,7 +246,10 @@ Respond in JSON format:
 
             raw_response = response.choices[0].message.content
 
-            # Parse JSON response
+            # ----------------------------------
+            # Parse Critique and Refined Response
+            # ----------------------------------
+            # Robust JSON extraction with fallback handling
             try:
                 data = json.loads(raw_response)
             except json.JSONDecodeError:
@@ -226,51 +264,63 @@ Respond in JSON format:
                     if json_match:
                         data = json.loads(json_match.group(0))
                     else:
-                        # Fallback
+                        # Fallback: keep original response if parsing fails
                         data = {
                             "critique": "Could not parse critique",
                             "refined_response": my_response,
                             "confidence": 5
                         }
 
+            # Extract structured feedback from agent
             critique = data.get("critique", "")
             refined = data.get("refined_response", my_response)
-            confidence = data.get("confidence", 5)
+            confidence = data.get("confidence", 5)  # Self-reported confidence (1-10)
 
             print(f"[Debate] {agent_id} refined their response (confidence: {confidence}/10)")
 
             return (
-                critique,
+                critique,  # Agent's critique of other responses
                 AgentResponse(
                     agent_id=agent_id,
                     agent_type=agent_name,
-                    response=refined,
-                    confidence=confidence
+                    response=refined,        # Improved response after seeing peers
+                    confidence=confidence    # Used later for voting synthesis
                 )
             )
 
-        # All agents debate in parallel
+        # ----------------------------------
+        # Execute All Critiques in Parallel
+        # ----------------------------------
+        # All agents critique and refine simultaneously (no sequential bias)
         debate_results = await asyncio.gather(*[
             debate_response(agent_names[i], agent_ids[i], current_responses[i].response)
             for i in range(num_agents)
         ])
 
-        # Unpack results
+        # ----------------------------------
+        # Unpack Debate Results
+        # ----------------------------------
+        # Separate critiques from refined responses
         critiques = [critique for critique, _ in debate_results]
         refined_responses = [response for _, response in debate_results]
 
-        # Store this debate round
+        # ----------------------------------
+        # Record This Debate Round
+        # ----------------------------------
         round_data = DebateRound(
             round_number=round_num,
-            responses=refined_responses,
-            critiques=critiques
+            responses=refined_responses,  # Responses AFTER refinement
+            critiques=critiques           # What each agent said about others
         )
         debate_rounds.append(round_data)
 
-        # Update current responses for next round
+        # ----------------------------------
+        # Update for Next Round
+        # ----------------------------------
+        # Refined responses become the current responses for next iteration
         current_responses = refined_responses
 
-        # Log round
+        # Persist to log file
         await logger.log(
             round=round_num,
             phase="debate",
@@ -278,24 +328,37 @@ Respond in JSON format:
             avg_confidence=sum(r.confidence for r in refined_responses) / len(refined_responses)
         )
 
-    # Final synthesis
+    # ----------------------------------
+    # FINAL SYNTHESIS: Reach Consensus
+    # ----------------------------------
+    # After all debate rounds, synthesize final answer from all perspectives
     print(f"\n{'='*80}")
     print(f"FINAL SYNTHESIS")
     print(f"{'='*80}")
 
+    # Collect all final responses with confidence scores
     final_responses_text = "\n\n".join([
         f"{resp.agent_id} ({resp.agent_type}) - Confidence: {resp.confidence}/10\n{resp.response}"
         for resp in current_responses
     ])
 
+    # ----------------------------------
+    # Synthesis Method: Vote vs Judge
+    # ----------------------------------
     if synthesis_method == "vote":
-        # Simple voting: highest confidence wins
+        # ----------------------------------
+        # VOTING: Highest Confidence Wins
+        # ----------------------------------
+        # Simple democratic approach - agent with highest self-confidence wins
         winner = max(current_responses, key=lambda r: r.confidence)
         final_synthesis = f"Winner by confidence vote: {winner.agent_id}\n\n{winner.response}"
         print(f"[Debate] Synthesis method: voting")
         print(f"[Debate] Winner: {winner.agent_id} with confidence {winner.confidence}/10")
     else:
-        # Judge synthesis: LLM combines best parts
+        # ----------------------------------
+        # JUDGE: LLM Synthesizes Best Parts
+        # ----------------------------------
+        # Meta-agent combines strongest points from all responses
         judge_prompt = f"""You are a judge synthesizing the final answer from a multi-agent debate.
 
 Original task: {user_task}
@@ -322,9 +385,12 @@ Provide only the final synthesized answer, no meta-commentary."""
 
     print(f"\n📊 Final answer: {final_synthesis[:200]}...")
 
-    # Check for consensus (all agents have high confidence)
+    # ----------------------------------
+    # Consensus Detection
+    # ----------------------------------
+    # Check if agents converged to similar conclusions (high avg confidence)
     avg_confidence = sum(r.confidence for r in current_responses) / len(current_responses)
-    consensus_achieved = avg_confidence >= 7
+    consensus_achieved = avg_confidence >= 7  # Threshold: 7/10 average confidence
 
     print(f"\n{'='*80}")
     print(f"WORKFLOW COMPLETE")
@@ -332,14 +398,18 @@ Provide only the final synthesized answer, no meta-commentary."""
     print(f"Consensus achieved: {consensus_achieved}")
     print(f"{'='*80}")
 
+    # ----------------------------------
+    # Return Complete Debate Trace
+    # ----------------------------------
+    # Package initial round, all debate rounds, synthesis, and consensus info
     return DebateResult(
         task=user_task,
-        participating_agents=agent_names,
-        initial_round=initial_round,
-        debate_rounds=debate_rounds,
-        final_synthesis=final_synthesis,
-        total_rounds=num_debate_rounds + 1,
-        consensus_achieved=consensus_achieved
+        participating_agents=agent_names,        # Which agents participated
+        initial_round=initial_round,             # Round 0: independent responses
+        debate_rounds=debate_rounds,             # Rounds 1-N: critique + refinement
+        final_synthesis=final_synthesis,         # Final answer (via vote or judge)
+        total_rounds=num_debate_rounds + 1,      # +1 for initial round
+        consensus_achieved=consensus_achieved    # True if high avg confidence
     )
 
 
