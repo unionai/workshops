@@ -111,12 +111,19 @@ async def manager_workflow(
     print(f"Quality threshold: {quality_threshold}/10")
     print("=" * 80)
 
-    # Initialize OpenAI client for manager agent
+    # ----------------------------------
+    # Initialization
+    # ----------------------------------
+    # Set up LLM client for manager agent (planning, reviewing, synthesis)
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
+    # Available specialist workers that manager can delegate to
     available_workers = ["math", "string", "web_search", "code", "weather"]
 
-    # Step 1: Manager analyzes and creates delegation plan
+    # ----------------------------------
+    # PHASE 1: Manager Creates Delegation Plan
+    # ----------------------------------
+    # Manager analyzes project and breaks it into worker tasks with dependencies
     print(f"\n{'='*80}")
     print(f"PHASE 1 - MANAGER PLANNING")
     print(f"{'='*80}")
@@ -194,7 +201,10 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
         num_tasks=len(delegation_plan)
     )
 
-    # Step 2: Execute tasks with manager supervision
+    # ----------------------------------
+    # PHASE 2: Supervised Execution with Quality Gates
+    # ----------------------------------
+    # Manager delegates tasks to workers, reviews outputs, and requests revisions if needed
     print(f"\n{'='*80}")
     print(f"PHASE 2 - SUPERVISED EXECUTION")
     print(f"{'='*80}")
@@ -202,11 +212,17 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
     worker_results = []
     completed_tasks = {}  # task_id -> result
 
-    # Execute tasks respecting dependencies
+    # ----------------------------------
+    # Dependency-Aware Execution Loop
+    # ----------------------------------
+    # Execute tasks respecting dependencies (similar to planner workflow)
     pending_tasks = list(delegation_plan)
 
     while pending_tasks:
-        # Find tasks ready to execute (dependencies met)
+        # ----------------------------------
+        # Identify Ready Tasks (Dependencies Satisfied)
+        # ----------------------------------
+        # Partition pending tasks into: ready to execute vs waiting on dependencies
         ready_tasks = []
         remaining_tasks = []
 
@@ -217,16 +233,23 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
             else:
                 remaining_tasks.append(task)
 
+        # Circular dependency detection
         if not ready_tasks:
             print("[Manager] ERROR: No tasks ready but pending tasks remain (circular dependency?)")
             break
 
-        # Execute ready tasks (could parallelize but we'll do sequential for manager review)
+        # ----------------------------------
+        # Worker Delegation with Manager Supervision
+        # ----------------------------------
+        # Execute ready tasks sequentially (manager reviews each output before delegating next)
         for task in ready_tasks:
             print(f"\n[Manager] Delegating Task {task.task_id} to {task.agent} worker...")
             print(f"[Manager] Task: {task.description}")
 
-            # Build context from dependencies
+            # ----------------------------------
+            # Context Injection - How Results Flow to Workers
+            # ----------------------------------
+            # If this task depends on previous tasks, inject their results into the prompt
             context = ""
             if task.dependencies:
                 context = "\n\nContext from previous tasks:\n"
@@ -235,9 +258,13 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
 
             worker_task = task.description + context
 
-            # Get worker agent
+            # ----------------------------------
+            # Dynamic Worker Routing
+            # ----------------------------------
+            # Look up worker agent from registry (populated at import time via decorators)
             worker_func = agent_registry.get(task.agent)
             if not worker_func:
+                # Unknown worker - the manager hallucinated or requested invalid agent
                 print(f"[Manager] ERROR: Unknown worker '{task.agent}'")
                 worker_results.append(WorkerResult(
                     task_id=task.task_id,
@@ -256,18 +283,31 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
                 completed_tasks[task.task_id] = ""
                 continue
 
-            # Worker executes task
+            # ----------------------------------
+            # Worker Executes Initial Task
+            # ----------------------------------
+            # Worker produces first-pass response (may require revision based on manager feedback)
             result = await worker_func(worker_task)
             current_output = getattr(result, 'summary', result.final_result)
             initial_output = str(current_output)
 
             print(f"[Worker {task.agent}] Completed initial output: {str(current_output)[:150]}...")
 
-            # Manager reviews and potentially requests revisions
+            # ----------------------------------
+            # Manager Review and Revision Cycle
+            # ----------------------------------
+            # Manager evaluates quality and requests improvements until approval or max revisions
             revisions_history = []
 
+            # ----------------------------------
+            # Iterative Review Loop
+            # ----------------------------------
+            # Manager reviews output → Worker revises → Repeat until quality threshold met
             for revision_num in range(max_revisions_per_task + 1):
-                # Manager reviews worker output
+                # ----------------------------------
+                # Manager Quality Assessment
+                # ----------------------------------
+                # Manager evaluates worker output on quality score (1-10) and identifies issues
                 review_prompt = f"""You are a manager reviewing a worker's output.
 
 Original task: {task.description}
@@ -297,7 +337,10 @@ Respond in JSON format:
 
                 raw_review = review_response.choices[0].message.content
 
-                # Parse review
+                # ----------------------------------
+                # Parse Manager's Quality Assessment
+                # ----------------------------------
+                # Robust JSON extraction handles markdown wrapping
                 try:
                     review_data = json.loads(raw_review)
                 except json.JSONDecodeError:
@@ -329,14 +372,22 @@ Respond in JSON format:
                 if review.issues:
                     print(f"[Manager] Issues found: {', '.join(review.issues)}")
 
+                # ----------------------------------
+                # Approval Decision - Check Quality Threshold
+                # ----------------------------------
+                # If quality meets threshold, accept output and move to next task
                 if review.approved:
                     print(f"[Manager] ✅ APPROVED - Task {task.task_id} meets quality standards")
                     break
                 elif revision_num < max_revisions_per_task:
+                    # ----------------------------------
+                    # Revision Request - Worker Improves Output
+                    # ----------------------------------
+                    # Manager provides specific feedback; worker produces revised output
                     print(f"[Manager] ❌ NEEDS REVISION - Requesting improvements...")
                     print(f"[Manager] Feedback: {review.feedback}")
 
-                    # Request revision from worker
+                    # Build revision task with original task + previous output + manager feedback
                     revision_task = f"""Original task: {task.description}
 
 Your previous output:
@@ -353,11 +404,18 @@ Please revise your output to address the manager's feedback."""
 
                     print(f"[Worker {task.agent}] Submitted revision: {str(current_output)[:150]}...")
                 else:
+                    # ----------------------------------
+                    # Max Revisions Reached - Accept Current Output
+                    # ----------------------------------
+                    # After max revision cycles, accept output even if below quality threshold
                     print(f"[Manager] ⚠️  Max revisions reached - accepting current output")
                     review.approved = True  # Accept despite issues
                     break
 
-            # Store worker result
+            # ----------------------------------
+            # Record Worker Result
+            # ----------------------------------
+            # Store complete execution history: initial output, final output, all revisions, and review
             worker_result = WorkerResult(
                 task_id=task.task_id,
                 agent=task.agent,
@@ -379,18 +437,30 @@ Please revise your output to address the manager's feedback."""
                 approved=review.approved
             )
 
+        # Update pending tasks list (remove completed, keep waiting)
         pending_tasks = remaining_tasks
 
-    # Step 3: Manager synthesizes final deliverable
+    # ----------------------------------
+    # PHASE 3: Final Synthesis
+    # ----------------------------------
+    # Manager integrates all worker outputs into coherent final deliverable
     print(f"\n{'='*80}")
     print(f"PHASE 3 - FINAL SYNTHESIS")
     print(f"{'='*80}")
 
+    # ----------------------------------
+    # Collect All Worker Outputs
+    # ----------------------------------
+    # Aggregate final outputs from all workers (post-revision) for synthesis
     all_outputs = "\n\n".join([
         f"Task {wr.task_id} ({wr.agent}): {wr.description}\nOutput: {wr.final_output}"
         for wr in worker_results
     ])
 
+    # ----------------------------------
+    # Manager Synthesizes Final Deliverable
+    # ----------------------------------
+    # LLM combines all worker outputs into unified, coherent final result
     synthesis_prompt = f"""You are a manager synthesizing the final deliverable.
 
 Original project: {user_request}
@@ -417,6 +487,10 @@ Provide the final synthesized deliverable:"""
 
     print(f"\n[Manager] Final deliverable: {final_synthesis[:200]}...")
 
+    # ----------------------------------
+    # Calculate Success Metrics
+    # ----------------------------------
+    # Count total revisions across all tasks and check if all workers were approved
     total_revisions = sum(len(wr.revisions) for wr in worker_results)
     success = all(wr.review.approved for wr in worker_results)
 
@@ -426,6 +500,10 @@ Provide the final synthesized deliverable:"""
     print(f"Success: {success}")
     print(f"{'='*80}")
 
+    # ----------------------------------
+    # Return Complete Execution Trace
+    # ----------------------------------
+    # Package delegation plan, all worker results with revisions, and final synthesis
     return ManagerResult(
         project=user_request,
         delegation_plan=delegation_plan,

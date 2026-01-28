@@ -2,6 +2,17 @@ agent_tools = {}
 agent_registry = {}
 
 def agent(name):
+    """
+    Register an agent for use in workflows.
+
+    Args:
+        name (str): The name of the agent (e.g., "math", "string")
+
+    Example:
+        @agent(name="math")
+        async def math_agent(input):
+            return eval(input)
+    """
     def decorator(fn):
         agent_registry[name] = fn
         return fn

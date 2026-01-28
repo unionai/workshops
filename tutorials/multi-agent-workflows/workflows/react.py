@@ -87,70 +87,84 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
     print(f"ReAct WORKFLOW - Goal: {user_goal}")
     print("=" * 80)
 
-    # Initialize OpenAI client
+    # ----------------------------------
+    # Initialization
+    # ----------------------------------
+    # Set up LLM client and tracking structures for the iterative loop
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-    # Track execution state
+    # Track all steps in the ReAct cycle (Thought → Action → Observation → Reflection)
     steps: List[ReActStep] = []
-    context_history = []
+    context_history = []  # Sliding window of recent steps for LLM context
     goal_achieved = False
 
+    # Available specialist agents that can be called during execution
     available_agents = ["math", "string", "web_search", "code", "weather"]
 
+    # ----------------------------------
+    # Main ReAct Loop
+    # ----------------------------------
+    # Each iteration: Reason about what to do → Act → Observe result → Reflect on progress
     for step_num in range(1, max_steps + 1):
         print(f"\n{'='*80}")
         print(f"STEP {step_num}")
         print(f"{'='*80}")
 
-        # Build context from previous steps
+        # ----------------------------------
+        # Build Context from Previous Steps
+        # ----------------------------------
+        # Include last 3 steps to prevent context window explosion while maintaining continuity
         if context_history:
             history_text = "\n\n".join([
                 f"Step {s['step']}: {s['thought']}\n"
                 f"Action: {s['action_agent']} - {s['action_task']}\n"
                 f"Result: {s['observation']}\n"
                 f"Reflection: {s['reflection']}"
-                for s in context_history[-3:]  # Last 3 steps for context
+                for s in context_history[-3:]  # Sliding window: only last 3 steps
             ])
         else:
             history_text = "No previous steps."
 
-        # Ask planner to reason about next action
+        # ----------------------------------
+        # THOUGHT Phase - Reason About Next Action
+        # ----------------------------------
+        # LLM decides: What should I do next to achieve the goal?
         system_msg = f"""You are a ReAct agent using the Reason + Act pattern.
 
-Goal: {user_goal}
+        Goal: {user_goal}
 
-Available agents:
-{chr(10).join([f"- {agent}" for agent in available_agents])}
+        Available agents:
+        {chr(10).join([f"- {agent}" for agent in available_agents])}
 
-Previous steps:
-{history_text}
+        Previous steps:
+        {history_text}
 
-Your task: Decide what to do next to achieve the goal.
+        Your task: Decide what to do next to achieve the goal.
 
-Respond in JSON format:
-{{
-  "thought": "Your reasoning about what to do next and why",
-  "action_agent": "agent_name",
-  "action_task": "specific task for the agent",
-  "goal_achieved": false,
-  "final_answer": null
-}}
+        Respond in JSON format:
+        {{
+        "thought": "Your reasoning about what to do next and why",
+        "action_agent": "agent_name",
+        "action_task": "specific task for the agent",
+        "goal_achieved": false,
+        "final_answer": null
+        }}
 
-OR if the goal is achieved:
-{{
-  "thought": "Why I believe the goal is now achieved",
-  "action_agent": null,
-  "action_task": null,
-  "goal_achieved": true,
-  "final_answer": "The complete answer to the user's goal"
-}}
+        OR if the goal is achieved:
+        {{
+        "thought": "Why I believe the goal is now achieved",
+        "action_agent": null,
+        "action_task": null,
+        "goal_achieved": true,
+        "final_answer": "The complete answer to the user's goal"
+        }}
 
-IMPORTANT:
-- Think step-by-step
-- Only do ONE action at a time
-- Set goal_achieved=true ONLY when you have the final answer
-- Be specific about what you want the agent to do
-"""
+        IMPORTANT:
+        - Think step-by-step
+        - Only do ONE action at a time
+        - Set goal_achieved=true ONLY when you have the final answer
+        - Be specific about what you want the agent to do
+        """
 
         print("\n[ReAct] Reasoning about next action...")
         response = await client.chat.completions.create(
@@ -162,7 +176,10 @@ IMPORTANT:
             ]
         )
 
-        # Parse decision with robust JSON extraction
+        # ----------------------------------
+        # Parse LLM Decision
+        # ----------------------------------
+        # Robust JSON extraction handles LLMs wrapping JSON in markdown or text
         raw_response = response.choices[0].message.content
 
         # Try direct JSON parse first
@@ -184,26 +201,33 @@ IMPORTANT:
                     print(f"[ERROR] Could not parse JSON from response: {raw_response}")
                     raise ValueError(f"LLM did not return valid JSON. Response: {raw_response[:200]}")
 
+        # Extract reasoning and goal status from decision
         thought = decision["thought"]
         goal_achieved = decision["goal_achieved"]
 
         print(f"\n💭 Thought: {thought}")
 
-        # Check if goal is achieved
+        # ----------------------------------
+        # Check for Goal Completion
+        # ----------------------------------
+        # If LLM determines goal is achieved, exit the loop with final answer
         if goal_achieved:
             final_answer = decision["final_answer"]
             print(f"\n✅ Goal achieved!")
             print(f"📝 Final answer: {final_answer}")
             break
 
-        # Execute the action
+        # ----------------------------------
+        # ACTION Phase - Execute Agent
+        # ----------------------------------
+        # LLM chose an agent and task, now we execute it
         action_agent = decision["action_agent"]
         action_task = decision["action_task"]
 
         print(f"\n🎯 Action: Call {action_agent} agent")
         print(f"📋 Task: {action_task}")
 
-        # Route to appropriate agent using agent registry
+        # Dynamic agent routing using registry (populated at import time)
         agent_func = agent_registry.get(action_agent)
         if not agent_func:
             observation = f"ERROR: Unknown agent '{action_agent}'"
@@ -214,16 +238,19 @@ IMPORTANT:
 
         print(f"\n📊 Observation: {observation[:200]}{'...' if len(observation) > 200 else ''}")
 
-        # Reflect on the result
+        # ----------------------------------
+        # REFLECTION Phase - Evaluate Progress
+        # ----------------------------------
+        # LLM reflects on whether the action was helpful and if we're closer to the goal
         reflection_prompt = f"""Based on this action and result, reflect on:
-1. Was this action helpful?
-2. Did we get the information we need?
-3. Are we closer to the goal?
+        1. Was this action helpful?
+        2. Did we get the information we need?
+        3. Are we closer to the goal?
 
-Action: {action_agent} - {action_task}
-Result: {observation}
+        Action: {action_agent} - {action_task}
+        Result: {observation}
 
-Provide a brief reflection (1-2 sentences)."""
+        Provide a brief reflection (1-2 sentences)."""
 
         reflection_response = await client.chat.completions.create(
             model="gpt-4o-mini",
@@ -237,7 +264,10 @@ Provide a brief reflection (1-2 sentences)."""
         reflection = reflection_response.choices[0].message.content.strip()
         print(f"\n🤔 Reflection: {reflection}")
 
-        # Record this step
+        # ----------------------------------
+        # Record Step in Execution History
+        # ----------------------------------
+        # Store complete step data (Thought → Action → Observation → Reflection)
         step_record = ReActStep(
             step_number=step_num,
             thought=thought,
@@ -246,9 +276,9 @@ Provide a brief reflection (1-2 sentences)."""
             observation=observation,
             reflection=reflection
         )
-        steps.append(step_record)
+        steps.append(step_record)  # Full history for final result
 
-        # Add to context history
+        # Add to sliding context window (for next iteration's LLM prompt)
         context_history.append({
             "step": step_num,
             "thought": thought,
@@ -258,7 +288,7 @@ Provide a brief reflection (1-2 sentences)."""
             "reflection": reflection
         })
 
-        # Log to file
+        # Persist to log file for debugging and analysis
         await logger.log(
             step=step_num,
             thought=thought,
@@ -268,7 +298,10 @@ Provide a brief reflection (1-2 sentences)."""
             reflection=reflection
         )
 
-    # If we exited the loop without achieving goal
+    # ----------------------------------
+    # Handle Loop Completion
+    # ----------------------------------
+    # If we exited the loop without achieving goal (hit max_steps), provide fallback answer
     if not goal_achieved:
         print(f"\n⚠️  Reached maximum steps ({max_steps}) without achieving goal")
         final_answer = f"Could not achieve goal in {max_steps} steps. Last observation: {observation}"
@@ -277,12 +310,16 @@ Provide a brief reflection (1-2 sentences)."""
     print(f"WORKFLOW COMPLETE - {len(steps)} steps executed")
     print(f"{'='*80}")
 
+    # ----------------------------------
+    # Return Complete Execution Trace
+    # ----------------------------------
+    # Package all steps and final answer into structured result for caller
     return ReActResult(
         goal=user_goal,
-        steps=steps,
-        final_answer=final_answer,
+        steps=steps,                    # Full Thought→Action→Observation→Reflection history
+        final_answer=final_answer,      # Final answer (from LLM or fallback)
         total_steps=len(steps),
-        goal_achieved=goal_achieved
+        goal_achieved=goal_achieved     # True if LLM declared success, False if hit max_steps
     )
 
 

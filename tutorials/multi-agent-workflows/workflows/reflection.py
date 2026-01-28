@@ -92,10 +92,16 @@ async def reflection_workflow(
     print(f"Quality threshold: {quality_threshold}/10, Max iterations: {max_iterations}")
     print("=" * 80)
 
-    # Initialize OpenAI client
+    # ----------------------------------
+    # Initialization
+    # ----------------------------------
+    # Set up LLM client for critique and refinement
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-    # Step 1: Determine which agent to use
+    # ----------------------------------
+    # PHASE 1: Agent Selection
+    # ----------------------------------
+    # LLM analyzes task and selects most appropriate specialist agent
     print("\n[Reflection] Step 1: Selecting appropriate agent...")
 
     available_agents = ["math", "string", "web_search", "code", "weather"]
@@ -122,20 +128,28 @@ Respond with ONLY the agent name (e.g., "math")."""
     selected_agent = agent_response.choices[0].message.content.strip().lower()
     print(f"[Reflection] Selected agent: {selected_agent}")
 
-    # Step 2: Get initial response from agent
+    # ----------------------------------
+    # PHASE 2: Initial Response Generation
+    # ----------------------------------
+    # Selected agent produces first-pass response (may be imperfect)
     print(f"\n[Reflection] Step 2: Getting initial response from {selected_agent} agent...")
 
+    # Look up agent from registry (populated at import time)
     agent_func = agent_registry.get(selected_agent)
     if not agent_func:
         raise ValueError(f"Unknown agent: {selected_agent}")
 
+    # Execute agent to get initial response
     result = await agent_func(user_task)
     current_response = getattr(result, 'summary', result.final_result)
-    initial_response = current_response
+    initial_response = current_response  # Store for comparison at end
 
     print(f"[Reflection] Initial response: {current_response[:200]}...")
 
-    # Step 3: Iterative reflection and refinement
+    # ----------------------------------
+    # PHASE 3: Iterative Critique and Refinement Loop
+    # ----------------------------------
+    # Repeatedly: Critique → Check Quality → Refine (until threshold met or max iterations)
     iterations = []
     converged = False
 
@@ -144,7 +158,10 @@ Respond with ONLY the agent name (e.g., "math")."""
         print(f"ITERATION {iteration}")
         print(f"{'='*80}")
 
-        # Reflect on current response
+        # ----------------------------------
+        # Critique Current Response
+        # ----------------------------------
+        # LLM acts as critic, evaluating quality and identifying specific issues
         reflection_prompt = f"""You are a critic evaluating the quality of a response.
 
 Task: {user_task}
@@ -171,7 +188,10 @@ Be critical but constructive. If the response is excellent, give it a high score
             messages=[{"role": "user", "content": reflection_prompt}]
         )
 
-        # Parse reflection with robust JSON extraction
+        # ----------------------------------
+        # Parse Quality Assessment
+        # ----------------------------------
+        # Robust JSON extraction handles markdown wrapping
         raw_reflection = reflection_response.choices[0].message.content
 
         try:
@@ -191,6 +211,7 @@ Be critical but constructive. If the response is excellent, give it a high score
                     print(f"[ERROR] Could not parse reflection JSON: {raw_reflection}")
                     raise ValueError(f"Could not parse reflection response")
 
+        # Extract structured feedback from critique
         quality_score = reflection_data["quality_score"]
         issues = reflection_data["issues"]
         suggestions = reflection_data["suggestions"]
@@ -200,12 +221,15 @@ Be critical but constructive. If the response is excellent, give it a high score
         for i, issue in enumerate(issues, 1):
             print(f"   {i}. {issue}")
 
-        # Check if we've met quality threshold
+        # ----------------------------------
+        # Check Quality Threshold (Convergence Criteria)
+        # ----------------------------------
+        # If quality is satisfactory, exit loop - we're done!
         if quality_score >= quality_threshold:
             print(f"\n✅ Quality threshold met! ({quality_score} >= {quality_threshold})")
             converged = True
 
-            # Record final iteration
+            # Record this final iteration (no refinement needed)
             iterations.append(ReflectionIteration(
                 iteration=iteration,
                 response=current_response,
@@ -215,9 +239,12 @@ Be critical but constructive. If the response is excellent, give it a high score
                 improvements_made="Quality threshold achieved - no further refinement needed"
             ))
 
-            break
+            break  # Exit iteration loop
 
-        # Refine the response
+        # ----------------------------------
+        # Refinement Phase - Address Critique Feedback
+        # ----------------------------------
+        # LLM generates improved version addressing all identified issues
         print(f"\n🔧 Refining response based on feedback...")
 
         refinement_prompt = f"""You are refining a response based on critical feedback.
@@ -241,11 +268,14 @@ Respond with ONLY the improved response, no explanations or metadata."""
 
         refined_response = refinement_response.choices[0].message.content.strip()
 
-        # Record this iteration
+        # ----------------------------------
+        # Record Iteration History
+        # ----------------------------------
+        # Store critique, issues, and what was improved (for final result traceability)
         improvements_made = f"Addressed: {', '.join(issues[:3])}" if issues else "General refinement"
         iterations.append(ReflectionIteration(
             iteration=iteration,
-            response=current_response,
+            response=current_response,              # Response BEFORE refinement
             reflection=raw_reflection,
             quality_score=quality_score,
             issues_found=issues,
@@ -254,10 +284,13 @@ Respond with ONLY the improved response, no explanations or metadata."""
 
         print(f"📝 Refined response: {refined_response[:200]}...")
 
-        # Update current response for next iteration
+        # ----------------------------------
+        # Update for Next Iteration
+        # ----------------------------------
+        # The refined response becomes the new current_response for next critique cycle
         current_response = refined_response
 
-        # Log to file
+        # Persist to log file for debugging and analysis
         await logger.log(
             iteration=iteration,
             quality_score=quality_score,
@@ -267,14 +300,17 @@ Respond with ONLY the improved response, no explanations or metadata."""
             response_length=len(current_response)
         )
 
-    # Handle case where we didn't converge
+    # ----------------------------------
+    # Handle Loop Completion
+    # ----------------------------------
+    # Either converged (quality threshold met) or hit max iterations
     if not converged:
         print(f"\n⚠️  Reached maximum iterations ({max_iterations}) without meeting quality threshold")
         final_quality = iterations[-1].quality_score if iterations else 0
     else:
         final_quality = quality_score
 
-    final_response = current_response
+    final_response = current_response  # This is either: refined response or initial if threshold met on first iteration
 
     print(f"\n{'='*80}")
     print(f"WORKFLOW COMPLETE")
@@ -282,15 +318,19 @@ Respond with ONLY the improved response, no explanations or metadata."""
     print(f"Converged: {converged}")
     print(f"{'='*80}")
 
+    # ----------------------------------
+    # Return Complete Iteration Trace
+    # ----------------------------------
+    # Package initial response, all iterations, and final refined output
     return ReflectionResult(
         task=user_task,
-        agent_used=selected_agent,
-        initial_response=initial_response,
-        final_response=final_response,
-        iterations=iterations,
+        agent_used=selected_agent,              # Which agent was selected
+        initial_response=initial_response,      # First-pass response (before any refinement)
+        final_response=final_response,          # Final refined response
+        iterations=iterations,                  # Full critique → refine history
         total_iterations=len(iterations),
         final_quality_score=final_quality,
-        converged=converged
+        converged=converged                     # True if threshold met, False if hit max_iterations
     )
 
 

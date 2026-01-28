@@ -159,7 +159,10 @@ async def sequential_workflow(
     print(f"Input: {user_input}")
     print("=" * 80)
 
-    # Get pipeline definition
+    # ----------------------------------
+    # Pipeline Selection and Validation
+    # ----------------------------------
+    # Look up predefined pipeline from PIPELINES dictionary
     if pipeline_name not in PIPELINES:
         available = list(PIPELINES.keys())
         raise ValueError(
@@ -167,39 +170,55 @@ async def sequential_workflow(
             f"Available pipelines: {available}"
         )
 
+    # Get pipeline definition: list of {agent, task} step dictionaries
     pipeline_definition = PIPELINES[pipeline_name]
     print(f"\n[Sequential] Pipeline has {len(pipeline_definition)} step(s)")
 
-    # Display pipeline
+    # Display execution plan (fixed sequence - no dynamic planning)
     for i, step_def in enumerate(pipeline_definition):
         print(f"  Step {i}: {step_def['agent']} - {step_def['task'][:60]}...")
 
-    # Execute pipeline sequentially
-    steps = []
-    previous_results = []
-    success = True
+    # ----------------------------------
+    # Initialization for Sequential Execution
+    # ----------------------------------
+    # Track each step's execution and accumulate results
+    steps = []                  # Full execution history
+    previous_results = []       # Results available for placeholder substitution
+    success = True              # Track if pipeline completed without errors
 
+    # ----------------------------------
+    # Main Sequential Execution Loop
+    # ----------------------------------
+    # Execute steps in exact order defined in pipeline (NO parallelism, NO planning)
     for step_num, step_def in enumerate(pipeline_definition):
         print(f"\n{'='*80}")
         print(f"STEP {step_num}")
         print(f"{'='*80}")
 
         agent_name = step_def["agent"]
-        task_template = step_def["task"]
+        task_template = step_def["task"]  # May contain {input}, {previous}, {previous_N} placeholders
 
-        # Substitute placeholders
+        # ----------------------------------
+        # Placeholder Substitution - How Results Flow
+        # ----------------------------------
+        # Replace placeholders with actual values from user input and previous step results
+        # Example: "{previous}" → "120", "{previous_0}" → "5", "{input}" → "calculate factorial"
         actual_task = substitute_placeholders(task_template, user_input, previous_results)
 
         print(f"\n[Sequential] Agent: {agent_name}")
         print(f"[Sequential] Task: {actual_task[:200]}...")
 
-        # Route to appropriate agent using agent registry
+        # ----------------------------------
+        # Dynamic Agent Routing
+        # ----------------------------------
+        # Look up agent from registry (populated at import time via decorators)
         agent_func = agent_registry.get(agent_name)
         if not agent_func:
+            # Agent not found - pipeline definition error
             error_msg = f"Unknown agent: {agent_name}"
             print(f"[Sequential] ERROR: {error_msg}")
 
-            # Record failed step
+            # Record failed step and stop pipeline execution
             steps.append(PipelineStep(
                 step_number=step_num,
                 agent=agent_name,
@@ -210,36 +229,45 @@ async def sequential_workflow(
             ))
 
             success = False
-            break
+            break  # Stop pipeline - cannot continue without this agent
 
-        # Execute agent
+        # ----------------------------------
+        # Execute Agent with Error Handling
+        # ----------------------------------
         try:
+            # Call the agent with the (placeholder-substituted) task
             result = await agent_func(actual_task)
-            # Use summary field if available, otherwise use final_result
+            # Use summary field if available (e.g., web_search), otherwise final_result
             output = getattr(result, 'summary', result.final_result)
             error_msg = ""
 
             print(f"[Sequential] Result: {str(output)[:200]}...")
 
         except Exception as e:
+            # Agent execution failed - capture error and stop pipeline
             output = ""
             error_msg = str(e)
             success = False
             print(f"[Sequential] ERROR: {error_msg}")
 
-        # Record step
+        # ----------------------------------
+        # Record Step Execution
+        # ----------------------------------
+        # Store both template (for traceability) and actual task (after substitution)
         step_record = PipelineStep(
             step_number=step_num,
             agent=agent_name,
-            task_template=task_template,
-            actual_task=actual_task,
+            task_template=task_template,      # Original template with placeholders
+            actual_task=actual_task,          # After placeholder substitution
             result=str(output),
             error=error_msg
         )
         steps.append(step_record)
+
+        # Add result to previous_results so next step can reference it via {previous}
         previous_results.append(output)
 
-        # Log to file
+        # Persist to log file for debugging and analysis
         await logger.log(
             step=step_num,
             agent=agent_name,
@@ -249,11 +277,17 @@ async def sequential_workflow(
             error=error_msg
         )
 
-        # Stop if step failed
+        # ----------------------------------
+        # Early Exit on Failure
+        # ----------------------------------
+        # Stop pipeline execution if any step fails (fail-fast behavior)
         if error_msg:
             break
 
-    # Get final result
+    # ----------------------------------
+    # Extract Final Result
+    # ----------------------------------
+    # Last step's output is the final result (unless pipeline failed early)
     final_result = previous_results[-1] if previous_results else "No result"
 
     print(f"\n{'='*80}")
@@ -262,13 +296,17 @@ async def sequential_workflow(
     print(f"Final result: {str(final_result)[:200]}...")
     print(f"{'='*80}")
 
+    # ----------------------------------
+    # Return Complete Execution Trace
+    # ----------------------------------
+    # Package pipeline name, all step executions, and final result
     return SequentialResult(
-        pipeline_name=pipeline_name,
-        initial_input=user_input,
-        steps=steps,
-        final_result=str(final_result),
+        pipeline_name=pipeline_name,          # Which pipeline was executed
+        initial_input=user_input,             # Original user input
+        steps=steps,                          # Full step-by-step execution trace
+        final_result=str(final_result),       # Result from last step
         total_steps=len(steps),
-        success=success
+        success=success                       # True if all steps completed, False if any failed
     )
 
 
