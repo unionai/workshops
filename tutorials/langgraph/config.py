@@ -13,6 +13,12 @@ base_env = flyte.TaskEnvironment(
         flyte.Secret(key="SAGE_TAVILY_API_KEY", as_env_var="TAVILY_API_KEY"),
     ],
     resources=flyte.Resources(cpu=2, memory="2Gi"),
+    reusable=flyte.ReusePolicy(
+        replicas=2,
+        idle_ttl=60,
+        concurrency=10,
+        scaledown_ttl=60,
+    ), # uncomment/comment to toggle task reuse
 )
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")

@@ -15,7 +15,9 @@ Usage:
 import json
 import asyncio
 import logging
+import markdown
 import flyte
+import flyte.report
 from langchain_openai import ChatOpenAI
 from config import base_env, OPENAI_API_KEY, TAVILY_API_KEY
 from graph import build_research_graph
@@ -27,11 +29,16 @@ env = base_env
 MODEL = "gpt-4.1-nano"
 
 
+def md_to_html(text: str) -> str:
+    """Convert markdown to HTML for Flyte reports."""
+    return markdown.markdown(text, extensions=["tables", "fenced_code"])
+
+
 # ------------------------------------------------------------------
 # Task 1: Split query into sub-topics
 # ------------------------------------------------------------------
 
-@env.task
+@env.task(report=True)
 async def plan_research(query: str, num_topics: int = 3) -> list[str]:
     """Use LLM to break a broad query into focused sub-topics."""
     llm = ChatOpenAI(model=MODEL, api_key=OPENAI_API_KEY)
@@ -45,6 +52,14 @@ async def plan_research(query: str, num_topics: int = 3) -> list[str]:
     except json.JSONDecodeError:
         topics = [query]
     log.info(f"Planned {len(topics)} sub-topics: {topics}")
+
+    html = f"<h2>Research Plan</h2><p><b>Query:</b> {query}</p><h3>Sub-topics:</h3><ol>"
+    for t in topics[:num_topics]:
+        html += f"<li>{t}</li>"
+    html += "</ol>"
+    await flyte.report.replace.aio(html)
+    await flyte.report.flush.aio()
+
     return topics[:num_topics]
 
 
@@ -52,11 +67,15 @@ async def plan_research(query: str, num_topics: int = 3) -> list[str]:
 # Task 2: Research a single sub-topic (runs in parallel)
 # ------------------------------------------------------------------
 
-@env.task
-async def research_topic(topic: str, max_searches: int = 2) -> dict:
+@env.task(report=True)
+async def research_topic(topic: str, max_searches: int = 2) -> str:
     """Run the LangGraph research graph on a single sub-topic."""
     from langchain_core.messages import HumanMessage
     log.info(f"Researching: {topic}")
+
+    await flyte.report.replace.aio(f"<h2>Researching: {topic}</h2><p>Running searches...</p>")
+    await flyte.report.flush.aio()
+
     graph = build_research_graph(
         openai_api_key=OPENAI_API_KEY,
         tavily_api_key=TAVILY_API_KEY,
@@ -65,20 +84,29 @@ async def research_topic(topic: str, max_searches: int = 2) -> dict:
     result = await graph.ainvoke({"messages": [HumanMessage(content=f"Research this topic: {topic}")]})
     report = result["messages"][-1].content
     log.info(f"Done: {topic}")
-    return {"topic": topic, "report": report}
+
+    await flyte.report.replace.aio(f"<h2>{topic}</h2>{md_to_html(report)}")
+    await flyte.report.flush.aio()
+
+    return json.dumps({"topic": topic, "report": report})
 
 
 # ------------------------------------------------------------------
 # Task 3: Synthesize all sub-topic reports into final report
 # ------------------------------------------------------------------
 
-@env.task
-async def synthesize_reports(query: str, reports: list[dict]) -> dict:
+@env.task(report=True)
+async def synthesize_reports(query: str, reports_json: str) -> str:
     """Combine sub-topic reports into a final comprehensive report."""
+    reports = json.loads(reports_json)
     llm = ChatOpenAI(model=MODEL, api_key=OPENAI_API_KEY)
     sections = "\n\n---\n\n".join(
         f"## {r['topic']}\n\n{r['report']}" for r in reports
     )
+
+    await flyte.report.replace.aio(f"<h2>Synthesizing {len(reports)} reports...</h2>")
+    await flyte.report.flush.aio()
+
     response = llm.invoke(
         f"You have research reports on sub-topics of this question:\n\n"
         f"{query}\n\n"
@@ -88,7 +116,15 @@ async def synthesize_reports(query: str, reports: list[dict]) -> dict:
         f"and end with key takeaways."
     )
     log.info(f"Final report synthesized from {len(reports)} sub-topics")
-    return {"query": query, "report": response.content, "sub_reports": reports}
+
+    # Report with tabs: final report + individual sub-topic reports
+    await flyte.report.replace.aio(f"<h2>Final Report</h2>{md_to_html(response.content)}")
+    for r in reports:
+        tab = flyte.report.get_tab(r["topic"][:30])
+        tab.log(f"<h2>{r['topic']}</h2>{md_to_html(r['report'])}")
+    await flyte.report.flush.aio()
+
+    return json.dumps({"query": query, "report": response.content, "sub_reports": reports})
 
 
 # ------------------------------------------------------------------
@@ -96,7 +132,7 @@ async def synthesize_reports(query: str, reports: list[dict]) -> dict:
 # ------------------------------------------------------------------
 
 @env.task
-async def research_workflow(query: str, num_topics: int = 3, max_searches: int = 2) -> dict:
+async def research_workflow(query: str, num_topics: int = 3, max_searches: int = 2) -> str:
     """
     Full research workflow:
     1. Plan sub-topics
@@ -109,12 +145,13 @@ async def research_workflow(query: str, num_topics: int = 3, max_searches: int =
     topics = await plan_research(query, num_topics)
 
     # Step 2: Research in parallel
-    reports = await asyncio.gather(*[
+    report_jsons = await asyncio.gather(*[
         research_topic(topic, max_searches) for topic in topics
     ])
+    reports = [json.loads(r) for r in report_jsons]
 
     # Step 3: Synthesize
-    result = await synthesize_reports(query, list(reports))
+    result = await synthesize_reports(query, json.dumps(reports))
 
     log.info("Workflow complete")
     return result
