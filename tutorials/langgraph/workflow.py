@@ -22,8 +22,11 @@ from langchain_openai import ChatOpenAI
 from config import base_env, OPENAI_API_KEY, TAVILY_API_KEY
 from graph import build_research_graph
 
-logging.basicConfig(level=logging.INFO, format="%(name)s - %(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+# Also let graph.py logs through
+logging.getLogger("graph").setLevel(logging.INFO)
 
 env = base_env
 MODEL = "gpt-4.1-nano"

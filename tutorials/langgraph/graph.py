@@ -45,12 +45,21 @@ def build_research_graph(openai_api_key: str, tavily_api_key: str, max_searches:
     async def agent(state: MessagesState):
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = llm.invoke(messages)
+
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            for tc in response.tool_calls:
+                log.info(f"[Agent] Tool call: {tc['name']}({tc['args']})")
+        elif response.content:
+            log.info(f"[Agent] Response: {response.content[:200]}")
+
         return {"messages": [response]}
 
     async def should_continue(state: MessagesState) -> str:
         last = state["messages"][-1]
         if hasattr(last, "tool_calls") and last.tool_calls:
+            log.info(f"[Agent] Routing → tools ({len(last.tool_calls)} call(s))")
             return "tools"
+        log.info("[Agent] Routing → done (final answer)")
         return "__end__"
 
     graph = StateGraph(MessagesState)
