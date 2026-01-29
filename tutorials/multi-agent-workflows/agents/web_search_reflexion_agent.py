@@ -50,8 +50,8 @@ env = base_env
 # )
 
 
-@env.task
-@agent("web_search")
+# @env.task
+# @agent("web_search")
 async def web_search_agent(task: str) -> WebSearchAgentResult:
     """
     Web search agent that can search using Tavily (premium, curated results)

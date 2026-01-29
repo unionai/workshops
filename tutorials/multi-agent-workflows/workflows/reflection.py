@@ -13,30 +13,24 @@ Usage:
     python -m workflows.reflection --local --request "Your task here"
 """
 
-import sys
-from pathlib import Path
 from typing import List
 from dataclasses import dataclass
 import flyte
 import json
+import re
 
-# Add workflows directory to Python path for imports
-workflows_dir = Path(__file__).parent
-sys.path.insert(0, str(workflows_dir))
-
-# Import agents (imports register them in agent_registry via decorators)
-from agents.math_agent import math_agent
-from agents.string_agent import string_agent
-from agents.web_search_agent import web_search_agent
-from agents.code_agent import code_agent
-from agents.weather_agent import weather_agent
+# Auto-import all agent modules to trigger @agent and @tool decorator registration
+from agents import import_all_agents
+import_all_agents()
 from config import base_env, OPENAI_API_KEY
-from utils.logger import Logger
+from utils.logger import Logger, setup_logging
 from utils.decorators import agent_registry
 from openai import AsyncOpenAI
 
-# Initialize logger
-logger = Logger(path="reflection_trace_log.jsonl", verbose=False)
+# Initialize trace logger for structured JSONL output
+trace_logger = Logger(path="reflection_trace_log.jsonl", verbose=False)
+# Initialize standard logger for console output
+log = setup_logging(__name__)
 
 # ----------------------------------
 # Data Models
@@ -87,10 +81,10 @@ async def reflection_workflow(
     Returns:
         ReflectionResult: Complete iteration history and final refined output
     """
-    print("=" * 80)
-    print(f"REFLECTION WORKFLOW - Task: {user_task}")
-    print(f"Quality threshold: {quality_threshold}/10, Max iterations: {max_iterations}")
-    print("=" * 80)
+    log.info("=" * 80)
+    log.info(f"REFLECTION WORKFLOW - Task: {user_task}")
+    log.info(f"Quality threshold: {quality_threshold}/10, Max iterations: {max_iterations}")
+    log.info("=" * 80)
 
     # ----------------------------------
     # Initialization
@@ -102,20 +96,14 @@ async def reflection_workflow(
     # PHASE 1: Agent Selection
     # ----------------------------------
     # LLM analyzes task and selects most appropriate specialist agent
-    print("\n[Reflection] Step 1: Selecting appropriate agent...")
+    log.info("\n[Reflection] Step 1: Selecting appropriate agent...")
 
-    available_agents = ["math", "string", "web_search", "code", "weather"]
-
+    available_agents = list(agent_registry.keys())
     agent_selection_prompt = f"""Given this task, which agent is most appropriate?
 
 Task: {user_task}
 
-Available agents:
-- math: Arithmetic, calculations, mathematical operations
-- string: Text analysis, word counting, string manipulation
-- web_search: Web searches, fetching webpages, finding information online
-- code: Python code execution, programming tasks
-- weather: Weather information lookup
+Available agents: {', '.join(available_agents)}
 
 Respond with ONLY the agent name (e.g., "math")."""
 
@@ -126,13 +114,13 @@ Respond with ONLY the agent name (e.g., "math")."""
     )
 
     selected_agent = agent_response.choices[0].message.content.strip().lower()
-    print(f"[Reflection] Selected agent: {selected_agent}")
+    log.info(f"[Reflection] Selected agent: {selected_agent}")
 
     # ----------------------------------
     # PHASE 2: Initial Response Generation
     # ----------------------------------
     # Selected agent produces first-pass response (may be imperfect)
-    print(f"\n[Reflection] Step 2: Getting initial response from {selected_agent} agent...")
+    log.info(f"\n[Reflection] Step 2: Getting initial response from {selected_agent} agent...")
 
     # Look up agent from registry (populated at import time)
     agent_func = agent_registry.get(selected_agent)
@@ -144,7 +132,7 @@ Respond with ONLY the agent name (e.g., "math")."""
     current_response = getattr(result, 'summary', result.final_result)
     initial_response = current_response  # Store for comparison at end
 
-    print(f"[Reflection] Initial response: {current_response[:200]}...")
+    log.info(f"[Reflection] Initial response: {current_response[:200]}...")
 
     # ----------------------------------
     # PHASE 3: Iterative Critique and Refinement Loop
@@ -154,9 +142,9 @@ Respond with ONLY the agent name (e.g., "math")."""
     converged = False
 
     for iteration in range(1, max_iterations + 1):
-        print(f"\n{'='*80}")
-        print(f"ITERATION {iteration}")
-        print(f"{'='*80}")
+        log.info(f"\n{'='*80}")
+        log.info(f"ITERATION {iteration}")
+        log.info(f"{'='*80}")
 
         # ----------------------------------
         # Critique Current Response
@@ -181,7 +169,8 @@ Respond in JSON format:
 
 Be critical but constructive. If the response is excellent, give it a high score and minimal issues."""
 
-        print("\n[Reflection] Evaluating response quality...")
+        log.info(f"\n[Reflection] Current response: {current_response[:300]}{'...' if len(current_response) > 300 else ''}")
+        log.info("[Reflection] Evaluating response quality...")
         reflection_response = await client.chat.completions.create(
             model="gpt-4o",
             temperature=0.3,
@@ -198,7 +187,6 @@ Be critical but constructive. If the response is excellent, give it a high score
             reflection_data = json.loads(raw_reflection)
         except json.JSONDecodeError:
             # Try to extract JSON from markdown code blocks
-            import re
             json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_reflection, re.DOTALL)
             if json_match:
                 reflection_data = json.loads(json_match.group(1))
@@ -208,7 +196,7 @@ Be critical but constructive. If the response is excellent, give it a high score
                 if json_match:
                     reflection_data = json.loads(json_match.group(0))
                 else:
-                    print(f"[ERROR] Could not parse reflection JSON: {raw_reflection}")
+                    log.error(f"Could not parse reflection JSON: {raw_reflection}")
                     raise ValueError(f"Could not parse reflection response")
 
         # Extract structured feedback from critique
@@ -216,17 +204,17 @@ Be critical but constructive. If the response is excellent, give it a high score
         issues = reflection_data["issues"]
         suggestions = reflection_data["suggestions"]
 
-        print(f"\n📊 Quality Score: {quality_score}/10")
-        print(f"🔍 Issues Found: {len(issues)}")
+        log.info(f"\nQuality Score: {quality_score}/10")
+        log.info(f"Issues Found: {len(issues)}")
         for i, issue in enumerate(issues, 1):
-            print(f"   {i}. {issue}")
+            log.info(f"   {i}. {issue}")
 
         # ----------------------------------
         # Check Quality Threshold (Convergence Criteria)
         # ----------------------------------
         # If quality is satisfactory, exit loop - we're done!
         if quality_score >= quality_threshold:
-            print(f"\n✅ Quality threshold met! ({quality_score} >= {quality_threshold})")
+            log.info(f"\nQuality threshold met! ({quality_score} >= {quality_threshold})")
             converged = True
 
             # Record this final iteration (no refinement needed)
@@ -245,7 +233,7 @@ Be critical but constructive. If the response is excellent, give it a high score
         # Refinement Phase - Address Critique Feedback
         # ----------------------------------
         # LLM generates improved version addressing all identified issues
-        print(f"\n🔧 Refining response based on feedback...")
+        log.info(f"\nRefining response based on feedback...")
 
         refinement_prompt = f"""You are refining a response based on critical feedback.
 
@@ -282,7 +270,7 @@ Respond with ONLY the improved response, no explanations or metadata."""
             improvements_made=improvements_made
         ))
 
-        print(f"📝 Refined response: {refined_response[:200]}...")
+        log.info(f"Refined response: {refined_response[:200]}...")
 
         # ----------------------------------
         # Update for Next Iteration
@@ -291,7 +279,7 @@ Respond with ONLY the improved response, no explanations or metadata."""
         current_response = refined_response
 
         # Persist to log file for debugging and analysis
-        await logger.log(
+        await trace_logger.log(
             iteration=iteration,
             quality_score=quality_score,
             issues_count=len(issues),
@@ -305,18 +293,18 @@ Respond with ONLY the improved response, no explanations or metadata."""
     # ----------------------------------
     # Either converged (quality threshold met) or hit max iterations
     if not converged:
-        print(f"\n⚠️  Reached maximum iterations ({max_iterations}) without meeting quality threshold")
+        log.warning(f"Reached maximum iterations ({max_iterations}) without meeting quality threshold")
         final_quality = iterations[-1].quality_score if iterations else 0
     else:
         final_quality = quality_score
 
     final_response = current_response  # This is either: refined response or initial if threshold met on first iteration
 
-    print(f"\n{'='*80}")
-    print(f"WORKFLOW COMPLETE")
-    print(f"Iterations: {len(iterations)}, Final Quality: {final_quality}/10")
-    print(f"Converged: {converged}")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"WORKFLOW COMPLETE")
+    log.info(f"Iterations: {len(iterations)}, Final Quality: {final_quality}/10")
+    log.info(f"Converged: {converged}")
+    log.info(f"{'='*80}")
 
     # ----------------------------------
     # Return Complete Iteration Trace
@@ -373,16 +361,16 @@ if __name__ == "__main__":
 
     # Initialize Flyte based on local/remote flag
     if args.local:
-        print("Running workflow LOCALLY with flyte.init()")
+        log.info("Running workflow LOCALLY with flyte.init()")
         flyte.init()
     else:
-        print("Running workflow REMOTELY with flyte.init_from_config()")
+        log.info("Running workflow REMOTELY with flyte.init_from_config()")
         flyte.init_from_config(".flyte/config.yaml")
 
-    print(f"\n=== Reflection Multi-Agent Workflow ===")
-    print(f"Task: {args.request}")
-    print(f"Quality threshold: {args.quality_threshold}/10")
-    print(f"Max iterations: {args.max_iterations}\n")
+    log.info(f"\n=== Reflection Multi-Agent Workflow ===")
+    log.info(f"Task: {args.request}")
+    log.info(f"Quality threshold: {args.quality_threshold}/10")
+    log.info(f"Max iterations: {args.max_iterations}\n")
 
     # Execute the workflow
     execution = flyte.run(
@@ -392,8 +380,7 @@ if __name__ == "__main__":
         max_iterations=args.max_iterations
     )
 
-    print(f"\n{'='*80}")
-    print(f"Execution: {execution.name}")
-    print(f"URL: {execution.url}")
-    print("Click the link above to view execution details in the Flyte UI")
-    print(f"{'='*80}\n")
+    log.info(f"\n{'='*80}")
+    log.info(f"Execution: {execution.name}")
+    log.info(f"URL: {execution.url}")
+    log.info(f"{'='*80}\n")

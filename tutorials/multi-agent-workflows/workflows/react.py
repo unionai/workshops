@@ -14,31 +14,24 @@ Usage:
     python -m workflows.react --local --request "Your goal here"
 """
 
-import sys
-from pathlib import Path
 from typing import List, Dict
 from dataclasses import dataclass
 import flyte
 import asyncio
 import json
 
-# Add workflows directory to Python path for imports
-workflows_dir = Path(__file__).parent
-sys.path.insert(0, str(workflows_dir))
-
-# Import agents (imports register them in agent_registry via decorators)
-from agents.math_agent import math_agent, MathAgentResult
-from agents.string_agent import string_agent, StringAgentResult
-from agents.web_search_agent import web_search_agent, WebSearchAgentResult
-from agents.code_agent import code_agent, CodeAgentResult
-from agents.weather_agent import weather_agent, WeatherAgentResult
+# Auto-import all agent modules to trigger @agent and @tool decorator registration
+from agents import import_all_agents
+import_all_agents()
 from config import base_env, OPENAI_API_KEY
-from utils.logger import Logger
+from utils.logger import Logger, setup_logging
 from utils.decorators import agent_registry
 from openai import AsyncOpenAI
 
-# Initialize logger
-logger = Logger(path="react_trace_log.jsonl", verbose=False)
+# Initialize trace logger for structured JSONL output
+trace_logger = Logger(path="react_trace_log.jsonl", verbose=False)
+# Initialize standard logger for console output
+log = setup_logging(__name__)
 
 # ----------------------------------
 # Data Models
@@ -83,9 +76,9 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
     Returns:
         ReActResult: Complete execution trace and final answer
     """
-    print("=" * 80)
-    print(f"ReAct WORKFLOW - Goal: {user_goal}")
-    print("=" * 80)
+    log.info("=" * 80)
+    log.info(f"ReAct WORKFLOW - Goal: {user_goal}")
+    log.info("=" * 80)
 
     # ----------------------------------
     # Initialization
@@ -99,16 +92,16 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
     goal_achieved = False
 
     # Available specialist agents that can be called during execution
-    available_agents = ["math", "string", "web_search", "code", "weather"]
+    available_agents = list(agent_registry.keys())
 
     # ----------------------------------
     # Main ReAct Loop
     # ----------------------------------
     # Each iteration: Reason about what to do → Act → Observe result → Reflect on progress
     for step_num in range(1, max_steps + 1):
-        print(f"\n{'='*80}")
-        print(f"STEP {step_num}")
-        print(f"{'='*80}")
+        log.info(f"\n{'='*80}")
+        log.info(f"STEP {step_num}")
+        log.info(f"{'='*80}")
 
         # ----------------------------------
         # Build Context from Previous Steps
@@ -166,7 +159,7 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
         - Be specific about what you want the agent to do
         """
 
-        print("\n[ReAct] Reasoning about next action...")
+        log.info("\n[ReAct] Reasoning about next action...")
         response = await client.chat.completions.create(
             model="gpt-4o",
             temperature=0.3,
@@ -198,14 +191,14 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
                     decision = json.loads(json_match.group(0))
                 else:
                     # Last resort: log and fail gracefully
-                    print(f"[ERROR] Could not parse JSON from response: {raw_response}")
+                    log.error(f"Could not parse JSON from response: {raw_response}")
                     raise ValueError(f"LLM did not return valid JSON. Response: {raw_response[:200]}")
 
         # Extract reasoning and goal status from decision
         thought = decision["thought"]
         goal_achieved = decision["goal_achieved"]
 
-        print(f"\n💭 Thought: {thought}")
+        log.info(f"\nThought: {thought}")
 
         # ----------------------------------
         # Check for Goal Completion
@@ -213,8 +206,8 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
         # If LLM determines goal is achieved, exit the loop with final answer
         if goal_achieved:
             final_answer = decision["final_answer"]
-            print(f"\n✅ Goal achieved!")
-            print(f"📝 Final answer: {final_answer}")
+            log.info(f"\nGoal achieved!")
+            log.info(f"Final answer: {final_answer}")
             break
 
         # ----------------------------------
@@ -224,8 +217,8 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
         action_agent = decision["action_agent"]
         action_task = decision["action_task"]
 
-        print(f"\n🎯 Action: Call {action_agent} agent")
-        print(f"📋 Task: {action_task}")
+        log.info(f"\nAction: Call {action_agent} agent")
+        log.info(f"Task: {action_task}")
 
         # Dynamic agent routing using registry (populated at import time)
         agent_func = agent_registry.get(action_agent)
@@ -236,7 +229,7 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
             # Use summary field if available (e.g., web_search), otherwise use final_result
             observation = getattr(result, 'summary', result.final_result)
 
-        print(f"\n📊 Observation: {observation[:200]}{'...' if len(observation) > 200 else ''}")
+        log.info(f"\nObservation: {observation[:200]}{'...' if len(observation) > 200 else ''}")
 
         # ----------------------------------
         # REFLECTION Phase - Evaluate Progress
@@ -262,7 +255,7 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
         )
 
         reflection = reflection_response.choices[0].message.content.strip()
-        print(f"\n🤔 Reflection: {reflection}")
+        log.info(f"\nReflection: {reflection}")
 
         # ----------------------------------
         # Record Step in Execution History
@@ -289,7 +282,7 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
         })
 
         # Persist to log file for debugging and analysis
-        await logger.log(
+        await trace_logger.log(
             step=step_num,
             thought=thought,
             action_agent=action_agent,
@@ -303,12 +296,12 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
     # ----------------------------------
     # If we exited the loop without achieving goal (hit max_steps), provide fallback answer
     if not goal_achieved:
-        print(f"\n⚠️  Reached maximum steps ({max_steps}) without achieving goal")
+        log.warning(f"Reached maximum steps ({max_steps}) without achieving goal")
         final_answer = f"Could not achieve goal in {max_steps} steps. Last observation: {observation}"
 
-    print(f"\n{'='*80}")
-    print(f"WORKFLOW COMPLETE - {len(steps)} steps executed")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"WORKFLOW COMPLETE - {len(steps)} steps executed")
+    log.info(f"{'='*80}")
 
     # ----------------------------------
     # Return Complete Execution Trace
@@ -356,15 +349,15 @@ if __name__ == "__main__":
 
     # Initialize Flyte based on local/remote flag
     if args.local:
-        print("Running workflow LOCALLY with flyte.init()")
+        log.info("Running workflow LOCALLY with flyte.init()")
         flyte.init()
     else:
-        print("Running workflow REMOTELY with flyte.init_from_config()")
+        log.info("Running workflow REMOTELY with flyte.init_from_config()")
         flyte.init_from_config(".flyte/config.yaml")
 
-    print(f"\n=== ReAct Multi-Agent Workflow ===")
-    print(f"Goal: {args.request}")
-    print(f"Max steps: {args.max_steps}\n")
+    log.info(f"\n=== ReAct Multi-Agent Workflow ===")
+    log.info(f"Goal: {args.request}")
+    log.info(f"Max steps: {args.max_steps}\n")
 
     # Execute the workflow
     execution = flyte.run(
@@ -373,8 +366,7 @@ if __name__ == "__main__":
         max_steps=args.max_steps
     )
 
-    print(f"\n{'='*80}")
-    print(f"Execution: {execution.name}")
-    print(f"URL: {execution.url}")
-    print("Click the link above to view execution details in the Flyte UI")
-    print(f"{'='*80}\n")
+    log.info(f"\n{'='*80}")
+    log.info(f"Execution: {execution.name}")
+    log.info(f"URL: {execution.url}")
+    log.info(f"{'='*80}\n")

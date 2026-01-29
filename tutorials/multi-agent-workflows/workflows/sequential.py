@@ -15,28 +15,21 @@ Usage:
     python -m workflows.sequential --local --pipeline write-review-edit --input "Write a poem about AI"
 """
 
-import sys
-from pathlib import Path
 from typing import List, Dict
 from dataclasses import dataclass
 import flyte
 
-# Add workflows directory to Python path for imports
-workflows_dir = Path(__file__).parent
-sys.path.insert(0, str(workflows_dir))
-
-# Import agents (imports register them in agent_registry via decorators)
-from agents.math_agent import math_agent
-from agents.string_agent import string_agent
-from agents.web_search_agent import web_search_agent
-from agents.code_agent import code_agent
-from agents.weather_agent import weather_agent
+# Auto-import all agent modules to trigger @agent and @tool decorator registration
+from agents import import_all_agents
+import_all_agents()
 from config import base_env
-from utils.logger import Logger
+from utils.logger import Logger, setup_logging
 from utils.decorators import agent_registry
 
-# Initialize logger
-logger = Logger(path="sequential_trace_log.jsonl", verbose=False)
+# Initialize trace logger for structured JSONL output
+trace_logger = Logger(path="sequential_trace_log.jsonl", verbose=False)
+# Initialize standard logger for console output
+log = setup_logging(__name__)
 
 # ----------------------------------
 # Data Models
@@ -154,10 +147,10 @@ async def sequential_workflow(
     Returns:
         SequentialResult: Complete execution trace and final result
     """
-    print("=" * 80)
-    print(f"SEQUENTIAL WORKFLOW - Pipeline: {pipeline_name}")
-    print(f"Input: {user_input}")
-    print("=" * 80)
+    log.info("=" * 80)
+    log.info(f"SEQUENTIAL WORKFLOW - Pipeline: {pipeline_name}")
+    log.info(f"Input: {user_input}")
+    log.info("=" * 80)
 
     # ----------------------------------
     # Pipeline Selection and Validation
@@ -172,11 +165,11 @@ async def sequential_workflow(
 
     # Get pipeline definition: list of {agent, task} step dictionaries
     pipeline_definition = PIPELINES[pipeline_name]
-    print(f"\n[Sequential] Pipeline has {len(pipeline_definition)} step(s)")
+    log.info(f"\n[Sequential] Pipeline has {len(pipeline_definition)} step(s)")
 
     # Display execution plan (fixed sequence - no dynamic planning)
     for i, step_def in enumerate(pipeline_definition):
-        print(f"  Step {i}: {step_def['agent']} - {step_def['task'][:60]}...")
+        log.info(f"  Step {i}: {step_def['agent']} - {step_def['task'][:60]}...")
 
     # ----------------------------------
     # Initialization for Sequential Execution
@@ -191,9 +184,9 @@ async def sequential_workflow(
     # ----------------------------------
     # Execute steps in exact order defined in pipeline (NO parallelism, NO planning)
     for step_num, step_def in enumerate(pipeline_definition):
-        print(f"\n{'='*80}")
-        print(f"STEP {step_num}")
-        print(f"{'='*80}")
+        log.info(f"\n{'='*80}")
+        log.info(f"STEP {step_num}")
+        log.info(f"{'='*80}")
 
         agent_name = step_def["agent"]
         task_template = step_def["task"]  # May contain {input}, {previous}, {previous_N} placeholders
@@ -205,8 +198,8 @@ async def sequential_workflow(
         # Example: "{previous}" → "120", "{previous_0}" → "5", "{input}" → "calculate factorial"
         actual_task = substitute_placeholders(task_template, user_input, previous_results)
 
-        print(f"\n[Sequential] Agent: {agent_name}")
-        print(f"[Sequential] Task: {actual_task[:200]}...")
+        log.info(f"\n[Sequential] Agent: {agent_name}")
+        log.info(f"[Sequential] Task: {actual_task[:200]}...")
 
         # ----------------------------------
         # Dynamic Agent Routing
@@ -216,7 +209,7 @@ async def sequential_workflow(
         if not agent_func:
             # Agent not found - pipeline definition error
             error_msg = f"Unknown agent: {agent_name}"
-            print(f"[Sequential] ERROR: {error_msg}")
+            log.error(f"[Sequential] {error_msg}")
 
             # Record failed step and stop pipeline execution
             steps.append(PipelineStep(
@@ -241,14 +234,14 @@ async def sequential_workflow(
             output = getattr(result, 'summary', result.final_result)
             error_msg = ""
 
-            print(f"[Sequential] Result: {str(output)[:200]}...")
+            log.info(f"[Sequential] Result: {str(output)[:200]}...")
 
         except Exception as e:
             # Agent execution failed - capture error and stop pipeline
             output = ""
             error_msg = str(e)
             success = False
-            print(f"[Sequential] ERROR: {error_msg}")
+            log.error(f"[Sequential] {error_msg}")
 
         # ----------------------------------
         # Record Step Execution
@@ -268,7 +261,7 @@ async def sequential_workflow(
         previous_results.append(output)
 
         # Persist to log file for debugging and analysis
-        await logger.log(
+        await trace_logger.log(
             step=step_num,
             agent=agent_name,
             task_template=task_template,
@@ -290,11 +283,11 @@ async def sequential_workflow(
     # Last step's output is the final result (unless pipeline failed early)
     final_result = previous_results[-1] if previous_results else "No result"
 
-    print(f"\n{'='*80}")
-    print(f"WORKFLOW COMPLETE")
-    print(f"Steps executed: {len(steps)}, Success: {success}")
-    print(f"Final result: {str(final_result)[:200]}...")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"WORKFLOW COMPLETE")
+    log.info(f"Steps executed: {len(steps)}, Success: {success}")
+    log.info(f"Final result: {str(final_result)[:200]}...")
+    log.info(f"{'='*80}")
 
     # ----------------------------------
     # Return Complete Execution Trace
@@ -345,15 +338,15 @@ if __name__ == "__main__":
 
     # Initialize Flyte based on local/remote flag
     if args.local:
-        print("Running workflow LOCALLY with flyte.init()")
+        log.info("Running workflow LOCALLY with flyte.init()")
         flyte.init()
     else:
-        print("Running workflow REMOTELY with flyte.init_from_config()")
+        log.info("Running workflow REMOTELY with flyte.init_from_config()")
         flyte.init_from_config(".flyte/config.yaml")
 
-    print(f"\n=== Sequential Multi-Agent Workflow ===")
-    print(f"Pipeline: {args.pipeline}")
-    print(f"Input: {args.input}\n")
+    log.info(f"\n=== Sequential Multi-Agent Workflow ===")
+    log.info(f"Pipeline: {args.pipeline}")
+    log.info(f"Input: {args.input}\n")
 
     # Execute the workflow
     execution = flyte.run(
@@ -362,8 +355,7 @@ if __name__ == "__main__":
         pipeline_name=args.pipeline
     )
 
-    print(f"\n{'='*80}")
-    print(f"Execution: {execution.name}")
-    print(f"URL: {execution.url}")
-    print("Click the link above to view execution details in the Flyte UI")
-    print(f"{'='*80}\n")
+    log.info(f"\n{'='*80}")
+    log.info(f"Execution: {execution.name}")
+    log.info(f"URL: {execution.url}")
+    log.info(f"{'='*80}\n")

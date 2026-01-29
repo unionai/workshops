@@ -9,30 +9,29 @@ python -m workflows.planner --request "Calculate 15 times 7"
 python -m workflows.planner --request "Search for the latest news about AI agents
 """
 
-import sys
-from pathlib import Path
 from typing import List, Dict
 from dataclasses import dataclass
 import flyte
 import asyncio
 
-# Add workflows directory to Python path for imports
-workflows_dir = Path(__file__).parent
-sys.path.insert(0, str(workflows_dir))
-
 # Import agents (they are now Flyte tasks with their own environments)
-from agents.planner_agent import planner_agent, PlannerDecision, AgentStep
-from agents.math_agent import math_agent, MathAgentResult
-from agents.string_agent import string_agent, StringAgentResult
-from agents.web_search_agent import web_search_agent, WebSearchAgentResult
-from agents.code_agent import code_agent, CodeAgentResult
-from agents.weather_agent import weather_agent, WeatherAgentResult
-from config import base_env
-from utils.logger import Logger
-from utils.decorators import agent_registry
+from agents import import_all_agents
+from agents.planner_agent import planner_agent, AgentStep
 
-# Initialize logger for orchestrator
-logger = Logger(path="agent_trace_log.jsonl", verbose=False)
+# Auto-import all agent modules to trigger @agent and @tool decorator registration
+import_all_agents()
+from config import base_env
+from utils.logger import Logger, setup_logging
+from utils.decorators import agent_registry
+from utils.plan_executor import set_logger
+
+# Initialize trace logger for structured JSONL output
+trace_logger = Logger(path="planner_trace_log.jsonl", verbose=False)
+# Share logger with plan_executor so all traces go to one file
+set_logger(trace_logger)
+
+# Initialize standard logger for console/Flyte UI output
+log = setup_logging(__name__)
 
 # ----------------------------------
 # Helper Functions
@@ -142,15 +141,15 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
     Returns:
         TaskResult: Combined result from all agent executions
     """
-    print(f"[Orchestrator] User request: {user_request}")
+    log.info(f"[Orchestrator] User request: {user_request}")
 
     # ----------------------------------
     # PHASE 1: Planning - Generate Execution Plan
     # ----------------------------------
     # Planner agent analyzes request and creates DAG (directed acyclic graph) of agent steps
-    print("[Orchestrator] Step 1: Calling planner agent...")
+    log.info("[Orchestrator] Step 1: Calling planner agent...")
     planner_decision = await planner_agent(user_request)
-    print(f"[Orchestrator] Planner created plan with {len(planner_decision.steps)} step(s)")
+    log.info(f"[Orchestrator] Planner created plan with {len(planner_decision.steps)} step(s)")
 
     # ----------------------------------
     # PHASE 2: Execution - Dependency-Aware Parallel Orchestration
@@ -186,10 +185,10 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
 
         # Circular dependency detection
         if not ready_steps:
-            print("[Orchestrator] ERROR: No steps ready to execute, but pending steps remain (circular dependency?)")
+            log.error("[Orchestrator] ERROR: No steps ready to execute, but pending steps remain (circular dependency?)")
             break
 
-        print(f"[Orchestrator] Executing {len(ready_steps)} step(s) in parallel...")
+        log.info(f"[Orchestrator] Executing {len(ready_steps)} step(s) in parallel...")
 
         # ----------------------------------
         # Parallel Step Execution
@@ -197,8 +196,8 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
         # Define nested async function to execute a single step (enables parallel gather)
         async def execute_step(step_idx: int, step: AgentStep) -> tuple:
             """Execute a single agent step with context injection"""
-            print(f"[Orchestrator]   Step {step_idx}: Calling {step.agent} agent...")
-            print(f"[Orchestrator]     Task: {step.task}")
+            log.info(f"[Orchestrator]   Step {step_idx}: Calling {step.agent} agent...")
+            log.info(f"[Orchestrator]     Task: {step.task}")
 
             # ----------------------------------
             # Context Injection - How Results Flow Between Agents
@@ -208,7 +207,7 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
             task = build_task_with_context(step.task, step.dependencies, completed_results)
 
             if step.dependencies:
-                print(f"[Orchestrator]     Context from steps {step.dependencies} added to task")
+                log.info(f"[Orchestrator]     Context from steps {step.dependencies} added to task")
 
             # ----------------------------------
             # Dynamic Agent Routing
@@ -217,7 +216,7 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
             agent_func = agent_registry.get(step.agent)
             if not agent_func:
                 # Unknown agent - the planner hallucinated or requested invalid agent
-                print(f"[Orchestrator] WARNING: Unknown agent '{step.agent}'")
+                log.warning(f"[Orchestrator] WARNING: Unknown agent '{step.agent}'")
                 result_full = ""
                 result_summary = ""
                 error = f"Unknown agent: {step.agent}"
@@ -229,10 +228,10 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
                 result_summary = getattr(agent_result, 'summary', agent_result.final_result)
                 error = agent_result.error
 
-            print(f"[Orchestrator]   Step {step_idx} completed: {result_summary[:100]}...")
+            log.info(f"[Orchestrator]   Step {step_idx} completed: {result_summary[:300]}...")
 
             # Persist execution details to log file for debugging and analysis
-            await logger.log(
+            await trace_logger.log(
                 step_idx=step_idx,
                 agent=step.agent,
                 input_task=task,
@@ -293,7 +292,7 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
 
     # Combine all agent outputs into single result string
     combined_result = " | ".join(final_results) if final_results else "No results"
-    print(f"[Orchestrator] All agents completed. Combined result: {combined_result}")
+    log.info(f"[Orchestrator] All agents completed. Combined result: {combined_result}")
 
     # Create human-readable summary of what was executed
     planner_summary = f"{len(planner_decision.steps)} step(s): " + ", ".join(
@@ -326,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--local",
         action="store_true",
-        help="Run workflow locally using flyte.init() instead of remote execution"
+        help="Run workflow locally instead of remote execution"
     )
     parser.add_argument(
         "--request",
@@ -355,6 +354,4 @@ if __name__ == "__main__":
     print(f"\n{'='*60}")
     print(f"Execution: {execution.name}")
     print(f"URL: {execution.url}")
-    print("Click the link above to view execution details in the Flyte UI")
     print(f"{'='*60}\n")
-    print("\nSee README.md for more example queries!")

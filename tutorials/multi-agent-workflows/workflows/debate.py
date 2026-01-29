@@ -13,31 +13,25 @@ Usage:
     python -m workflows.debate --local --request "Calculate 5 factorial" --agents math,math,code --rounds 2
 """
 
-import sys
-from pathlib import Path
 from typing import List, Dict
 from dataclasses import dataclass
 import flyte
 import json
-
-# Add workflows directory to Python path for imports
-workflows_dir = Path(__file__).parent
-sys.path.insert(0, str(workflows_dir))
-
-# Import agents (imports register them in agent_registry via decorators)
-from agents.math_agent import math_agent
-from agents.string_agent import string_agent
-from agents.web_search_agent import web_search_agent
-from agents.code_agent import code_agent
-from agents.weather_agent import weather_agent
-from config import base_env, OPENAI_API_KEY
-from utils.logger import Logger
-from utils.decorators import agent_registry
-from openai import AsyncOpenAI
+import re
 import asyncio
 
-# Initialize logger
-logger = Logger(path="debate_trace_log.jsonl", verbose=False)
+# Auto-import all agent modules to trigger @agent and @tool decorator registration
+from agents import import_all_agents
+import_all_agents()
+from config import base_env, OPENAI_API_KEY
+from utils.logger import Logger, setup_logging
+from utils.decorators import agent_registry
+from openai import AsyncOpenAI
+
+# Initialize trace logger for structured JSONL output
+trace_logger = Logger(path="debate_trace_log.jsonl", verbose=False)
+# Initialize standard logger for console output
+log = setup_logging(__name__)
 
 # ----------------------------------
 # Data Models
@@ -94,10 +88,10 @@ async def debate_workflow(
     Returns:
         DebateResult: Complete debate history and final consensus
     """
-    print("=" * 80)
-    print(f"DEBATE WORKFLOW - Task: {user_task}")
-    print(f"Participants: {agent_names}, Debate rounds: {num_debate_rounds}")
-    print("=" * 80)
+    log.info("=" * 80)
+    log.info(f"DEBATE WORKFLOW - Task: {user_task}")
+    log.info(f"Participants: {agent_names}, Debate rounds: {num_debate_rounds}")
+    log.info("=" * 80)
 
     # ----------------------------------
     # Initialization
@@ -122,17 +116,17 @@ async def debate_workflow(
             )
 
     num_agents = len(agent_names)
-    print(f"\n[Debate] {num_agents} agents will participate")
+    log.info(f"\n[Debate] {num_agents} agents will participate")
 
     # ----------------------------------
     # ROUND 0: Independent Initial Responses
     # ----------------------------------
     # All agents solve the same task in parallel WITHOUT seeing each other's work
     # This prevents groupthink and ensures diverse initial perspectives
-    print(f"\n{'='*80}")
-    print(f"ROUND 0 - INITIAL RESPONSES")
-    print(f"{'='*80}")
-    print(f"\n[Debate] All agents solving task in parallel...")
+    log.info(f"\n{'='*80}")
+    log.info(f"ROUND 0 - INITIAL RESPONSES")
+    log.info(f"{'='*80}")
+    log.info(f"\n[Debate] All agents solving task in parallel...")
 
     # ----------------------------------
     # Collect Initial Responses in Parallel
@@ -143,7 +137,7 @@ async def debate_workflow(
         result = await agent_func(user_task)
         response_text = getattr(result, 'summary', result.final_result)
 
-        print(f"[Debate] {agent_id} ({agent_name}): {str(response_text)[:100]}...")
+        log.info(f"[Debate] {agent_id} ({agent_name}): {str(response_text)[:100]}...")
 
         return AgentResponse(
             agent_id=agent_id,
@@ -169,7 +163,7 @@ async def debate_workflow(
         critiques=[]  # No critiques in round 0
     )
 
-    await logger.log(
+    await trace_logger.log(
         round=0,
         phase="initial_responses",
         num_responses=len(initial_responses)
@@ -187,9 +181,9 @@ async def debate_workflow(
     # ----------------------------------
     # Each round: agents see all responses → critique others → refine their own
     for round_num in range(1, num_debate_rounds + 1):
-        print(f"\n{'='*80}")
-        print(f"ROUND {round_num} - DEBATE & REFINEMENT")
-        print(f"{'='*80}")
+        log.info(f"\n{'='*80}")
+        log.info(f"ROUND {round_num} - DEBATE & REFINEMENT")
+        log.info(f"{'='*80}")
 
         # ----------------------------------
         # Build Shared Context for All Agents
@@ -200,7 +194,7 @@ async def debate_workflow(
             for resp in current_responses
         ])
 
-        print(f"\n[Debate] Agents reviewing each other's responses...")
+        log.info(f"\n[Debate] Agents reviewing each other's responses...")
 
         # ----------------------------------
         # Critique and Refinement Phase
@@ -254,7 +248,6 @@ Respond in JSON format:
                 data = json.loads(raw_response)
             except json.JSONDecodeError:
                 # Try to extract JSON from markdown
-                import re
                 json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_response, re.DOTALL)
                 if json_match:
                     data = json.loads(json_match.group(1))
@@ -276,7 +269,7 @@ Respond in JSON format:
             refined = data.get("refined_response", my_response)
             confidence = data.get("confidence", 5)  # Self-reported confidence (1-10)
 
-            print(f"[Debate] {agent_id} refined their response (confidence: {confidence}/10)")
+            log.info(f"[Debate] {agent_id} refined their response (confidence: {confidence}/10)")
 
             return (
                 critique,  # Agent's critique of other responses
@@ -321,7 +314,7 @@ Respond in JSON format:
         current_responses = refined_responses
 
         # Persist to log file
-        await logger.log(
+        await trace_logger.log(
             round=round_num,
             phase="debate",
             num_critiques=len(critiques),
@@ -332,9 +325,9 @@ Respond in JSON format:
     # FINAL SYNTHESIS: Reach Consensus
     # ----------------------------------
     # After all debate rounds, synthesize final answer from all perspectives
-    print(f"\n{'='*80}")
-    print(f"FINAL SYNTHESIS")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"FINAL SYNTHESIS")
+    log.info(f"{'='*80}")
 
     # Collect all final responses with confidence scores
     final_responses_text = "\n\n".join([
@@ -352,8 +345,8 @@ Respond in JSON format:
         # Simple democratic approach - agent with highest self-confidence wins
         winner = max(current_responses, key=lambda r: r.confidence)
         final_synthesis = f"Winner by confidence vote: {winner.agent_id}\n\n{winner.response}"
-        print(f"[Debate] Synthesis method: voting")
-        print(f"[Debate] Winner: {winner.agent_id} with confidence {winner.confidence}/10")
+        log.info(f"[Debate] Synthesis method: voting")
+        log.info(f"[Debate] Winner: {winner.agent_id} with confidence {winner.confidence}/10")
     else:
         # ----------------------------------
         # JUDGE: LLM Synthesizes Best Parts
@@ -373,7 +366,7 @@ Synthesize the best final answer by:
 
 Provide only the final synthesized answer, no meta-commentary."""
 
-        print(f"[Debate] Synthesis method: judge")
+        log.info(f"[Debate] Synthesis method: judge")
         judge_response = await client.chat.completions.create(
             model="gpt-4o",
             temperature=0.3,
@@ -381,9 +374,9 @@ Provide only the final synthesized answer, no meta-commentary."""
         )
 
         final_synthesis = judge_response.choices[0].message.content.strip()
-        print(f"[Debate] Judge has synthesized final answer")
+        log.info(f"[Debate] Judge has synthesized final answer")
 
-    print(f"\n📊 Final answer: {final_synthesis[:200]}...")
+    log.info(f"\nFinal answer: {final_synthesis[:200]}...")
 
     # ----------------------------------
     # Consensus Detection
@@ -392,11 +385,11 @@ Provide only the final synthesized answer, no meta-commentary."""
     avg_confidence = sum(r.confidence for r in current_responses) / len(current_responses)
     consensus_achieved = avg_confidence >= 7  # Threshold: 7/10 average confidence
 
-    print(f"\n{'='*80}")
-    print(f"WORKFLOW COMPLETE")
-    print(f"Total rounds: {num_debate_rounds + 1}, Average confidence: {avg_confidence:.1f}/10")
-    print(f"Consensus achieved: {consensus_achieved}")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"WORKFLOW COMPLETE")
+    log.info(f"Total rounds: {num_debate_rounds + 1}, Average confidence: {avg_confidence:.1f}/10")
+    log.info(f"Consensus achieved: {consensus_achieved}")
+    log.info(f"{'='*80}")
 
     # ----------------------------------
     # Return Complete Debate Trace
@@ -462,17 +455,17 @@ if __name__ == "__main__":
 
     # Initialize Flyte based on local/remote flag
     if args.local:
-        print("Running workflow LOCALLY with flyte.init()")
+        log.info("Running workflow LOCALLY with flyte.init()")
         flyte.init()
     else:
-        print("Running workflow REMOTELY with flyte.init_from_config()")
+        log.info("Running workflow REMOTELY with flyte.init_from_config()")
         flyte.init_from_config(".flyte/config.yaml")
 
-    print(f"\n=== Debate Multi-Agent Workflow ===")
-    print(f"Task: {args.request}")
-    print(f"Agents: {agent_list}")
-    print(f"Debate rounds: {args.rounds}")
-    print(f"Synthesis: {args.synthesis}\n")
+    log.info(f"\n=== Debate Multi-Agent Workflow ===")
+    log.info(f"Task: {args.request}")
+    log.info(f"Agents: {agent_list}")
+    log.info(f"Debate rounds: {args.rounds}")
+    log.info(f"Synthesis: {args.synthesis}\n")
 
     # Execute the workflow
     execution = flyte.run(
@@ -483,8 +476,7 @@ if __name__ == "__main__":
         synthesis_method=args.synthesis
     )
 
-    print(f"\n{'='*80}")
-    print(f"Execution: {execution.name}")
-    print(f"URL: {execution.url}")
-    print("Click the link above to view execution details in the Flyte UI")
-    print(f"{'='*80}\n")
+    log.info(f"\n{'='*80}")
+    log.info(f"Execution: {execution.name}")
+    log.info(f"URL: {execution.url}")
+    log.info(f"{'='*80}\n")
