@@ -28,9 +28,7 @@ from utils.logger import Logger, setup_logging
 from utils.decorators import agent_registry
 from openai import AsyncOpenAI
 
-# Initialize trace logger for structured JSONL output
 trace_logger = Logger(path="react_trace_log.jsonl", verbose=False)
-# Initialize standard logger for console output
 log = setup_logging(__name__)
 
 # ----------------------------------
@@ -41,11 +39,11 @@ log = setup_logging(__name__)
 class ReActStep:
     """Single step in ReAct execution"""
     step_number: int
-    thought: str          # Reasoning about what to do
-    action_agent: str     # Which agent to call
-    action_task: str      # What task to give the agent
-    observation: str      # Result from the agent
-    reflection: str       # Analysis of the result
+    thought: str
+    action_agent: str
+    action_task: str
+    observation: str
+    reflection: str
 
 
 @dataclass
@@ -83,12 +81,12 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
     # ----------------------------------
     # Initialization
     # ----------------------------------
-    # Set up LLM client and tracking structures for the iterative loop
+    
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
     # Track all steps in the ReAct cycle (Thought → Action → Observation → Reflection)
     steps: List[ReActStep] = []
-    context_history = []  # Sliding window of recent steps for LLM context
+    context_history = []
     goal_achieved = False
 
     # Available specialist agents that can be called during execution
@@ -113,7 +111,7 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
                 f"Action: {s['action_agent']} - {s['action_task']}\n"
                 f"Result: {s['observation']}\n"
                 f"Reflection: {s['reflection']}"
-                for s in context_history[-3:]  # Sliding window: only last 3 steps
+                for s in context_history[-3:]
             ])
         else:
             history_text = "No previous steps."
@@ -287,7 +285,7 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
             thought=thought,
             action_agent=action_agent,
             action_task=action_task,
-            observation=observation[:500],  # Truncate for logging
+            observation=observation[:500],
             reflection=reflection
         )
 
@@ -309,10 +307,10 @@ async def react_workflow(user_goal: str, max_steps: int = 10) -> ReActResult:
     # Package all steps and final answer into structured result for caller
     return ReActResult(
         goal=user_goal,
-        steps=steps,                    # Full Thought→Action→Observation→Reflection history
-        final_answer=final_answer,      # Final answer (from LLM or fallback)
+        steps=steps,
+        final_answer=final_answer,
         total_steps=len(steps),
-        goal_achieved=goal_achieved     # True if LLM declared success, False if hit max_steps
+        goal_achieved=goal_achieved
     )
 
 

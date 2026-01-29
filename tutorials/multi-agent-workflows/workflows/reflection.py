@@ -101,11 +101,11 @@ async def reflection_workflow(
     available_agents = list(agent_registry.keys())
     agent_selection_prompt = f"""Given this task, which agent is most appropriate?
 
-Task: {user_task}
+        Task: {user_task}
 
-Available agents: {', '.join(available_agents)}
+        Available agents: {', '.join(available_agents)}
 
-Respond with ONLY the agent name (e.g., "math")."""
+        Respond with ONLY the agent name (e.g., "math")."""
 
     agent_response = await client.chat.completions.create(
         model="gpt-4o-mini",
@@ -130,7 +130,7 @@ Respond with ONLY the agent name (e.g., "math")."""
     # Execute agent to get initial response
     result = await agent_func(user_task)
     current_response = getattr(result, 'summary', result.final_result)
-    initial_response = current_response  # Store for comparison at end
+    initial_response = current_response 
 
     log.info(f"[Reflection] Initial response: {current_response[:200]}...")
 
@@ -152,22 +152,22 @@ Respond with ONLY the agent name (e.g., "math")."""
         # LLM acts as critic, evaluating quality and identifying specific issues
         reflection_prompt = f"""You are a critic evaluating the quality of a response.
 
-Task: {user_task}
-Current Response: {current_response}
+            Task: {user_task}
+            Current Response: {current_response}
 
-Analyze this response and provide:
-1. Quality score (1-10, where 10 is perfect)
-2. List of specific issues or areas for improvement
-3. Suggestions for refinement
+            Analyze this response and provide:
+            1. Quality score (1-10, where 10 is perfect)
+            2. List of specific issues or areas for improvement
+            3. Suggestions for refinement
 
-Respond in JSON format:
-{{
-  "quality_score": <1-10>,
-  "issues": ["issue 1", "issue 2", ...],
-  "suggestions": "Detailed suggestions for improvement"
-}}
+            Respond in JSON format:
+            {{
+            "quality_score": <1-10>,
+            "issues": ["issue 1", "issue 2", ...],
+            "suggestions": "Detailed suggestions for improvement"
+            }}
 
-Be critical but constructive. If the response is excellent, give it a high score and minimal issues."""
+            Be critical but constructive. If the response is excellent, give it a high score and minimal issues."""
 
         log.info(f"\n[Reflection] Current response: {current_response[:300]}{'...' if len(current_response) > 300 else ''}")
         log.info("[Reflection] Evaluating response quality...")
@@ -227,7 +227,7 @@ Be critical but constructive. If the response is excellent, give it a high score
                 improvements_made="Quality threshold achieved - no further refinement needed"
             ))
 
-            break  # Exit iteration loop
+            break
 
         # ----------------------------------
         # Refinement Phase - Address Critique Feedback
@@ -263,7 +263,7 @@ Respond with ONLY the improved response, no explanations or metadata."""
         improvements_made = f"Addressed: {', '.join(issues[:3])}" if issues else "General refinement"
         iterations.append(ReflectionIteration(
             iteration=iteration,
-            response=current_response,              # Response BEFORE refinement
+            response=current_response,
             reflection=raw_reflection,
             quality_score=quality_score,
             issues_found=issues,
@@ -284,7 +284,7 @@ Respond with ONLY the improved response, no explanations or metadata."""
             quality_score=quality_score,
             issues_count=len(issues),
             issues=issues,
-            suggestions=suggestions[:200],  # Truncate for logging
+            suggestions=suggestions[:200],
             response_length=len(current_response)
         )
 
@@ -298,7 +298,7 @@ Respond with ONLY the improved response, no explanations or metadata."""
     else:
         final_quality = quality_score
 
-    final_response = current_response  # This is either: refined response or initial if threshold met on first iteration
+    final_response = current_response
 
     log.info(f"\n{'='*80}")
     log.info(f"WORKFLOW COMPLETE")
@@ -312,13 +312,13 @@ Respond with ONLY the improved response, no explanations or metadata."""
     # Package initial response, all iterations, and final refined output
     return ReflectionResult(
         task=user_task,
-        agent_used=selected_agent,              # Which agent was selected
-        initial_response=initial_response,      # First-pass response (before any refinement)
-        final_response=final_response,          # Final refined response
-        iterations=iterations,                  # Full critique → refine history
+        agent_used=selected_agent,
+        initial_response=initial_response,
+        final_response=final_response,
+        iterations=iterations,
         total_iterations=len(iterations),
         final_quality_score=final_quality,
-        converged=converged                     # True if threshold met, False if hit max_iterations
+        converged=converged
     )
 
 

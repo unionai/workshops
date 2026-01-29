@@ -14,23 +14,17 @@ from dataclasses import dataclass
 import flyte
 import asyncio
 
-# Import agents (they are now Flyte tasks with their own environments)
 from agents import import_all_agents
 from agents.planner_agent import planner_agent, AgentStep
-
-# Auto-import all agent modules to trigger @agent and @tool decorator registration
 import_all_agents()
+
 from config import base_env
 from utils.logger import Logger, setup_logging
 from utils.decorators import agent_registry
 from utils.plan_executor import set_logger
 
-# Initialize trace logger for structured JSONL output
 trace_logger = Logger(path="planner_trace_log.jsonl", verbose=False)
-# Share logger with plan_executor so all traces go to one file
 set_logger(trace_logger)
-
-# Initialize standard logger for console/Flyte UI output
 log = setup_logging(__name__)
 
 # ----------------------------------
@@ -96,8 +90,8 @@ class AgentExecution:
     """Single agent execution with its result"""
     agent: str
     task: str
-    result_summary: str  # Concise summary for passing to dependent steps
-    result_full: str     # Complete result for final output and debugging
+    result_summary: str
+    result_full: str
     error: str = ""
 
 
@@ -106,7 +100,7 @@ class TaskResult:
     """Final result from dynamic task execution"""
     planner_decision_summary: str
     agent_executions: List[AgentExecution]
-    final_result: str  # Combined final result
+    final_result: str
 
 
 # ----------------------------------
@@ -304,9 +298,9 @@ async def planner_agent_workflow(user_request: str) -> TaskResult:
     # ----------------------------------
     # Package plan summary, individual executions, and final result
     return TaskResult(
-        planner_decision_summary=planner_summary,  # "3 step(s): math, string, code"
-        agent_executions=agent_executions,         # Full per-step execution details
-        final_result=combined_result               # Aggregated final answer
+        planner_decision_summary=planner_summary,
+        agent_executions=agent_executions,
+        final_result=combined_result
     )
 
 
