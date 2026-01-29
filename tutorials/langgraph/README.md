@@ -28,6 +28,26 @@ python -m agent_research.workflow --local --query "Compare quantum computing app
 | `--num-topics` | 3 | Number of sub-topics to research in parallel |
 | `--max-searches` | 2 | Max web searches per sub-topic |
 
+### ReAct Agent
+
+Reason → Act → Observe loop with math and string tools. The agent breaks down problems step-by-step, choosing the right tool at each stage.
+
+```
+react_agent
+  └── agent →(tool calls?)→ tools → agent →(loop)→ END
+       Tools: add, multiply, power, word_count, letter_count, reverse_string
+```
+
+```bash
+python -m agent_react.workflow --local --request "How many words are in 'the quick brown fox jumps over the lazy dog' multiplied by 5?"
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--local` | off | Run locally instead of on Flyte cluster |
+| `--request` | required | Task for the agent to solve |
+| `--max-steps` | 10 | Max reasoning steps |
+
 ## Setup
 
 ```bash
@@ -75,11 +95,17 @@ tutorials/langgraph/
 ├── requirements.txt       # Shared dependencies
 ├── tools/
 │   ├── __init__.py
-│   └── search.py          # web_search tool (reusable across agents)
+│   ├── search.py          # web_search tool
+│   ├── math.py            # add, multiply, power
+│   └── string.py          # word_count, letter_count, reverse_string
 ├── agent_research/
 │   ├── __init__.py
-│   ├── graph.py           # LangGraph agent with tool calling
-│   └── workflow.py        # Flyte tasks + CLI
+│   ├── graph.py           # Research graph with search tool calling
+│   └── workflow.py        # Parallel fan-out + synthesize
+├── agent_react/
+│   ├── __init__.py
+│   ├── graph.py           # ReAct graph with math + string tools
+│   └── workflow.py        # Single task + reasoning trace report
 └── agent_reflection/      # (coming soon)
 ```
 
