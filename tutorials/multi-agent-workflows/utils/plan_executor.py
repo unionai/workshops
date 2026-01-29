@@ -4,7 +4,19 @@ import re
 from utils.logger import Logger
 from utils.decorators import agent_tools
 
-logger = Logger()
+# Default logger; workflows can override via set_logger() to consolidate traces
+_logger = None
+
+def set_logger(logger: Logger):
+    """Set the logger instance for plan execution traces. Call this from your workflow to consolidate all traces into one file."""
+    global _logger
+    _logger = logger
+
+def _get_logger():
+    global _logger
+    if _logger is None:
+        _logger = Logger(path="plan_executor_trace_log.jsonl")
+    return _logger
 
 
 def parse_plan_from_response(raw_plan: str) -> list:
@@ -100,15 +112,15 @@ async def execute_tool_plan(plan: list, agent: str) -> dict:
                 else:
                     result = tool_func(*args)
             else:
-                await logger.log(tool=tool_name, args=args, error="Unknown tool", reasoning=reasoning)
+                await _get_logger().log(tool=tool_name, args=args, error="Unknown tool", reasoning=reasoning)
                 raise ValueError(f"Unknown tool: {tool_name}")
 
-            await logger.log(tool=tool_name, args=args, result=result, reasoning=reasoning)
+            await _get_logger().log(tool=tool_name, args=args, result=result, reasoning=reasoning)
             steps_log.append({"tool": tool_name, "args": args, "result": result, "reasoning": reasoning})
             last_result = result
 
         return {"final_result": last_result, "steps": steps_log}
 
     except Exception as e:
-        await logger.log(tool=tool_name if "tool_name" in locals() else "unknown", args=args if "args" in locals() else [], error=str(e))
+        await _get_logger().log(tool=tool_name if "tool_name" in locals() else "unknown", args=args if "args" in locals() else [], error=str(e))
         return {"error": str(e), "steps": steps_log}
