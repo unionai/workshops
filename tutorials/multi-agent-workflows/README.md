@@ -2,6 +2,17 @@
 
 A framework for orchestrating multiple AI agents using six distinct workflow patterns. Each workflow demonstrates a different approach to coordinating agents for complex tasks.
 
+**Agent Pattern Comparison:**
+
+| Pattern | Coordination | Best For |
+|---------|--------------|----------|
+| **Planner** | Static plan → parallel waves | Known decomposition, maximize speed |
+| **ReAct** | Adaptive single agent | Exploration, unknown steps |
+| **Reflection** | Self-improvement | High quality single outputs |
+| **Sequential** | Fixed pipeline | Predictable workflows |
+| **Debate** | Peer collaboration | Accuracy through consensus |
+| **Manager-Worker** | Hierarchical supervision | Quality control, complex projects |
+
 ## Setup
 
 ### Local Setup
