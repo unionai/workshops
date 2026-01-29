@@ -4,19 +4,14 @@ Orchestrating multiple AI agents at scale using six distinct workflow patterns. 
 
 **Agent Pattern Comparison:**
 
-| Pattern | Coordination | Best For |
-|---------|--------------|----------|
-| **Planner** | Static plan → parallel waves | Known decomposition, maximize speed | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb">
-<img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-| **ReAct** | Adaptive single agent | Exploration, unknown steps | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_react_agent.ipynb">
-<img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-| **Reflection** | Self-improvement | High quality single outputs | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_reflection_agent.ipynb">
-<img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-| **Sequential** | Fixed pipeline | Predictable workflows | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb">
-<img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-| **Debate** | Peer collaboration | Accuracy through consensus | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_debate_agent.ipynb">
-<img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
-| **Manager-Worker** | Hierarchical supervision | Quality control, complex projects |
+| Pattern | Coordination | Best For | Run in Colab |
+|---------|--------------|----------|--------------|
+| **Planner** | Static plan → parallel waves | Known decomposition, maximize speed | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> |
+| **ReAct** | Adaptive single agent | Exploration, unknown steps | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_react_agent.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> |
+| **Reflection** | Self-improvement | High quality single outputs | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_reflection_agent.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> |
+| **Sequential** | Fixed pipeline | Predictable workflows | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> |
+| **Debate** | Peer collaboration | Accuracy through consensus | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_debate_agent.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> |
+| **Manager-Worker** | Hierarchical supervision | Quality control, complex projects | <a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>|
 
 
 ## Setup
