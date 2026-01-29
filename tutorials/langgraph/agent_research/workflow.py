@@ -133,7 +133,7 @@ async def synthesize_reports(query: str, reports_json: str) -> str:
 # Orchestrator: plan → fan-out research → synthesize
 # ------------------------------------------------------------------
 
-@env.task
+@env.task(report=True)
 async def research_workflow(query: str, num_topics: int = 3, max_searches: int = 2) -> str:
     """
     Full research workflow:
@@ -142,6 +142,17 @@ async def research_workflow(query: str, num_topics: int = 3, max_searches: int =
     3. Synthesize into final report
     """
     log.info(f"Starting research workflow: {query}")
+
+    # Visualize the LangGraph agent graph in the report
+    import base64
+    graph = build_research_graph(OPENAI_API_KEY, TAVILY_API_KEY, max_searches)
+    png_bytes = graph.get_graph().draw_mermaid_png()
+    img_b64 = base64.b64encode(png_bytes).decode()
+    await flyte.report.log.aio(
+        f"<h2>Research Agent Graph</h2>"
+        f'<img src="data:image/png;base64,{img_b64}" alt="LangGraph agent graph" />'
+    )
+    await flyte.report.flush.aio()
 
     topics = await plan_research(query, num_topics)
 
