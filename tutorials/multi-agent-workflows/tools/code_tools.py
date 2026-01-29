@@ -39,6 +39,15 @@ print(f"5! = {result}")
     result_value = None
     error_msg = ""
 
+    # Allowed modules that can be imported in the sandbox
+    ALLOWED_MODULES = {'math', 'json', 're', 'datetime', 'statistics', 'collections', 'itertools', 'functools'}
+
+    def safe_import(name, *args, **kwargs):
+        """Only allow importing from the approved module list."""
+        if name not in ALLOWED_MODULES:
+            raise ImportError(f"Module '{name}' is not allowed. Allowed: {', '.join(sorted(ALLOWED_MODULES))}")
+        return __import__(name, *args, **kwargs)
+
     # Create a restricted namespace for execution
     safe_namespace = {
         '__builtins__': {
@@ -70,11 +79,12 @@ print(f"5! = {result}")
             # Output
             'print': print,
             # Allow safe imports
+            '__import__': safe_import,
             'True': True,
             'False': False,
             'None': None,
         },
-        # Allow commonly needed modules (can be expanded)
+        # Pre-loaded modules for convenience
         'math': __import__('math'),
         'json': __import__('json'),
         're': __import__('re'),
@@ -86,7 +96,7 @@ print(f"5! = {result}")
         # Execute code with captured stdout
         with contextlib.redirect_stdout(stdout_capture):
             # Use exec for statements, eval for expressions
-            exec_result = exec(code, safe_namespace)
+            exec(code, safe_namespace)
 
             # Try to get 'result' variable if it exists
             if 'result' in safe_namespace:

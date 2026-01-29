@@ -15,30 +15,24 @@ Usage:
     python -m workflows.manager --local --request "Build a REST API for user management"
 """
 
-import sys
-from pathlib import Path
 from typing import List
 from dataclasses import dataclass
 import flyte
 import json
+import re
 
-# Add workflows directory to Python path for imports
-workflows_dir = Path(__file__).parent
-sys.path.insert(0, str(workflows_dir))
-
-# Import agents (imports register them in agent_registry via decorators)
-from agents.math_agent import math_agent
-from agents.string_agent import string_agent
-from agents.web_search_agent import web_search_agent
-from agents.code_agent import code_agent
-from agents.weather_agent import weather_agent
+# Auto-import all agent modules to trigger @agent and @tool decorator registration
+from agents import import_all_agents
+import_all_agents()
 from config import base_env, OPENAI_API_KEY
-from utils.logger import Logger
+from utils.logger import Logger, setup_logging
 from utils.decorators import agent_registry
 from openai import AsyncOpenAI
 
-# Initialize logger
-logger = Logger(path="manager_trace_log.jsonl", verbose=False)
+# Initialize trace logger for structured JSONL output
+trace_logger = Logger(path="manager_trace_log.jsonl", verbose=False)
+# Initialize standard logger for console output
+log = setup_logging(__name__)
 
 # ----------------------------------
 # Data Models
@@ -105,11 +99,11 @@ async def manager_workflow(
     Returns:
         ManagerResult: Complete execution with manager reviews and final synthesis
     """
-    print("=" * 80)
-    print(f"MANAGER-WORKER WORKFLOW")
-    print(f"Project: {user_request}")
-    print(f"Quality threshold: {quality_threshold}/10")
-    print("=" * 80)
+    log.info("=" * 80)
+    log.info(f"MANAGER-WORKER WORKFLOW")
+    log.info(f"Project: {user_request}")
+    log.info(f"Quality threshold: {quality_threshold}/10")
+    log.info("=" * 80)
 
     # ----------------------------------
     # Initialization
@@ -118,22 +112,22 @@ async def manager_workflow(
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
     # Available specialist workers that manager can delegate to
-    available_workers = ["math", "string", "web_search", "code", "weather"]
+    available_workers = list(agent_registry.keys())
 
     # ----------------------------------
     # PHASE 1: Manager Creates Delegation Plan
     # ----------------------------------
     # Manager analyzes project and breaks it into worker tasks with dependencies
-    print(f"\n{'='*80}")
-    print(f"PHASE 1 - MANAGER PLANNING")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"PHASE 1 - MANAGER PLANNING")
+    log.info(f"{'='*80}")
 
     planning_prompt = f"""You are a manager agent coordinating specialist workers.
 
 Project: {user_request}
 
 Available workers:
-{chr(10).join([f"- {worker}: {worker} specialist" for worker in available_workers])}
+{chr(10).join([f"- {worker}" for worker in available_workers])}
 
 Break this project into discrete tasks for workers. For each task:
 1. Choose appropriate worker
@@ -155,7 +149,7 @@ Respond in JSON format:
 
 Keep tasks focused and manageable. Use dependencies to ensure proper ordering."""
 
-    print("\n[Manager] Analyzing project and creating delegation plan...")
+    log.info("\n[Manager] Analyzing project and creating delegation plan...")
 
     planning_response = await client.chat.completions.create(
         model="gpt-4o",
@@ -169,7 +163,6 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
     try:
         plan_data = json.loads(raw_plan)
     except json.JSONDecodeError:
-        import re
         json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_plan, re.DOTALL)
         if json_match:
             plan_data = json.loads(json_match.group(1))
@@ -191,12 +184,12 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
         for task in plan_data["tasks"]
     ]
 
-    print(f"\n[Manager] Created plan with {len(delegation_plan)} task(s):")
+    log.info(f"\n[Manager] Created plan with {len(delegation_plan)} task(s):")
     for task in delegation_plan:
         deps = f" (depends on: {task.dependencies})" if task.dependencies else " (no dependencies)"
-        print(f"  Task {task.task_id}: {task.agent} - {task.description[:60]}...{deps}")
+        log.info(f"  Task {task.task_id}: {task.agent} - {task.description[:60]}...{deps}")
 
-    await logger.log(
+    await trace_logger.log(
         phase="planning",
         num_tasks=len(delegation_plan)
     )
@@ -205,9 +198,9 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
     # PHASE 2: Supervised Execution with Quality Gates
     # ----------------------------------
     # Manager delegates tasks to workers, reviews outputs, and requests revisions if needed
-    print(f"\n{'='*80}")
-    print(f"PHASE 2 - SUPERVISED EXECUTION")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"PHASE 2 - SUPERVISED EXECUTION")
+    log.info(f"{'='*80}")
 
     worker_results = []
     completed_tasks = {}  # task_id -> result
@@ -235,7 +228,7 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
 
         # Circular dependency detection
         if not ready_tasks:
-            print("[Manager] ERROR: No tasks ready but pending tasks remain (circular dependency?)")
+            log.error("[Manager] No tasks ready but pending tasks remain (circular dependency?)")
             break
 
         # ----------------------------------
@@ -243,8 +236,8 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
         # ----------------------------------
         # Execute ready tasks sequentially (manager reviews each output before delegating next)
         for task in ready_tasks:
-            print(f"\n[Manager] Delegating Task {task.task_id} to {task.agent} worker...")
-            print(f"[Manager] Task: {task.description}")
+            log.info(f"\n[Manager] Delegating Task {task.task_id} to {task.agent} worker...")
+            log.info(f"[Manager] Task: {task.description}")
 
             # ----------------------------------
             # Context Injection - How Results Flow to Workers
@@ -265,7 +258,7 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
             worker_func = agent_registry.get(task.agent)
             if not worker_func:
                 # Unknown worker - the manager hallucinated or requested invalid agent
-                print(f"[Manager] ERROR: Unknown worker '{task.agent}'")
+                log.error(f"[Manager] Unknown worker '{task.agent}'")
                 worker_results.append(WorkerResult(
                     task_id=task.task_id,
                     agent=task.agent,
@@ -291,7 +284,7 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
             current_output = getattr(result, 'summary', result.final_result)
             initial_output = str(current_output)
 
-            print(f"[Worker {task.agent}] Completed initial output: {str(current_output)[:150]}...")
+            log.info(f"[Worker {task.agent}] Completed initial output: {str(current_output)[:150]}...")
 
             # ----------------------------------
             # Manager Review and Revision Cycle
@@ -327,7 +320,7 @@ Respond in JSON format:
   "feedback": "detailed feedback if not approved"
 }}"""
 
-                print(f"\n[Manager] Reviewing worker output...")
+                log.info(f"\n[Manager] Reviewing worker output...")
 
                 review_response = await client.chat.completions.create(
                     model="gpt-4o",
@@ -344,7 +337,6 @@ Respond in JSON format:
                 try:
                     review_data = json.loads(raw_review)
                 except json.JSONDecodeError:
-                    import re
                     json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_review, re.DOTALL)
                     if json_match:
                         review_data = json.loads(json_match.group(1))
@@ -368,24 +360,24 @@ Respond in JSON format:
                     feedback=review_data.get("feedback", "")
                 )
 
-                print(f"[Manager] Quality score: {review.quality_score}/10")
+                log.info(f"[Manager] Quality score: {review.quality_score}/10")
                 if review.issues:
-                    print(f"[Manager] Issues found: {', '.join(review.issues)}")
+                    log.info(f"[Manager] Issues found: {', '.join(review.issues)}")
 
                 # ----------------------------------
                 # Approval Decision - Check Quality Threshold
                 # ----------------------------------
                 # If quality meets threshold, accept output and move to next task
                 if review.approved:
-                    print(f"[Manager] ✅ APPROVED - Task {task.task_id} meets quality standards")
+                    log.info(f"[Manager] APPROVED - Task {task.task_id} meets quality standards")
                     break
                 elif revision_num < max_revisions_per_task:
                     # ----------------------------------
                     # Revision Request - Worker Improves Output
                     # ----------------------------------
                     # Manager provides specific feedback; worker produces revised output
-                    print(f"[Manager] ❌ NEEDS REVISION - Requesting improvements...")
-                    print(f"[Manager] Feedback: {review.feedback}")
+                    log.info(f"[Manager] NEEDS REVISION - Requesting improvements...")
+                    log.info(f"[Manager] Feedback: {review.feedback}")
 
                     # Build revision task with original task + previous output + manager feedback
                     revision_task = f"""Original task: {task.description}
@@ -402,13 +394,13 @@ Please revise your output to address the manager's feedback."""
                     current_output = getattr(result, 'summary', result.final_result)
                     revisions_history.append(review.feedback)
 
-                    print(f"[Worker {task.agent}] Submitted revision: {str(current_output)[:150]}...")
+                    log.info(f"[Worker {task.agent}] Submitted revision: {str(current_output)[:150]}...")
                 else:
                     # ----------------------------------
                     # Max Revisions Reached - Accept Current Output
                     # ----------------------------------
                     # After max revision cycles, accept output even if below quality threshold
-                    print(f"[Manager] ⚠️  Max revisions reached - accepting current output")
+                    log.warning(f"[Manager] Max revisions reached - accepting current output")
                     review.approved = True  # Accept despite issues
                     break
 
@@ -429,7 +421,7 @@ Please revise your output to address the manager's feedback."""
             completed_tasks[task.task_id] = str(current_output)
 
             # Log task completion
-            await logger.log(
+            await trace_logger.log(
                 task_id=task.task_id,
                 agent=task.agent,
                 quality_score=review.quality_score,
@@ -444,9 +436,9 @@ Please revise your output to address the manager's feedback."""
     # PHASE 3: Final Synthesis
     # ----------------------------------
     # Manager integrates all worker outputs into coherent final deliverable
-    print(f"\n{'='*80}")
-    print(f"PHASE 3 - FINAL SYNTHESIS")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"PHASE 3 - FINAL SYNTHESIS")
+    log.info(f"{'='*80}")
 
     # ----------------------------------
     # Collect All Worker Outputs
@@ -475,7 +467,7 @@ Create a coherent final deliverable that:
 
 Provide the final synthesized deliverable:"""
 
-    print("\n[Manager] Synthesizing final deliverable from all worker outputs...")
+    log.info("\n[Manager] Synthesizing final deliverable from all worker outputs...")
 
     synthesis_response = await client.chat.completions.create(
         model="gpt-4o",
@@ -485,7 +477,7 @@ Provide the final synthesized deliverable:"""
 
     final_synthesis = synthesis_response.choices[0].message.content.strip()
 
-    print(f"\n[Manager] Final deliverable: {final_synthesis[:200]}...")
+    log.info(f"\n[Manager] Final deliverable: {final_synthesis[:200]}...")
 
     # ----------------------------------
     # Calculate Success Metrics
@@ -494,11 +486,11 @@ Provide the final synthesized deliverable:"""
     total_revisions = sum(len(wr.revisions) for wr in worker_results)
     success = all(wr.review.approved for wr in worker_results)
 
-    print(f"\n{'='*80}")
-    print(f"PROJECT COMPLETE")
-    print(f"Tasks: {len(worker_results)}, Total revisions: {total_revisions}")
-    print(f"Success: {success}")
-    print(f"{'='*80}")
+    log.info(f"\n{'='*80}")
+    log.info(f"PROJECT COMPLETE")
+    log.info(f"Tasks: {len(worker_results)}, Total revisions: {total_revisions}")
+    log.info(f"Success: {success}")
+    log.info(f"{'='*80}")
 
     # ----------------------------------
     # Return Complete Execution Trace
@@ -554,16 +546,16 @@ if __name__ == "__main__":
 
     # Initialize Flyte based on local/remote flag
     if args.local:
-        print("Running workflow LOCALLY with flyte.init()")
+        log.info("Running workflow LOCALLY with flyte.init()")
         flyte.init()
     else:
-        print("Running workflow REMOTELY with flyte.init_from_config()")
+        log.info("Running workflow REMOTELY with flyte.init_from_config()")
         flyte.init_from_config(".flyte/config.yaml")
 
-    print(f"\n=== Manager-Worker Multi-Agent Workflow ===")
-    print(f"Project: {args.request}")
-    print(f"Quality threshold: {args.quality_threshold}/10")
-    print(f"Max revisions per task: {args.max_revisions}\n")
+    log.info(f"\n=== Manager-Worker Multi-Agent Workflow ===")
+    log.info(f"Project: {args.request}")
+    log.info(f"Quality threshold: {args.quality_threshold}/10")
+    log.info(f"Max revisions per task: {args.max_revisions}\n")
 
     # Execute the workflow
     execution = flyte.run(
@@ -573,8 +565,7 @@ if __name__ == "__main__":
         max_revisions_per_task=args.max_revisions
     )
 
-    print(f"\n{'='*80}")
-    print(f"Execution: {execution.name}")
-    print(f"URL: {execution.url}")
-    print("Click the link above to view execution details in the Flyte UI")
-    print(f"{'='*80}\n")
+    log.info(f"\n{'='*80}")
+    log.info(f"Execution: {execution.name}")
+    log.info(f"URL: {execution.url}")
+    log.info(f"{'='*80}\n")
