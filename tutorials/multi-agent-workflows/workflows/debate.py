@@ -28,9 +28,7 @@ from utils.logger import Logger, setup_logging
 from utils.decorators import agent_registry
 from openai import AsyncOpenAI
 
-# Initialize trace logger for structured JSONL output
 trace_logger = Logger(path="debate_trace_log.jsonl", verbose=False)
-# Initialize standard logger for console output
 log = setup_logging(__name__)
 
 # ----------------------------------
@@ -40,17 +38,17 @@ log = setup_logging(__name__)
 @dataclass
 class AgentResponse:
     """Single agent's response in a debate round"""
-    agent_id: str  # e.g., "math_0", "code_1"
-    agent_type: str  # e.g., "math", "code"
+    agent_id: str 
+    agent_type: str
     response: str
-    confidence: int = 0  # Optional: 1-10 confidence score
+    confidence: int = 0
 
 @dataclass
 class DebateRound:
     """Single round of debate"""
     round_number: int
     responses: List[AgentResponse]
-    critiques: List[str]  # Each agent's critique of others' responses
+    critiques: List[str]
 
 @dataclass
 class DebateResult:
@@ -212,25 +210,25 @@ async def debate_workflow(
             # Agent sees all responses and must critique others + refine their own
             debate_prompt = f"""You are participating in a multi-agent debate to solve this task:
 
-TASK: {user_task}
+                TASK: {user_task}
 
-All agents' current responses:
-{responses_context}
+                All agents' current responses:
+                {responses_context}
 
-Your previous response was:
-{my_response}
+                Your previous response was:
+                {my_response}
 
-Now:
-1. Critique the other agents' responses - what are their strengths and weaknesses?
-2. Defend or refine your own response based on what you learned
-3. Provide your final improved answer
+                Now:
+                1. Critique the other agents' responses - what are their strengths and weaknesses?
+                2. Defend or refine your own response based on what you learned
+                3. Provide your final improved answer
 
-Respond in JSON format:
-{{
-  "critique": "Your analysis of other responses",
-  "refined_response": "Your improved answer to the task",
-  "confidence": <1-10>
-}}"""
+                Respond in JSON format:
+                {{
+                "critique": "Your analysis of other responses",
+                "refined_response": "Your improved answer to the task",
+                "confidence": <1-10>
+                }}"""
 
             response = await client.chat.completions.create(
                 model="gpt-4o",
@@ -272,12 +270,12 @@ Respond in JSON format:
             log.info(f"[Debate] {agent_id} refined their response (confidence: {confidence}/10)")
 
             return (
-                critique,  # Agent's critique of other responses
+                critique,
                 AgentResponse(
                     agent_id=agent_id,
                     agent_type=agent_name,
-                    response=refined,        # Improved response after seeing peers
-                    confidence=confidence    # Used later for voting synthesis
+                    response=refined,
+                    confidence=confidence
                 )
             )
 
@@ -302,8 +300,8 @@ Respond in JSON format:
         # ----------------------------------
         round_data = DebateRound(
             round_number=round_num,
-            responses=refined_responses,  # Responses AFTER refinement
-            critiques=critiques           # What each agent said about others
+            responses=refined_responses,
+            critiques=critiques
         )
         debate_rounds.append(round_data)
 
@@ -383,7 +381,7 @@ Provide only the final synthesized answer, no meta-commentary."""
     # ----------------------------------
     # Check if agents converged to similar conclusions (high avg confidence)
     avg_confidence = sum(r.confidence for r in current_responses) / len(current_responses)
-    consensus_achieved = avg_confidence >= 7  # Threshold: 7/10 average confidence
+    consensus_achieved = avg_confidence >= 7
 
     log.info(f"\n{'='*80}")
     log.info(f"WORKFLOW COMPLETE")
@@ -397,12 +395,12 @@ Provide only the final synthesized answer, no meta-commentary."""
     # Package initial round, all debate rounds, synthesis, and consensus info
     return DebateResult(
         task=user_task,
-        participating_agents=agent_names,        # Which agents participated
-        initial_round=initial_round,             # Round 0: independent responses
-        debate_rounds=debate_rounds,             # Rounds 1-N: critique + refinement
-        final_synthesis=final_synthesis,         # Final answer (via vote or judge)
-        total_rounds=num_debate_rounds + 1,      # +1 for initial round
-        consensus_achieved=consensus_achieved    # True if high avg confidence
+        participating_agents=agent_names,
+        initial_round=initial_round,
+        debate_rounds=debate_rounds,
+        final_synthesis=final_synthesis,
+        total_rounds=num_debate_rounds + 1,
+        consensus_achieved=consensus_achieved
     )
 
 

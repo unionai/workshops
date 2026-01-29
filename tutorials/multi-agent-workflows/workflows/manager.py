@@ -44,13 +44,13 @@ class WorkerTask:
     task_id: int
     agent: str
     description: str
-    dependencies: List[int]  # Task IDs this depends on
+    dependencies: List[int]
 
 @dataclass
 class ManagerReview:
     """Manager's review of worker output"""
     approved: bool
-    quality_score: int  # 1-10
+    quality_score: int
     issues: List[str]
     feedback: str
 
@@ -62,7 +62,7 @@ class WorkerResult:
     description: str
     initial_output: str
     final_output: str
-    revisions: List[str]  # History of revision feedback
+    revisions: List[str]
     review: ManagerReview
 
 @dataclass
@@ -203,7 +203,7 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
     log.info(f"{'='*80}")
 
     worker_results = []
-    completed_tasks = {}  # task_id -> result
+    completed_tasks = {}
 
     # ----------------------------------
     # Dependency-Aware Execution Loop
@@ -303,22 +303,22 @@ Keep tasks focused and manageable. Use dependencies to ensure proper ordering.""
                 # Manager evaluates worker output on quality score (1-10) and identifies issues
                 review_prompt = f"""You are a manager reviewing a worker's output.
 
-Original task: {task.description}
-Worker output: {current_output}
+                    Original task: {task.description}
+                    Worker output: {current_output}
 
-Evaluate the output:
-1. Quality score (1-10)
-2. List any issues or problems
-3. Approve (true/false) - approve if score >= {quality_threshold}
-4. Feedback for improvement (if not approved)
+                    Evaluate the output:
+                    1. Quality score (1-10)
+                    2. List any issues or problems
+                    3. Approve (true/false) - approve if score >= {quality_threshold}
+                    4. Feedback for improvement (if not approved)
 
-Respond in JSON format:
-{{
-  "quality_score": <1-10>,
-  "issues": ["issue 1", "issue 2"],
-  "approved": true/false,
-  "feedback": "detailed feedback if not approved"
-}}"""
+                    Respond in JSON format:
+                    {{
+                    "quality_score": <1-10>,
+                    "issues": ["issue 1", "issue 2"],
+                    "approved": true/false,
+                    "feedback": "detailed feedback if not approved"
+                    }}"""
 
                 log.info(f"\n[Manager] Reviewing worker output...")
 
@@ -455,17 +455,17 @@ Please revise your output to address the manager's feedback."""
     # LLM combines all worker outputs into unified, coherent final result
     synthesis_prompt = f"""You are a manager synthesizing the final deliverable.
 
-Original project: {user_request}
+        Original project: {user_request}
 
-All worker outputs:
-{all_outputs}
+        All worker outputs:
+        {all_outputs}
 
-Create a coherent final deliverable that:
-1. Integrates all worker outputs
-2. Ensures consistency and quality
-3. Presents a complete solution to the project
+        Create a coherent final deliverable that:
+        1. Integrates all worker outputs
+        2. Ensures consistency and quality
+        3. Presents a complete solution to the project
 
-Provide the final synthesized deliverable:"""
+        Provide the final synthesized deliverable:"""
 
     log.info("\n[Manager] Synthesizing final deliverable from all worker outputs...")
 
