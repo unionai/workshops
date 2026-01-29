@@ -1,6 +1,12 @@
-# LangGraph Multi-Agent Research Workflow
+# LangGraph Agent Examples
 
-Parallel research agents powered by LangGraph + Flyte. Each agent uses tool calling to search the web autonomously, then a synthesizer combines all findings.
+LangGraph agent workflows running on Flyte. Each example is a self-contained workflow with its own graph and Flyte tasks, sharing common tools and config.
+
+## Examples
+
+### Research Agent
+
+Parallel research agents that fan out across sub-topics, each using tool calling to search the web autonomously, then a synthesizer combines all findings.
 
 ```
 research_workflow (orchestrator)
@@ -11,7 +17,16 @@ research_workflow (orchestrator)
   └── synthesize_reports → final report
 ```
 
-Each `research_topic` runs a LangGraph agent that decides when and what to search using Tavily as a bound tool.
+```bash
+python -m agent_research.workflow --local --query "Compare quantum computing approaches: superconducting vs trapped ion vs photonic"
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--local` | off | Run locally instead of on Flyte cluster |
+| `--query` | required | Research question |
+| `--num-topics` | 3 | Number of sub-topics to research in parallel |
+| `--max-searches` | 2 | Max web searches per sub-topic |
 
 ## Setup
 
@@ -33,15 +48,7 @@ OPENAI_API_KEY=your-key-here
 TAVILY_API_KEY=your-key-here
 ```
 
-## Run the Agent
-
-**Local:**
-
-```bash
-python -m workflow --local --query "Compare quantum computing approaches: superconducting vs trapped ion vs photonic"
-```
-
-**Remote (Flyte cluster):**
+### Remote (Flyte cluster)
 
 ```bash
 # Connect to cluster (one-time setup)
@@ -56,24 +63,24 @@ flyte create config \
 flyte create secret OPENAI_API_KEY
 flyte create secret TAVILY_API_KEY
 
-# Run
-python -m workflow --query "Compare quantum computing approaches"
+# Run without --local flag
+python -m agent_research.workflow --query "Compare quantum computing approaches"
 ```
 
-**CLI options:**
+## Project Structure
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--local` | off | Run locally instead of on Flyte cluster |
-| `--query` | required | Research question |
-| `--num-topics` | 3 | Number of sub-topics to research in parallel |
-| `--max-searches` | 2 | Max web searches per sub-topic |
+```
+tutorials/langgraph/
+├── config.py              # Shared Flyte env + API keys
+├── requirements.txt       # Shared dependencies
+├── tools/
+│   ├── __init__.py
+│   └── search.py          # web_search tool (reusable across agents)
+├── agent_research/
+│   ├── __init__.py
+│   ├── graph.py           # LangGraph agent with tool calling
+│   └── workflow.py        # Flyte tasks + CLI
+└── agent_reflection/      # (coming soon)
+```
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| `graph.py` | LangGraph agent with `@tool` web search, `ToolNode`, and `MessagesState` |
-| `workflow.py` | Flyte tasks: planner, parallel researchers, synthesizer, orchestrator |
-| `config.py` | Flyte `TaskEnvironment` and API key loading |
-| `requirements.txt` | Dependencies |
+Tools in `tools/` are shared across all examples. Each example folder has its own `graph.py` (LangGraph StateGraph) and `workflow.py` (Flyte tasks + CLI).

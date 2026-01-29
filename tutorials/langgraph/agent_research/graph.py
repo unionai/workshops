@@ -7,32 +7,18 @@ Graph: agent →(tool calls?)→ tools → agent →(loop)→ END
 """
 
 import logging
-from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph, MessagesState
 from langgraph.prebuilt import ToolNode
-from tavily import TavilyClient
-import flyte
+from tools.search import create_search_tool
 
 log = logging.getLogger(__name__)
 
 
 def build_research_graph(openai_api_key: str, tavily_api_key: str, max_searches: int = 3):
     """Build a research agent that uses Tavily search as a tool."""
-    tavily = TavilyClient(api_key=tavily_api_key)
-
-    @tool
-    @flyte.trace
-    async def web_search(query: str) -> str:
-        """Search the web for information on a topic. Use this to find current facts, data, and sources."""
-        log.info(f"Searching: {query}")
-        results = tavily.search(query=query, max_results=3)
-        formatted = ""
-        for r in results.get("results", []):
-            formatted += f"- {r['title']}: {r['content'][:300]}\n  {r['url']}\n\n"
-        return formatted or "No results found."
-
+    web_search = create_search_tool(tavily_api_key)
     tools = [web_search]
     llm = ChatOpenAI(model="gpt-4.1-nano", api_key=openai_api_key).bind_tools(tools)
 

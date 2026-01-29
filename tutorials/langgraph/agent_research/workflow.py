@@ -9,7 +9,7 @@ Architecture:
 Each task shows up separately in the Flyte UI for tracking and expansion.
 
 Usage:
-    python -m workflow --local --query "Compare quantum computing approaches: superconducting vs trapped ion vs photonic"
+    python -m agent_research.workflow --local --query "Compare quantum computing approaches"
 """
 
 import json
@@ -20,13 +20,13 @@ import flyte
 import flyte.report
 from langchain_openai import ChatOpenAI
 from config import base_env, OPENAI_API_KEY, TAVILY_API_KEY
-from graph import build_research_graph
+from agent_research.graph import build_research_graph
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
-# Also let graph.py logs through
-logging.getLogger("graph").setLevel(logging.INFO)
+logging.getLogger("agent_research.graph").setLevel(logging.INFO)
+logging.getLogger("tools.search").setLevel(logging.INFO)
 
 env = base_env
 MODEL = "gpt-4.1-nano"
@@ -120,7 +120,6 @@ async def synthesize_reports(query: str, reports_json: str) -> str:
     )
     log.info(f"Final report synthesized from {len(reports)} sub-topics")
 
-    # Report with tabs: final report + individual sub-topic reports
     await flyte.report.replace.aio(f"<h2>Final Report</h2>{md_to_html(response.content)}")
     for r in reports:
         tab = flyte.report.get_tab(r["topic"][:30])
@@ -144,16 +143,13 @@ async def research_workflow(query: str, num_topics: int = 3, max_searches: int =
     """
     log.info(f"Starting research workflow: {query}")
 
-    # Step 1: Plan
     topics = await plan_research(query, num_topics)
 
-    # Step 2: Research in parallel
     report_jsons = await asyncio.gather(*[
         research_topic(topic, max_searches) for topic in topics
     ])
     reports = [json.loads(r) for r in report_jsons]
 
-    # Step 3: Synthesize
     result = await synthesize_reports(query, json.dumps(reports))
 
     log.info("Workflow complete")
