@@ -66,17 +66,6 @@
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
 </a></td>
     </tr>
-    
-    <tr>
-      <td><a href="tutorials/hparam_sweep_knn.py">Coming soon</a></td>
-      <td>coming soon</td>
-      <td><a href="link">coming soon</a></td>
-    </tr>
-    <tr>
-      <td><a href="tutorials/hparam_sweep_knn.py">Coming soon</a></td>
-      <td>coming soon</td>
-      <td><a href="link">coming soon</a></td>
-    </tr>
   </tbody>
 </table>
 
