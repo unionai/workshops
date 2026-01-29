@@ -9,15 +9,10 @@ python -m workflows.planner --request "Calculate 15 times 7"
 python -m workflows.planner --request "Search for the latest news about AI agents
 """
 
-import sys
-from pathlib import Path
 from typing import List, Dict
 from dataclasses import dataclass
 import flyte
 import asyncio
-# Add workflows directory to Python path for imports
-workflows_dir = Path(__file__).parent
-sys.path.insert(0, str(workflows_dir))
 
 # Import agents (they are now Flyte tasks with their own environments)
 from agents import import_all_agents
@@ -330,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--local",
         action="store_true",
-        help="Run workflow locally using flyte.init() instead of remote execution"
+        help="Run workflow locally instead of remote execution"
     )
     parser.add_argument(
         "--request",
