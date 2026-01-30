@@ -48,6 +48,26 @@ python -m agent_react.workflow --local --request "How many words are in 'the qui
 | `--request` | required | Task for the agent to solve |
 | `--max-steps` | 10 | Max reasoning steps |
 
+### Reflection Agent
+
+Generate → critique → refine loop. The agent writes a response, scores it, and iterates until quality meets the threshold or max iterations are reached.
+
+```
+reflection_agent
+  └── generate → critique →(score < threshold?)→ generate →(loop)→ END
+```
+
+```bash
+python -m agent_reflection.workflow --local --request "Write a Python function to find all prime numbers up to N using the Sieve of Eratosthenes"
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--local` | off | Run locally instead of on Flyte cluster |
+| `--request` | required | Task for the agent to accomplish |
+| `--quality-threshold` | 8 | Min quality score (1-10) to stop refining |
+| `--max-iterations` | 3 | Max refinement iterations |
+
 ## Setup
 
 ```bash
@@ -106,7 +126,10 @@ tutorials/langgraph/
 │   ├── __init__.py
 │   ├── graph.py           # ReAct graph with math + string tools
 │   └── workflow.py        # Single task + reasoning trace report
-└── agent_reflection/      # (coming soon)
+└── agent_reflection/
+    ├── __init__.py
+    ├── graph.py           # Reflection graph with generate + critique loop
+    └── workflow.py        # Single task + iteration history report
 ```
 
 Tools in `tools/` are shared across all examples. Each example folder has its own `graph.py` (LangGraph StateGraph) and `workflow.py` (Flyte tasks + CLI).
