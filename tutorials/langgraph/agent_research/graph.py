@@ -7,6 +7,9 @@ Graph: agent →(tool calls?)→ tools → agent →(loop)→ END
 """
 
 import logging
+from typing import Any
+
+import flyte
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph, MessagesState
@@ -28,7 +31,10 @@ def build_research_graph(openai_api_key: str, tavily_api_key: str, max_searches:
         f"After gathering enough information, write a clear research summary with key findings and sources."
     )
 
-    async def agent(state: MessagesState):
+
+    # for pickling we'll use type annotation of dict[str, Any] instead of MessagesState
+    @flyte.trace
+    async def agent(state: dict[str, Any]) -> dict[str, Any]:
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = llm.invoke(messages)
 
@@ -40,7 +46,8 @@ def build_research_graph(openai_api_key: str, tavily_api_key: str, max_searches:
 
         return {"messages": [response]}
 
-    async def should_continue(state: MessagesState) -> str:
+    @flyte.trace
+    async def should_continue(state: dict[str, Any]) -> str:
         last = state["messages"][-1]
         if hasattr(last, "tool_calls") and last.tool_calls:
             log.info(f"[Agent] Routing → tools ({len(last.tool_calls)} call(s))")
