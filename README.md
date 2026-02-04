@@ -23,32 +23,27 @@
       <td></td>
     </tr>
         <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">ReAct Multi-Agent System</a></td>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_react_agent.ipynb">ReAct Multi-Agent System</a></td>
       <td>create a scalable ReAct multi-agent system using Flyte</td>
       <td></td>
     </tr>
         <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Reflection Multi-Agent System</a></td>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_reflection_agent.ipynb">Reflection Multi-Agent System</a></td>
       <td>create a scalable reflection multi-agent system using Flyte</td>
       <td></td>
     </tr>
-        <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Planner Multi-Agent System</a></td>
-      <td>create a scalable planner multi-agent system using Flyte</td>
-      <td></td>
-    </tr>
-        <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Debate Multi-Agent System</a></td>
+    <tr>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_debate_agent.ipynb">Debate Multi-Agent System</a></td>
       <td>create a scalable debate multi-agent system using Flyte</td>
       <td></td>
     </tr>
       <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Manager Multi-Agent System</a></td>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb">Manager Multi-Agent System</a></td>
       <td>create a scalable manager multi-agent system using Flyte</td>
       <td></td>
     </tr>
     <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Sequential Multi-Agent System</a></td>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb">Sequential Multi-Agent System</a></td>
       <td>create a scalable sequential multi-agent system using Flyte</td>
       <td></td>
     </tr>
