@@ -54,6 +54,10 @@
 
 ## Setup Instructions
 
+It's reccomended to use UV and create a virtual environment at the `workshops` root directory. 
+
+Then navigate to the tutorial directory for install requirments. 
+
 ```bash
 # Clone the repository
 
@@ -66,5 +70,5 @@ source .venv/bin/activate  # macOS/Linux
 .venv\Scripts\activate     # Windows
 
 # Install dependencies
-uv pip install -r requirements.txt
+uv pip install -r TUTORIALFOLDER/requirements.txt
 ```
