@@ -54,6 +54,8 @@
 
 ## Setup Instructions
 
+You can clone repo: `git clone https://github.com/unionai/workshops`
+
 It's reccomended to use UV and create a virtual environment at the `workshops` root directory. 
 
 Then navigate to the tutorial directory for install requirments. 
