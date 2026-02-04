@@ -4,6 +4,10 @@ import re
 from utils.logger import Logger
 from utils.decorators import agent_tools
 
+# ----------------------------------
+# Logger Configuration
+# ----------------------------------
+
 # Default logger; workflows can override via set_logger() to consolidate traces
 _logger = None
 
@@ -18,6 +22,12 @@ def _get_logger():
         _logger = Logger(path="plan_executor_trace_log.jsonl")
     return _logger
 
+
+# ----------------------------------
+# Plan Parsing
+# Extracts JSON tool plans from LLM responses,
+# handling markdown code blocks and raw JSON
+# ----------------------------------
 
 def parse_plan_from_response(raw_plan: str) -> list:
     """
@@ -67,6 +77,12 @@ def parse_plan_from_response(raw_plan: str) -> list:
             print(f"[ERROR] Could not find JSON array pattern in LLM response:\n{raw_plan}")
             raise ValueError(f"Could not extract valid JSON array from LLM response")
 
+
+# ----------------------------------
+# Tool Plan Execution
+# Runs tool calls sequentially, passing results
+# between steps via the "previous" keyword
+# ----------------------------------
 
 async def execute_tool_plan(plan: list, agent: str) -> dict:
     """
