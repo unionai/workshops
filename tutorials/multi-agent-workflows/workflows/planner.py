@@ -327,6 +327,14 @@ if __name__ == "__main__":
         default="Calculate 5 factorial",
         help="The task request to execute (see README.md for examples)"
     )
+    parser.add_argument(
+        "--get-output",
+        type=str,
+        nargs="?",
+        const="latest",
+        metavar="RUN_NAME",
+        help="Fetch output from a run. Use without value for latest, or provide run name."
+    )
     args = parser.parse_args()
 
     # Initialize Flyte based on local/remote flag
@@ -337,15 +345,45 @@ if __name__ == "__main__":
         print("Running workflow REMOTELY with flyte.init_from_config()")
         flyte.init_from_config(".flyte/config.yaml")
 
-    print(f"\n=== Planner Agent Workflow ===")
-    print(f"Request: {args.request}\n")
+    # ----------------------------------
+    # Fetch Latest Output Mode
+    # ----------------------------------
+    if args.get_output:
+        from flyte.remote import Run
 
-    execution = flyte.run(
-        planner_agent_workflow,
-        user_request=args.request
-    )
+        if args.get_output == "latest":
+            print("\n=== Fetching Latest Run Output ===\n")
+            # Get latest run
+            runs = list(Run.listall(
+                sort_by=("created_at", "desc"),
+                limit=1
+            ))
+            if not runs:
+                print("No runs found")
+                exit(1)
+            run_name = runs[0].name
+            print(f"Latest run: {run_name}")
+        else:
+            run_name = args.get_output
+            print(f"\n=== Fetching Output for Run: {run_name} ===\n")
 
-    print(f"\n{'='*60}")
-    print(f"Execution: {execution.name}")
-    print(f"URL: {execution.url}")
-    print(f"{'='*60}\n")
+        run = Run.get(run_name)
+        outputs = run.outputs()
+        print(f"Result: {outputs.named_outputs}")
+        print(f"{'='*60}\n")
+    else:
+        # ----------------------------------
+        # Run New Execution Mode
+        # ----------------------------------
+        print(f"\n=== Planner Agent Workflow ===")
+        print(f"Request: {args.request}\n")
+
+        execution = flyte.run(
+            planner_agent_workflow,
+            user_request=args.request
+        )
+
+        print(f"\n{'='*60}")
+        print(f"Execution: {execution.name}")
+        print(f"URL: {execution.url}")
+        print(f"{'='*60}\n")
