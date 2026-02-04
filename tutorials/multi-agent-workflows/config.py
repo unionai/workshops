@@ -20,7 +20,7 @@ base_env = flyte.TaskEnvironment(
     reusable=flyte.ReusePolicy(
         replicas=2,
         idle_ttl=60,
-        concurrency=10,
+        concurrency=5,
         scaledown_ttl=60,
     ), # uncomment/comment to toggle task reuse
 )

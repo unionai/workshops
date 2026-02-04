@@ -18,53 +18,34 @@
       <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/flyte2-quickstarts/00_flyte2-starter.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Colab"></a></td>
     </tr>
     <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Planner Multi-Agent System</a></td>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb">Planner Multi-Agent System</a></td>
       <td>create a scalable planner multi-agent system using Flyte</td>
-      <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a></td>
+      <td></td>
     </tr>
         <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">ReAct Multi-Agent System</a></td>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_react_agent.ipynb">ReAct Multi-Agent System</a></td>
       <td>create a scalable ReAct multi-agent system using Flyte</td>
-      <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_react_agent.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a></td>
+      <td></td>
     </tr>
         <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Reflection Multi-Agent System</a></td>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_reflection_agent.ipynb">Reflection Multi-Agent System</a></td>
       <td>create a scalable reflection multi-agent system using Flyte</td>
-      <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_reflection_agent.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a></td>
-    </tr>
-        <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Planner Multi-Agent System</a></td>
-      <td>create a scalable planner multi-agent system using Flyte</td>
-      <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a></td>
-    </tr>
-        <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Debate Multi-Agent System</a></td>
-      <td>create a scalable debate multi-agent system using Flyte</td>
-      <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_debate_agent.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a></td>
-    </tr>
-      <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Manager Multi-Agent System</a></td>
-      <td>create a scalable manager multi-agent system using Flyte</td>
-      <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a></td>
+      <td></td>
     </tr>
     <tr>
-      <td><a href="https://github.com/unionai/workshops/tree/main/tutorials/multi-agent-workflows">Sequential Multi-Agent System</a></td>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_debate_agent.ipynb">Debate Multi-Agent System</a></td>
+      <td>create a scalable debate multi-agent system using Flyte</td>
+      <td></td>
+    </tr>
+      <tr>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb">Manager Multi-Agent System</a></td>
+      <td>create a scalable manager multi-agent system using Flyte</td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><a href="tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb">Sequential Multi-Agent System</a></td>
       <td>create a scalable sequential multi-agent system using Flyte</td>
-      <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a></td>
+      <td></td>
     </tr>
   </tbody>
 </table>
@@ -72,6 +53,10 @@
 
 
 ## Setup Instructions
+
+It's reccomended to use UV and create a virtual environment at the `workshops` root directory. 
+
+Then navigate to the tutorial directory for install requirments. 
 
 ```bash
 # Clone the repository
@@ -85,5 +70,5 @@ source .venv/bin/activate  # macOS/Linux
 .venv\Scripts\activate     # Windows
 
 # Install dependencies
-uv pip install -r requirements.txt
+uv pip install -r TUTORIALFOLDER/requirements.txt
 ```
