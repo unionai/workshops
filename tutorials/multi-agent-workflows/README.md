@@ -1,6 +1,12 @@
 # Multi-Agent Workflows
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/unionai/workshops?quickstart=1)
+
+
 Orchestrating multiple AI agents at scale using six distinct workflow patterns. Each workflow demonstrates a different approach to coordinating agents for complex tasks.
+
+Since this example is a structured Python project we reccomend running it locally or in [GitHub code spaces](https://github.com/codespaces/new/unionai/workshops) if you want a quick oneline environment.
+
 
 **Agent Pattern Comparison:**
 
