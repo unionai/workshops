@@ -1,8 +1,9 @@
 langgraph>=1.0.7
 langchain-openai
 tavily-python
-flyte==2.0.0b43
+flyte==2.0.0b56
 markdown
 python-dotenv
 ipython
 unionai-reuse
+textual
