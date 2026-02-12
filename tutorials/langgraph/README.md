@@ -133,3 +133,10 @@ tutorials/langgraph/
 ```
 
 Tools in `tools/` are shared across all examples. Each example folder has its own `graph.py` (LangGraph StateGraph) and `workflow.py` (Flyte tasks + CLI).
+
+
+
+Run local with TUI
+```
+ uv run flyte run --local --tui --copy-style all ./agent_research/workflow.py research_workflow --query "Compare quantum computing approaches"
+ ```
