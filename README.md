@@ -47,6 +47,11 @@
       <td>create a scalable sequential multi-agent system using Flyte</td>
       <td></td>
     </tr>
+    <tr>
+      <td><a href="tutorials/mcp/tutorial_recipe_mcp.ipynb">Build a Recipe Assistant MCP Server</a></td>
+      <td>build and deploy a Model Context Protocol (MCP) server on Union that helps AI agents find recipes using the Spoonacular Food API</td>
+      <td></td>
+    </tr>
   </tbody>
 </table>
 

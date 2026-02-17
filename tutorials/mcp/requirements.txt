@@ -1,0 +1,17 @@
+# MCP Server
+fastmcp>=0.1.0
+mcp>=1.0.0
+
+# HTTP Client
+httpx>=0.27.0
+
+# Union/Flyte
+flyte>=2.0.0b56
+unionai-reuse
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+
+# For testing/notebook
+ipython
