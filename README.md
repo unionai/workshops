@@ -74,3 +74,30 @@ source .venv/bin/activate  # macOS/Linux
 # Install dependencies
 uv pip install -r TUTORIALFOLDER/requirements.txt
 ```
+
+### Flyte Run examples
+
+**Remote run:**
+```bash
+uv run flyte run --copy-style all workflows/planner.py planner_agent_workflow \
+  --user_request "Calculate 5 factorial"
+```
+
+**Local run:**
+```bash
+uv run --active flyte run --local --copy-style all workflows/planner.py planner_agent_workflow \
+  --user_request "Calculate 5 factorial"
+```
+
+**Local run with TUI:**
+```bash
+uv pip install textual
+
+uv run --active flyte run --local --tui --copy-style all workflows/planner.py planner_agent_workflow \
+  --user_request "Calculate 5 factorial"
+```
+
+**Start TUI dashboard:**
+```bash
+uv run flyte start tui
+```

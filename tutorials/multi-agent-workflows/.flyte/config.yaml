@@ -3,6 +3,8 @@ admin:
   endpoint: dns:///tryv2.hosted.unionai.cloud
 image:
   builder: remote
+local:
+  persistence: true
 task:
   domain: development
   org: tryv2
