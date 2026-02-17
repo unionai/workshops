@@ -1,0 +1,4 @@
+flyte>=2.0.0b56
+diffusers==0.31.0
+transformers==4.44.2
+accelerate
