@@ -1,6 +1,6 @@
 # Building and Deploying an MCP Server on Union
 
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/unionai/workshops?quickstart=1)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/unionai/workshops?quickstart=1&folder=tutorials/mcp)
 
 This tutorial shows you how to build and deploy a **Model Context Protocol (MCP)** server on Union that helps AI agents find recipes! You'll create a recipe assistant that can search by ingredients, dietary needs, and more using the [Spoonacular Food API](https://spoonacular.com/food-api).
 
@@ -95,8 +95,7 @@ tutorials/mcp/
 ├── tools/                              # Spoonacular API tools
 │   ├── __init__.py
 │   └── recipes.py                      # Recipe API wrapper
-├── app.py                              # Union app deployment script
-└── tutorial_recipe_mcp.ipynb           # Jupyter notebook tutorial
+└── app.py                              # Union app deployment script
 ```
 
 ## Available Tools
@@ -280,15 +279,6 @@ Note: to rotate the Flyte API key, you can run the following commands
 ```bash
 flyte delete api-key <api-key-name>
 flyte create api-key --name <api-key-name>
-```
-
-
-## Tutorial Notebook
-
-For a step-by-step walkthrough, open the Jupyter notebook:
-
-```bash
-jupyter notebook tutorial_recipe_mcp.ipynb
 ```
 
 ## How It Works
