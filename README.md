@@ -1,6 +1,7 @@
 
 # Flyte & Union.ai Tutorials
 
+=======
 Tutorials and examples for building AI agents, ML pipelines, and data workflows with [Flyte 2](https://flyte.org/).
 
 ---
@@ -40,6 +41,12 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 | [Manager Multi-Agent System](tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb) | Manager-worker agent delegation |
 | [Sequential Multi-Agent System](tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb) | Sequential agent pipeline |
 | [LangGraph Tutorial](tutorials/langgraph/) | In-depth LangGraph integration with Flyte |
+
+## MCP
+
+| Tutorial | Description |
+|----------|-------------|
+| [MCP Recipe Assistant](tutorials/mcp/tutorial_recipe_mcp.ipynb) | Build and deploy a recipe assistant MCP server on Union |
 
 ## ML / AI
 
