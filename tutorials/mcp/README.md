@@ -16,7 +16,7 @@ The [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) is an open 
 
 ```
 ┌─────────────────┐     MCP Protocol     ┌─────────────────┐     API     ┌─────────────────┐
-│   AI Agent      │◄───────────────────►│   MCP Server    │◄──────────►│   Spoonacular   │
+│   AI Agent      │◄────────────────────►│   MCP Server    │◄───────────►│   Spoonacular   │
 │ (Claude, etc.)  │    Tools & Resources │ (Your Server)   │             │    Food API     │
 └─────────────────┘                      └─────────────────┘             └─────────────────┘
 ```
