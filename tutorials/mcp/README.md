@@ -36,7 +36,7 @@ flowchart LR
 
 - Python 3.11+
 - A Spoonacular API key (free tier available)
-- A Union account (sign up at [union.ai](https://union.ai))
+- A Union account (sign up at [union.ai](https://union.ai)). If you're here for a workshop, head over [here](https://tryv2.hosted.unionai.cloud/) and sign in.
 - `uv` package manager (recommended): installation link [here](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer)
 
 ## Setup
