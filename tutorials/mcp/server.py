@@ -8,12 +8,10 @@ import os
 from typing import Any
 
 from dotenv import load_dotenv
-from fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from tools.recipes import SpoonacularClient
-
-# Load environment variables
-load_dotenv()
 
 # Initialize the MCP server
 mcp = FastMCP(
@@ -34,7 +32,13 @@ mcp = FastMCP(
     - Mention key details like prep time, servings, and dietary info
     - For detailed recipes, list ingredients and summarize instructions
     - Suggest related recipes when appropriate
-    """
+    """,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    ),
+    stateless_http=True,
+    json_response=True,
+
 )
 
 # Lazy initialization of the client
@@ -43,6 +47,7 @@ _client: SpoonacularClient | None = None
 
 def get_client() -> SpoonacularClient:
     """Get or create the Spoonacular client."""
+    load_dotenv()
     global _client
     if _client is None:
         api_key = os.getenv("SPOONACULAR_API_KEY")
@@ -288,4 +293,4 @@ async def autocomplete_recipe(query: str, number: int = 10) -> list[dict[str, An
 
 if __name__ == "__main__":
     # Run the MCP server
-    mcp.run()
+    mcp.run(transport="streamable-http")

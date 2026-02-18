@@ -6,7 +6,7 @@ This tutorial shows you how to build and deploy a **Model Context Protocol (MCP)
 
 **What you'll learn:**
 - How MCP servers work and their role in AI agent architectures
-- Building MCP tools with Python using `fastmcp`
+- Building MCP tools with Python using the official MCP Python SDK
 - Deploying your MCP server on Union
 - Connecting the server to AI agents in Cursor or other MCP clients
 
@@ -57,6 +57,12 @@ source .venv/bin/activate  # macOS/Linux
 uv pip install -r requirements.txt
 ```
 
+Next, install Claude Code: https://code.claude.com/docs/en/setup#installation
+
+Then run `claude` and go through the setup process to use it with
+- [An API key](https://platform.claude.com/settings/keys)
+- A [Claude subscription](https://claude.com/pricing).
+
 ### 3. Environment Variables
 
 Create a `.env` file in this folder:
@@ -71,12 +77,11 @@ SPOONACULAR_API_KEY=your-api-key-here
 tutorials/mcp/
 ├── README.md                           # This file
 ├── requirements.txt                    # Python dependencies
-├── config.py                           # Configuration settings
 ├── server.py                           # MCP server implementation
 ├── tools/                              # Spoonacular API tools
 │   ├── __init__.py
 │   └── recipes.py                      # Recipe API wrapper
-├── deploy.py                           # Union deployment script
+├── app.py                              # Union app deployment script
 └── tutorial_recipe_mcp.ipynb           # Jupyter notebook tutorial
 ```
 
@@ -102,6 +107,20 @@ The Recipe MCP server provides these tools for AI agents:
 python server.py
 ```
 
+Test the server with the MCP inspector:
+
+```bash
+npx -y @modelcontextprotocol/inspector
+```
+
+In the inspector UI, connect to the server at http://localhost:8000/mcp
+
+Add to Claude code:
+
+```bash
+claude mcp add --transport http spoonacular-mcp http://localhost:8000/mcp
+```
+
 ### Example Usage
 
 Once connected to an AI agent, you can ask things like:
@@ -112,36 +131,53 @@ Once connected to an AI agent, you can ask things like:
 - *"Show me high-protein breakfast ideas"*
 - *"What's a good gluten-free dessert?"*
 
+Once you're done testing locally, remove this MCP server from Claude:
+
+```bash
+claude mcp remove spoonacular-mcp-flyte
+```
+
 ## Deploying to Union
 
 ### 1. Connect to Union
 
 ```bash
 # Configure Union CLI
-union create config \
-    --endpoint <your-union-endpoint> \
-    --auth-type device-flow \
+flyte create config \
+    --endpoint tryv2.hosted.unionai.cloud \
+    --auth-type headless \
     --builder remote \
     --domain development \
-    --project your-project
+    --project workshops
 
 # Store your API key as a secret
-union create secret SPOONACULAR_API_KEY
+flyte create secret SPOONACULAR_API_KEY
 ```
 
 ### 2. Deploy the MCP Server
 
+Set a name for your app
+
+```bash
+export APP_NAME=<my-app-name>
+```
+
 ```bash
 # Build the container image
-python deploy.py --build
-
-# Run a test
-python deploy.py --operation search --params '{"query": "pasta"}'
+python app.py
 ```
 
 ### 3. Configure Your MCP Client
 
-Add the deployed server to your MCP client (e.g., Cursor):
+Add the deployed server to your MCP client (e.g., Cursor, Claude Code):
+
+**For Claude Code**:
+
+```
+claude mcp add --transport http spoonacular-mcp <app_url>/spoonacular/mcp
+```
+
+Where `<app_url>` looks something like this: `https://<subdomain>.tryv2.hosted.unionai.cloud`
 
 **For Cursor** (`~/.cursor/mcp.json`):
 
@@ -149,16 +185,79 @@ Add the deployed server to your MCP client (e.g., Cursor):
 {
   "mcpServers": {
     "recipe-assistant": {
-      "command": "python",
-      "args": ["server.py"],
-      "cwd": "/path/to/tutorials/mcp",
-      "env": {
-        "SPOONACULAR_API_KEY": "your-api-key"
+      "url": "https://<subdomain>.apps.tryv2.hosted.unionai.cloud/spoonacular/mcp"
+    }
+  }
+}
+```
+
+Test it by asking: "What can I make with chicken and rice?"
+
+### 4. Securing the MCP Server
+
+Great! You've
+
+To secure the MCP server, you can use the `REQUIRES_AUTH` environment variable,
+which is used by the `app.py` file.
+
+Redeploy the app:
+
+```bash
+python app.py
+```
+
+Now you should see that the connections are failing. You'll need to re-configure
+the MCP connection with a Flyte API key.
+
+To create a Flyte API key, run the following command:
+
+```
+flyte create api-key --name <api-key-name>
+```
+
+The output will contain an export command like:
+
+```
+export FLYTE_API_KEY="<FLYTE_API_KEY>"
+```
+
+⚠️ Save the `"<FLYTE_API_KEY>"` string somewhere safe.
+
+Now re-configure the MCP connection with the Flyte API key:
+
+**For Claude Code**:
+
+```bash
+claude mcp remove spoonacular-mcp
+claude mcp add --transport http spoonacular-mcp <app_url>/spoonacular/mcp --header "Authorization: Bearer <FLYTE_API_KEY>"
+```
+
+Where `<app_url>` looks something like this: `https://<subdomain>.tryv2.hosted.unionai.cloud`
+
+**For Cursor** (`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "recipe-assistant": {
+      "url": "https://<subdomain>.apps.tryv2.hosted.unionai.cloud/spoonacular/mcp",
+      "headers": {
+        "Authorization": "Bearer <FLYTE_API_KEY>"
       }
     }
   }
 }
 ```
+
+Now you should be able to securely connect to the MCP server!
+
+Note: to rotate the Flyte API key, you can run the following commands
+
+```bash
+flyte delete api-key <api-key-name>
+flyte create api-key --name <api-key-name>
+```
+
 
 ## Tutorial Notebook
 
@@ -173,7 +272,7 @@ jupyter notebook tutorial_recipe_mcp.ipynb
 ### MCP Server Architecture
 
 ```python
-from fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 
 # Initialize the MCP server
 mcp = FastMCP("Recipe Assistant")
@@ -202,7 +301,7 @@ The server wraps these [Spoonacular endpoints](https://spoonacular.com/food-api/
 - [Model Context Protocol Specification](https://modelcontextprotocol.io/)
 - [Union MCP Reference Implementation](https://github.com/unionai-oss/union-mcp)
 - [Spoonacular API Documentation](https://spoonacular.com/food-api/docs)
-- [FastMCP Documentation](https://github.com/jlowin/fastmcp)
+- [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 
 ## Troubleshooting
 
