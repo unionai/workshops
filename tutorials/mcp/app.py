@@ -23,7 +23,7 @@ from server import mcp
 APP_NAME = os.getenv("APP_NAME")
 APP_SUBDOMAIN = os.getenv("APP_SUBDOMAIN")
 APP_PORT = int(os.getenv("APP_PORT", 8000))
-REQUIRES_AUTH = os.getenv("REQUIRES_AUTH", "true").lower() == "false"
+REQUIRES_AUTH = os.getenv("REQUIRES_AUTH", "false").lower() == "true"
 
 if not APP_NAME:
     raise ValueError("set an app name with export APP_NAME= is not set")
