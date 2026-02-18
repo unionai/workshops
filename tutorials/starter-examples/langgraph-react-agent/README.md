@@ -46,6 +46,21 @@ uv run flyte run langgraph_react_agent.py agent --request "What is 12 * 7 plus 3
 uv run flyte run --local langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
 ```
 
+**Local with TUI:**
+
+The TUI gives you a live interactive terminal dashboard showing each task's status, logs, and outputs as the run progresses.
+
+```bash
+uv pip install textual
+
+uv run flyte run --local --tui langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
+```
+
+Browse past local runs in TUI:
+```bash
+uv run flyte start tui
+```
+
 ## Fetch remote run output
 
 After a remote run completes, you can fetch the output with `flyte.remote`:
