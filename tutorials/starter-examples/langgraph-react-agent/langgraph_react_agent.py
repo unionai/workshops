@@ -11,7 +11,7 @@ env = flyte.TaskEnvironment(
     name="langgraph_env",
     image=flyte.Image.from_debian_base().with_requirements("requirements.txt"),
     secrets=[
-        flyte.Secret(key="OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
+        flyte.Secret(key="SAGE_OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
     ],
     resources=flyte.Resources(cpu=1, memory="1Gi"),
 )
@@ -41,4 +41,4 @@ async def agent(request: str) -> str:
     )
     return result["messages"][-1].content
 
-# uv run flyte run langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
+#flyte run langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
