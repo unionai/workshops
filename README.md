@@ -1,81 +1,112 @@
 
 # Flyte & Union.ai Tutorials
 
-## Tutorial list
+=======
+Tutorials and examples for building AI agents, ML pipelines, and data workflows with [Flyte 2](https://flyte.org/).
 
-<table>
-  <thead>
-    <tr>
-      <th align="left">Tutorial&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</th>
-      <th align="left">What you’ll learn</th>
-      <th align="left">Open:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><a href="tutorials/flyte2-quickstarts/00_flyte2-starter.ipynb">Get started with Flyte 2.0</a></td>
-      <td>Get started with Flyte tasks, build an ML pipeline, handle errors, and run AI agents · <code>flyte.TaskEnvironment</code>, <code>flyte.ReusePolicy</code>, <code>flyte.map()</code></td>
-      <td><a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/flyte2-quickstarts/00_flyte2-starter.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Colab"></a></td>
-    </tr>
-    <tr>
-      <td><a href="tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb">Planner Multi-Agent System</a></td>
-      <td>create a scalable planner multi-agent system using Flyte</td>
-      <td></td>
-    </tr>
-        <tr>
-      <td><a href="tutorials/multi-agent-workflows/tutorial_react_agent.ipynb">ReAct Multi-Agent System</a></td>
-      <td>create a scalable ReAct multi-agent system using Flyte</td>
-      <td></td>
-    </tr>
-        <tr>
-      <td><a href="tutorials/multi-agent-workflows/tutorial_reflection_agent.ipynb">Reflection Multi-Agent System</a></td>
-      <td>create a scalable reflection multi-agent system using Flyte</td>
-      <td></td>
-    </tr>
-    <tr>
-      <td><a href="tutorials/multi-agent-workflows/tutorial_debate_agent.ipynb">Debate Multi-Agent System</a></td>
-      <td>create a scalable debate multi-agent system using Flyte</td>
-      <td></td>
-    </tr>
-      <tr>
-      <td><a href="tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb">Manager Multi-Agent System</a></td>
-      <td>create a scalable manager multi-agent system using Flyte</td>
-      <td></td>
-    </tr>
-    <tr>
-      <td><a href="tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb">Sequential Multi-Agent System</a></td>
-      <td>create a scalable sequential multi-agent system using Flyte</td>
-      <td></td>
-    </tr>
-    <tr>
-      <td><a href="tutorials/mcp/tutorial_recipe_mcp.ipynb">Build a Recipe Assistant MCP Server</a></td>
-      <td>build and deploy a Model Context Protocol (MCP) server on Union that helps AI agents find recipes using the Spoonacular Food API</td>
-      <td></td>
-    </tr>
-  </tbody>
-</table>
+---
 
+## Featured
 
+| Example | Description |
+|---------|-------------|
+| [LangGraph ReAct Agent](tutorials/starter-examples/langgraph-react-agent/) | Build a ReAct agent with LangGraph + OpenAI on Flyte |
+| [Stable Diffusion](tutorials/starter-examples/stable-diffusion/) | Generate images from text prompts with SDXL Turbo on GPU |
+| [DuckDB ETL](tutorials/starter-examples/duckdb-etl/) | Extract and transform data with DuckDB SQL |
 
-## Setup Instructions
+---
 
-You can clone repo: `git clone https://github.com/unionai/workshops`
+## Get Started
 
-It's reccomended to use UV and create a virtual environment at the `workshops` root directory. 
+| Tutorial | What you'll learn |
+|----------|-------------------|
+| [Flyte Basics](tutorials/starter-examples/flyte-basics/) | Flyte 2 fundamentals — tasks, pipelines, error handling, `TaskEnvironment`, `ReusePolicy`, `map()` |
+| [LangGraph ReAct Agent](tutorials/starter-examples/langgraph-react-agent/) | Build a ReAct agent with tools in a single file |
+| [Stable Diffusion](tutorials/starter-examples/stable-diffusion/) | GPU inference with Flyte reports |
+| [Image Classifier](tutorials/starter-examples/image-classifier/) | Fine-tune ResNet18 on HuggingFace dataset with PyTorch |
+| [DuckDB ETL](tutorials/starter-examples/duckdb-etl/) | Data pipeline with DuckDB SQL and Flyte reports |
+| [Snowflake ETL](tutorials/starter-examples/snowflake-etl/) | ETL pipeline with the Snowflake connector |
 
-Then navigate to the tutorial directory for install requirments. 
+---
+
+## Agents
+
+| Tutorial | Description |
+|----------|-------------|
+| [LangGraph ReAct Agent](tutorials/starter-examples/langgraph-react-agent/) | Single-file ReAct agent with LangGraph |
+| [Planner Multi-Agent System](tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb) | Scalable planner multi-agent system |
+| [ReAct Multi-Agent System](tutorials/multi-agent-workflows/tutorial_react_agent.ipynb) | Adaptive ReAct multi-agent system |
+| [Reflection Multi-Agent System](tutorials/multi-agent-workflows/tutorial_reflection_agent.ipynb) | Self-improving reflection agents |
+| [Debate Multi-Agent System](tutorials/multi-agent-workflows/tutorial_debate_agent.ipynb) | Multi-agent debate pattern |
+| [Manager Multi-Agent System](tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb) | Manager-worker agent delegation |
+| [Sequential Multi-Agent System](tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb) | Sequential agent pipeline |
+| [LangGraph Tutorial](tutorials/langgraph/) | In-depth LangGraph integration with Flyte |
+
+## ML / AI
+
+| Tutorial | Description |
+|----------|-------------|
+| [Stable Diffusion](tutorials/starter-examples/stable-diffusion/) | Image generation with SDXL Turbo |
+| [Image Classifier](tutorials/starter-examples/image-classifier/) | Fine-tune ResNet18 on Beans dataset |
+
+## Data
+
+| Tutorial | Description |
+|----------|-------------|
+| [DuckDB ETL](tutorials/starter-examples/duckdb-etl/) | SQL-based data pipeline with DuckDB |
+| [Snowflake ETL](tutorials/starter-examples/snowflake-etl/) | ETL with Snowflake connector |
+
+---
+
+## Setup
 
 ```bash
 # Clone the repository
+git clone https://github.com/unionai/workshops
+cd workshops
 
-# Create virtual environment
+# Navigate to any tutorial
+cd tutorials/starter-examples/langgraph-react-agent
+
+# Create virtual environment and install dependencies
 uv venv .venv --python 3.11
+source .venv/bin/activate
+uv pip install -r requirements.txt
+```
 
-# Activate the venv
-source .venv/bin/activate  # macOS/Linux
-# or
-.venv\Scripts\activate     # Windows
+### Flyte Cluster (for remote runs)
 
-# Install dependencies
-uv pip install -r TUTORIALFOLDER/requirements.txt
+```bash
+flyte create config \
+    --endpoint <your-endpoint> \
+    --auth-type headless \
+    --builder remote \
+    --domain development \
+    --project flytesnacks
+```
+
+Don't have a cluster? Request access at [flyte.org](https://flyte.org/).
+
+### Run examples
+
+**Remote:**
+```bash
+uv run flyte run langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
+```
+
+**Local:**
+```bash
+uv run flyte run --local langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
+```
+
+**Local with TUI:**
+```bash
+uv pip install textual
+
+uv run flyte run --local --tui langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
+```
+
+**Start TUI dashboard:**
+```bash
+uv run flyte start tui
 ```

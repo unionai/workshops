@@ -1,0 +1,4 @@
+flyte>=2.0.0b56
+duckdb
+pandas
+pyarrow
