@@ -14,19 +14,30 @@ This tutorial shows you how to build and deploy a **Model Context Protocol (MCP)
 
 The [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) is an open standard that enables AI assistants to securely connect with external data sources and tools. Think of it as a universal adapter that lets AI agents interact with APIs, databases, and services.
 
+```mermaid
+flowchart LR
+    A[AI Agent<br/>Claude, etc.] <-->|MCP Protocol<br/>Tools & Resources| B[MCP Server<br/>Your Server]
+    B <-->|API| C[Spoonacular<br/>Food API]
 ```
-┌─────────────────┐     MCP Protocol     ┌─────────────────┐     API     ┌─────────────────┐
-│   AI Agent      │◄────────────────────►│   MCP Server    │◄───────────►│   Spoonacular   │
-│ (Claude, etc.)  │    Tools & Resources │ (Your Server)   │             │    Food API     │
-└─────────────────┘                      └─────────────────┘             └─────────────────┘
-```
+
+### When you need MCP
+
+- As an AI engineer, you want to connect to an external service through a pre-built, standardized, AI-friendly interface.
+- As an AI engineer, you need to connect your Skills to actual external services in a compact way.
+- As a service provider, you want to expose your services to AI agents in a standardized way.
+
+### When you don't need MCP
+
+- As an AI engineer, you have a self-contained AI system that makes tool calls defined as functions that you fully control.
+- As an AI engineer, all of the context and skills access local resources (files, directories, embedded databases, etc).
+- As a service provider, you want to expose your services as traditional APIs (REST, gRPC, etc), or the functionality you provide can be delivered via context/Skills that users can download locally.
 
 ## Prerequisites
 
 - Python 3.11+
 - A Spoonacular API key (free tier available)
 - A Union account (sign up at [union.ai](https://union.ai))
-- `uv` package manager (recommended)
+- `uv` package manager (recommended): installation link [here](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer)
 
 ## Setup
 
@@ -55,6 +66,9 @@ source .venv/bin/activate  # macOS/Linux
 
 # Install dependencies
 uv pip install -r requirements.txt
+
+# If you're in google colab or github codespaces:
+uv pip install keyrings.alt
 ```
 
 Next, install Claude Code: https://code.claude.com/docs/en/setup#installation
@@ -107,19 +121,20 @@ The Recipe MCP server provides these tools for AI agents:
 python server.py
 ```
 
-Test the server with the MCP inspector:
-
-```bash
-npx -y @modelcontextprotocol/inspector
-```
-
-In the inspector UI, connect to the server at http://localhost:8000/mcp
-
 Add to Claude code:
 
 ```bash
 claude mcp add --transport http spoonacular-mcp http://localhost:8000/mcp
 ```
+
+> [!NOTE] Alternatively, test the server with the MCP inspector (local only):
+>
+> ```bash
+> npx -y @modelcontextprotocol/inspector
+> ```
+>
+> In the inspector UI, connect to the server at http://localhost:8000/mcp
+
 
 ### Example Usage
 
@@ -134,12 +149,16 @@ Once connected to an AI agent, you can ask things like:
 Once you're done testing locally, remove this MCP server from Claude:
 
 ```bash
-claude mcp remove spoonacular-mcp-flyte
+claude mcp remove spoonacular-mcp
 ```
 
 ## Deploying to Union
 
 ### 1. Connect to Union
+
+```bash
+export FLYTE_PROJECT=<project>
+```
 
 ```bash
 # Configure Union CLI
@@ -148,11 +167,16 @@ flyte create config \
     --auth-type headless \
     --builder remote \
     --domain development \
-    --project workshops
-
-# Store your API key as a secret
-flyte create secret SPOONACULAR_API_KEY
+    --project $FLYTE_PROJECT
 ```
+
+>[!NOTE] Optional: Store your API key as a secret
+>
+> ```bash
+> flyte create secret SPOONACULAR_API_KEY
+> ```
+>
+> This will prompt you to copy-paste your Spoonacular API key.
 
 ### 2. Deploy the MCP Server
 
@@ -203,7 +227,7 @@ which is used by the `app.py` file.
 Redeploy the app:
 
 ```bash
-python app.py
+REQUIRES_AUTH=true python app.py
 ```
 
 Now you should see that the connections are failing. You'll need to re-configure

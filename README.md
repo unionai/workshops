@@ -45,7 +45,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 
 | Tutorial | Description |
 |----------|-------------|
-| [MCP Recipe Assistant](tutorials/mcp/tutorial_recipe_mcp.ipynb) | Build and deploy a recipe assistant MCP server on Union |
+| [MCP Recipe Assistant](tutorials/mcp/) | Build and deploy a recipe assistant MCP server on Union |
 
 ## ML / AI
 

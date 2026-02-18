@@ -11,10 +11,8 @@ import pathlib
 from contextlib import asynccontextmanager
 
 import flyte
-from flyte.app.extras import FastAPIPassthroughAuthMiddleware
 from flyte.app import AppEnvironment, Domain, Scaling, Link
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
 from starlette.routing import Mount
 from starlette.responses import Response
 from starlette.requests import Request
@@ -25,7 +23,7 @@ from server import mcp
 APP_NAME = os.getenv("APP_NAME")
 APP_SUBDOMAIN = os.getenv("APP_SUBDOMAIN")
 APP_PORT = int(os.getenv("APP_PORT", 8000))
-REQUIRES_AUTH = os.getenv("REQUIRES_AUTH", "true").lower() == "true"
+REQUIRES_AUTH = os.getenv("REQUIRES_AUTH", "true").lower() == "false"
 
 if not APP_NAME:
     raise ValueError("set an app name with export APP_NAME= is not set")
@@ -66,18 +64,12 @@ app_env = AppEnvironment(
 
 @asynccontextmanager
 async def lifespan(app: Starlette):
-    # if REQUIRES_AUTH:
-    #     await flyte.init_passthrough.aio(
-    #         project=flyte.current_project(),
-    #         domain=flyte.current_domain(),
-    #     )
     async with mcp.session_manager.run():
         yield
 
 
 starlette_app = Starlette(
     lifespan=lifespan,
-    # middleware=[Middleware(FastAPIPassthroughAuthMiddleware)] if REQUIRES_AUTH else [],
     routes=[Mount("/spoonacular", app=mcp.streamable_http_app())],
 )
 
