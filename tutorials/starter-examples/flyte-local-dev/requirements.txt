@@ -1,0 +1,15 @@
+flyte>=2.0
+textual
+langchain-core
+langchain-openai
+langgraph
+python-dotenv
+scikit-learn
+pandas
+matplotlib
+seaborn
+joblib
+fastapi
+uvicorn
+httpx
+pygments
