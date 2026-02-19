@@ -7,9 +7,9 @@ Everything you get from `pip install flyte` without a cluster — TUI, caching, 
 | Script | Feature | What it does |
 |--------|---------|-------------|
 | `cached_agent.py` | Caching + TUI | ReAct agent with cached LLM calls |
-| `cached_ml_pipeline.py` | Caching + Reports + TUI | ML pipeline with cached steps and evaluation report |
+| `cached_ml_pipeline.py` | Caching + Reports + TUI | PyTorch MNIST pipeline with training curves and hyperparameter report |
 | `agent_with_report.py` | Reports | Agent that logs its reasoning trace as an HTML report |
-| `serve_model.py` | Local Serving | Train a model and serve predictions via FastAPI |
+| `serve_model.py` | Local Serving | Train MNIST CNN and serve digit predictions via FastAPI |
 
 ## Setup
 
@@ -21,6 +21,8 @@ source .venv/bin/activate
 
 uv pip install -r requirements.txt
 ```
+
+The included `.flyte/config.yaml` enables local run persistence so `flyte start tui` can browse past runs.
 
 Set your OpenAI API key (for agent examples):
 
@@ -44,12 +46,14 @@ flyte run --local --tui cached_agent.py agent --request "What is 12 * 7 plus 3?"
 ### ML Pipeline with Reports
 
 ```bash
-# Run with TUI — load_data and split_data get cached
-flyte run --local --tui cached_ml_pipeline.py pipeline --n_neighbors 3
+# Run with TUI — load_data is cached after first run
+flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
 
-# Change hyperparameters — cached steps are skipped
-flyte run --local --tui cached_ml_pipeline.py pipeline --n_neighbors 5
+# Change hyperparameters — data download is still cached
+flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 10 --lr 0.0005 --batch_size 128
 ```
+
+Open the `report.html` from the output path to see training curves, hyperparameters, and test results.
 
 ### Agent with Report
 
@@ -68,7 +72,7 @@ python serve_model.py
 Then hit the endpoint:
 
 ```bash
-curl "http://localhost:8080/predict?sepal_length=5.1&sepal_width=3.5&petal_length=1.4&petal_width=0.2"
+curl "http://localhost:8080/predict?index=42"
 ```
 
 ### Browse Past Runs
