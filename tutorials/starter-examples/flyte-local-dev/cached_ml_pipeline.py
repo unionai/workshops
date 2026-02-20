@@ -8,7 +8,15 @@ import flyte
 import flyte.report
 from flyte.io import File
 
-env = flyte.TaskEnvironment(name="ml_pipeline")
+image = flyte.Image.from_debian_base(python_version=(3, 12)).with_pip_packages(
+    "torch", "torchvision", "matplotlib",
+)
+
+env = flyte.TaskEnvironment(
+    name="ml_pipeline",
+    image=image,
+    resources=flyte.Resources(cpu=2, memory="4Gi", gpu=1),
+)
 
 
 def get_device():
@@ -169,7 +177,7 @@ async def evaluate(model_file: File, data_dir: str) -> tuple[float, float]:
 
 
 @env.task(report=True)
-async def pipeline(epochs: int = 5, lr: float = 0.001, batch_size: int = 64, open_report: bool = False) -> str:
+async def pipeline(epochs: int = 5, lr: float = 0.001, batch_size: int = 64, open_report: bool = False) -> tuple[str, File]:
     """Full MNIST pipeline — train, evaluate, and generate HTML report."""
     data_dir = await load_data()
     model_file, history_json = await train(data_dir, epochs=epochs, lr=lr, batch_size=batch_size)
@@ -220,4 +228,4 @@ async def pipeline(epochs: int = 5, lr: float = 0.001, batch_size: int = 64, ope
             import webbrowser
             webbrowser.open(f"file://{report_path}")
 
-    return f"Test Accuracy: {test_acc:.4f} | Test Loss: {test_loss:.4f}"
+    return f"Test Accuracy: {test_acc:.4f} | Test Loss: {test_loss:.4f}", model_file
