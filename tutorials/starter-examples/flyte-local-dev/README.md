@@ -1,14 +1,15 @@
-# Flyte Local Dev Features
+# Flyte: Local Dev to Production
 
-Everything you get from `pip install flyte` without a cluster — TUI, caching, reports, tracing, and local serving.
+Build, test, and iterate locally — then deploy the same code to a Flyte cluster with GPUs. No rewrites.
 
-## Examples
+## What's Here
 
-| Script | Feature | What it does |
-|--------|---------|-------------|
-| `research_agent.py` | Caching + Reports + TUI | Research agent with DuckDuckGo search and calculator tools |
-| `cached_ml_pipeline.py` | Caching + Reports + TUI | PyTorch MNIST pipeline with training curves and hyperparameter report |
-| `serve_model.py` | Local Serving | Serve MNIST digit predictions via FastAPI |
+| Script | What it does |
+|--------|-------------|
+| `cached_ml_pipeline.py` | Train ResNet18 on MNIST with caching, HTML reports, and TUI |
+| `serve_model.py` | Serve predictions via FastAPI — locally or on a cluster |
+| `research_agent.py` | LangGraph agent with DuckDuckGo search, caching, tracing, and reports |
+| `agent_app.py` | Gradio UI that kicks off the agent as a Flyte task |
 
 ## Setup
 
@@ -21,57 +22,42 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
-The included `.flyte/config.yaml` enables local run persistence so `flyte start tui` can browse past runs.
-
-Set your OpenAI API key (for agent examples):
+Set your OpenAI API key (for agent example):
 
 ```bash
 export OPENAI_API_KEY=your-key
 # or create a .env file with OPENAI_API_KEY=your-key
 ```
 
-## Run
+---
 
-### Research Agent
+## Local Development
 
-```bash
-# First run — searches web, calls OpenAI, generates reasoning trace report
-flyte run --local --tui research_agent.py agent --request "What is the population of France and what is 10% of it?"
+Everything runs on your machine — no cluster, no Docker.
 
-# Same question — cache hit, returns instantly
-flyte run --local --tui research_agent.py agent --request "What is the population of France and what is 10% of it?"
-
-# Different question — fresh run
-flyte run --local --tui research_agent.py agent --request "What is the GDP of Japan in USD?"
-```
-
-Open the `report.html` from the output path to see the full reasoning trace.
-
-### ML Pipeline with Reports
+### Train with TUI
 
 ```bash
-# Run with TUI — load_data is cached after first run
+# First run — downloads data, trains model, generates HTML report
 flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
 
-# Change hyperparameters — data download is still cached
+# Auto-open the report in your browser
+flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001 --open_report
+
+# Change hyperparameters — data download is cached, only training re-runs
 flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 10 --lr 0.0005 --batch_size 128
 ```
 
-Open the `report.html` from the output path to see training curves, hyperparameters, and test results.
-
-### Local Serving
+### Serve Locally
 
 ```bash
-# Train the model first
+# Train first (saves model.pt)
 flyte run --local cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
 
 # Serve predictions
 python serve_model.py
-```
 
-Then hit the endpoint:
-
-```bash
+# Test it
 curl "http://localhost:8080/predict?index=42"
 ```
 
@@ -81,11 +67,73 @@ curl "http://localhost:8080/predict?index=42"
 flyte start tui
 ```
 
+### Research Agent (CLI)
+
+```bash
+flyte run --local --tui research_agent.py agent --request "What is the population of France and what is 10% of it?"
+```
+
+### Research Agent (Gradio UI)
+
+```bash
+# Launch Gradio UI — kicks off the agent as a Flyte task
+python agent_app.py
+```
+
+Open the printed URL in your browser, type a question, and the app runs the agent through Flyte's execution engine.
+
+---
+
+## Deploy to Production
+
+The same code runs on a remote Flyte cluster — swap `--local` for cluster execution.
+
+### Train on the Cluster (with GPUs)
+
+```bash
+flyte run cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+```
+
+The `TaskEnvironment` already defines the image, resources, and GPU — Flyte builds the container and schedules the work.
+
+### Deploy the Model as an API
+
+```bash
+flyte deploy serve_model.py serving_env
+```
+
+The `RunOutput` parameter automatically resolves the trained model from the latest pipeline run — no manual file paths. The same `lifespan` that loads `model.pt` locally now loads the model from Flyte's artifact store.
+
+```bash
+curl "https://your-app.apps.your-cluster.cloud/predict?index=42"
+```
+
+### Deploy the Agent UI
+
+```bash
+flyte deploy agent_app.py serving_env
+```
+
+The Gradio app runs on the cluster and kicks off the agent task through Flyte — same UI, same code.
+
+### Serve for Development (Remote)
+
+```bash
+flyte serve serve_model.py serving_env
+```
+
+Like `deploy` but designed for iteration — lets you override parameters dynamically.
+
+---
+
 ## Key Concepts
 
-- **`cache="auto"`** — Cache task outputs in local SQLite, skip recomputation on same inputs
-- **`report=True`** — Generate HTML reports from tasks, saved alongside output
-- **`@flyte.trace`** — Sub-task observability, shows as child nodes in the TUI
-- **`--tui`** — Interactive terminal dashboard for local runs
-- **`flyte start tui`** — Browse past local runs
-- **`flyte.with_servecontext(mode="local").serve()`** — Serve a FastAPI app locally
+| Feature | Local | Remote |
+|---------|-------|--------|
+| **Run pipeline** | `flyte run --local` | `flyte run` |
+| **TUI** | `--tui` flag | Dashboard in UI |
+| **Caching** | `cache="auto"` — local SQLite | `cache="auto"` — cluster cache |
+| **Reports** | `report=True` — local HTML file | `report=True` — in Flyte UI |
+| **Serve** | `python serve_model.py` | `flyte deploy serve_model.py serving_env` |
+| **Model loading** | Falls back to `model.pt` on disk | `RunOutput` resolves from pipeline |
+| **Compute** | Your CPU/GPU | `Resources(cpu=2, memory="4Gi", gpu=1)` |

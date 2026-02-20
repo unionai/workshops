@@ -11,4 +11,5 @@ matplotlib
 fastapi
 uvicorn
 httpx
+gradio
 pygments
