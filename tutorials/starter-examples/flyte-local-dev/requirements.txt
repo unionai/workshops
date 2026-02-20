@@ -1,0 +1,15 @@
+flyte==2.0.0
+textual
+langchain-core
+langchain-openai
+langgraph
+python-dotenv
+ddgs
+torch
+torchvision
+matplotlib
+fastapi
+uvicorn
+httpx
+gradio
+pygments
