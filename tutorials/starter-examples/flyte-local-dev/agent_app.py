@@ -1,10 +1,13 @@
 """Gradio UI for the research agent — kicks off the agent as a Flyte task.
 
-Local:  python agent_app.py
-Remote: flyte deploy agent_app.py serving_env
+Development progression:
+  1. Local app + local task:   RUN_MODE=local python agent_app.py
+  2. Local app + remote task:  python agent_app.py
+  3. Full remote:              flyte deploy agent_app.py serving_env
 """
 
 from dotenv import load_dotenv
+import os
 
 import flyte
 import flyte.app
@@ -13,13 +16,15 @@ from research_agent import agent
 
 load_dotenv()
 
+# Default "remote" — set RUN_MODE=local for fully local development
+RUN_MODE = os.getenv("RUN_MODE", "remote")
+
 serving_env = flyte.app.AppEnvironment(
     name="research-agent-ui",
     image=flyte.Image.from_debian_base(python_version=(3, 12)).with_pip_packages(
         "gradio", "langchain-core", "langchain-openai", "langgraph", "ddgs", "python-dotenv",
     ),
     resources=flyte.Resources(cpu=1, memory="2Gi"),
-    # Agent runs in-process — app needs the key too
     secrets=flyte.Secret(key="SAGE_OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
     requires_auth=False,
     port=7860,
@@ -28,7 +33,7 @@ serving_env = flyte.app.AppEnvironment(
 
 def run_query(request: str):
     """Kick off the agent as a Flyte task, stream URL then result."""
-    result = flyte.with_runcontext(mode="remote").run(agent, request=request)
+    result = flyte.with_runcontext(mode=RUN_MODE).run(agent, request=request)
 
     # Show the run URL immediately so you can watch it on the platform
     run_url = getattr(result, "url", None)
@@ -78,5 +83,8 @@ def app_server():
 
 
 if __name__ == "__main__":
-    # Local: load_dotenv() already set OPENAI_API_KEY
+    # Connect to the cluster for remote task execution
+    if RUN_MODE == "remote":
+        flyte.init_from_config()
+
     create_demo().launch()

@@ -76,11 +76,14 @@ flyte run --local --tui research_agent.py agent --request "What is the populatio
 ### Research Agent (Gradio UI)
 
 ```bash
-# Launch Gradio UI — kicks off the agent as a Flyte task
+# Local app + local task (default)
 python agent_app.py
+
+# Local app + remote task (kicks off the agent on the cluster)
+RUN_MODE=remote python agent_app.py
 ```
 
-Open the printed URL in your browser, type a question, and the app runs the agent through Flyte's execution engine.
+Open the printed URL in your browser, type a question, and the app runs the agent through Flyte's execution engine. With `RUN_MODE=remote`, you get a clickable link to watch the task execute on the Flyte platform.
 
 ---
 
@@ -111,10 +114,13 @@ curl "https://your-app.apps.your-cluster.cloud/predict?index=42"
 ### Deploy the Agent UI
 
 ```bash
+# Create the secret for the OpenAI API key
+flyte create secret SAGE_OPENAI_API_KEY <your-key>
+
 flyte deploy agent_app.py serving_env
 ```
 
-The Gradio app runs on the cluster and kicks off the agent task through Flyte — same UI, same code.
+The Gradio app runs on the cluster and kicks off the agent as a Flyte task. Each query gets a tracked run with full observability on the platform.
 
 ### Serve for Development (Remote)
 
@@ -135,5 +141,7 @@ Like `deploy` but designed for iteration — lets you override parameters dynami
 | **Caching** | `cache="auto"` — local SQLite | `cache="auto"` — cluster cache |
 | **Reports** | `report=True` — local HTML file | `report=True` — in Flyte UI |
 | **Serve** | `python serve_model.py` | `flyte deploy serve_model.py serving_env` |
+| **Agent UI** | `python agent_app.py` | `flyte deploy agent_app.py serving_env` |
 | **Model loading** | Falls back to `model.pt` on disk | `RunOutput` resolves from pipeline |
+| **Secrets** | `.env` file / `load_dotenv()` | `flyte create secret` / `flyte.Secret` |
 | **Compute** | Your CPU/GPU | `Resources(cpu=2, memory="4Gi", gpu=1)` |
