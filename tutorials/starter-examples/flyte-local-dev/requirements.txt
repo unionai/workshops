@@ -1,9 +1,10 @@
-flyte>=2.0.0b56
+flyte==2.0.0
 textual
 langchain-core
 langchain-openai
 langgraph
 python-dotenv
+ddgs
 torch
 torchvision
 matplotlib

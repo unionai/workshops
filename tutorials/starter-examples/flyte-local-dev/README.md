@@ -6,10 +6,9 @@ Everything you get from `pip install flyte` without a cluster — TUI, caching, 
 
 | Script | Feature | What it does |
 |--------|---------|-------------|
-| `cached_agent.py` | Caching + TUI | ReAct agent with cached LLM calls |
+| `research_agent.py` | Caching + Reports + TUI | Research agent with DuckDuckGo search and calculator tools |
 | `cached_ml_pipeline.py` | Caching + Reports + TUI | PyTorch MNIST pipeline with training curves and hyperparameter report |
-| `agent_with_report.py` | Reports | Agent that logs its reasoning trace as an HTML report |
-| `serve_model.py` | Local Serving | Train MNIST CNN and serve digit predictions via FastAPI |
+| `serve_model.py` | Local Serving | Serve MNIST digit predictions via FastAPI |
 
 ## Setup
 
@@ -33,15 +32,20 @@ export OPENAI_API_KEY=your-key
 
 ## Run
 
-### Caching + TUI
+### Research Agent
 
 ```bash
-# First run — calls OpenAI
-flyte run --local --tui cached_agent.py agent --request "What is 12 * 7 plus 3?"
+# First run — searches web, calls OpenAI, generates reasoning trace report
+flyte run --local --tui research_agent.py agent --request "What is the population of France and what is 10% of it?"
 
-# Second run — cache hit, returns instantly
-flyte run --local --tui cached_agent.py agent --request "What is 12 * 7 plus 3?"
+# Same question — cache hit, returns instantly
+flyte run --local --tui research_agent.py agent --request "What is the population of France and what is 10% of it?"
+
+# Different question — fresh run
+flyte run --local --tui research_agent.py agent --request "What is the GDP of Japan in USD?"
 ```
+
+Open the `report.html` from the output path to see the full reasoning trace.
 
 ### ML Pipeline with Reports
 
@@ -55,17 +59,13 @@ flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 10 --lr 0.0005 -
 
 Open the `report.html` from the output path to see training curves, hyperparameters, and test results.
 
-### Agent with Report
-
-```bash
-flyte run --local agent_with_report.py agent --request "What is 12 * 7 plus 3?"
-```
-
-Open the `report.html` from the output path in your browser to see the agent trace.
-
 ### Local Serving
 
 ```bash
+# Train the model first
+flyte run --local cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+
+# Serve predictions
 python serve_model.py
 ```
 
