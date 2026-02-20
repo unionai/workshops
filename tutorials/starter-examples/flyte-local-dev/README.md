@@ -76,14 +76,14 @@ flyte run --local --tui research_agent.py agent --request "What is the populatio
 ### Research Agent (Gradio UI)
 
 ```bash
-# Local app + local task (default)
+# Local app + remote task (default) — kicks off agent on the cluster
 python agent_app.py
 
-# Local app + remote task (kicks off the agent on the cluster)
-RUN_MODE=remote python agent_app.py
+# Fully local (no cluster needed)
+RUN_MODE=local python agent_app.py
 ```
 
-Open the printed URL in your browser, type a question, and the app runs the agent through Flyte's execution engine. With `RUN_MODE=remote`, you get a clickable link to watch the task execute on the Flyte platform.
+Open the printed URL in your browser, type a question, and the app kicks off the agent as a Flyte task. You get a clickable link to watch it execute on the platform. Set `RUN_MODE=local` for fully offline development.
 
 ---
 

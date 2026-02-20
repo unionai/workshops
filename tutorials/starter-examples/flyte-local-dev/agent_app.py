@@ -35,12 +35,17 @@ def run_query(request: str):
     """Kick off the agent as a Flyte task, stream URL then result."""
     result = flyte.with_runcontext(mode=RUN_MODE).run(agent, request=request)
 
-    # Show the run URL immediately so you can watch it on the platform
+    # Show the run link immediately
     run_url = getattr(result, "url", None)
     link_html = ""
-    if run_url and str(run_url).startswith("http"):
-        link_html = f'<a href="{run_url}" target="_blank">View run on Flyte</a>'
-        yield "Running on Flyte...", link_html
+    if run_url:
+        url_str = str(run_url)
+        if url_str.startswith("http"):
+            link_html = f'<a href="{url_str}" target="_blank">View run on Flyte</a>'
+            yield "Running on Flyte...", link_html
+        else:
+            link_html = f'<code style="font-size:0.85em;color:#666;">Local run: {url_str}</code>'
+            yield "Running locally...", link_html
     else:
         yield "Running...", ""
 
@@ -88,3 +93,7 @@ if __name__ == "__main__":
         flyte.init_from_config()
 
     create_demo().launch()
+
+# Local app + local task:   RUN_MODE=local python agent_app.py
+# Local app + remote task:  python agent_app.py
+# Deploy to cluster:        flyte deploy agent_app.py serving_env

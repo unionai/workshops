@@ -229,3 +229,7 @@ async def pipeline(epochs: int = 5, lr: float = 0.001, batch_size: int = 64, ope
             webbrowser.open(f"file://{report_path}")
 
     return f"Test Accuracy: {test_acc:.4f} | Test Loss: {test_loss:.4f}", model_file
+
+
+# Local:  flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+# Remote: flyte run cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001

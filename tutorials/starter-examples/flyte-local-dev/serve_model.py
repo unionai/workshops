@@ -104,3 +104,6 @@ if __name__ == "__main__":
 
     input("Press Enter to shut down...")
     local_app.deactivate(wait=True)
+
+# Local:  python serve_model.py
+# Remote: flyte deploy serve_model.py serving_env

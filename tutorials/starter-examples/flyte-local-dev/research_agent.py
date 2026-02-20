@@ -90,3 +90,7 @@ async def agent(request: str) -> str:
     await flyte.report.flush.aio()
 
     return answer
+
+
+# Local:  flyte run --local --tui research_agent.py agent --request "What is the population of France and what is 10% of it?"
+# Remote: flyte run research_agent.py agent --request "What is the population of France and what is 10% of it?"
