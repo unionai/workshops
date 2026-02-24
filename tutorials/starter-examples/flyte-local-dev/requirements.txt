@@ -1,5 +1,4 @@
-flyte==2.0.0
-textual
+flyte[tui]>=2.0
 langchain-core
 langchain-openai
 langgraph
@@ -12,4 +11,5 @@ fastapi
 uvicorn
 httpx
 gradio
+flyteplugins-wandb
 pygments
