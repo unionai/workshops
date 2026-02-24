@@ -10,6 +10,7 @@ Build, test, and iterate locally — then deploy the same code to a Flyte cluste
 | `serve_model.py` | Serve predictions via FastAPI — locally or on a cluster |
 | `research_agent.py` | LangGraph agent with DuckDuckGo search, caching, tracing, and reports |
 | `agent_app.py` | Gradio UI that kicks off the agent as a Flyte task |
+| `wandb_ml_pipeline.py` | ML pipeline with W&B experiment tracking via the Flyte W&B plugin |
 
 ## Setup
 
@@ -85,6 +86,19 @@ RUN_MODE=local python agent_app.py
 
 Open the printed URL in your browser, type a question, and the app kicks off the agent as a Flyte task. You get a clickable link to watch it execute on the platform. Set `RUN_MODE=local` for fully offline development.
 
+### ML Pipeline with W&B Tracking
+
+```bash
+# Set your W&B API key
+export WANDB_API_KEY=your-key
+# or add WANDB_API_KEY=your-key to your .env file
+
+# Train with W&B experiment tracking
+flyte run --local --tui wandb_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+```
+
+Same pipeline as `cached_ml_pipeline.py` but every metric is logged to Weights & Biases. The `@wandb_init` decorator on the parent task creates a W&B run, and child tasks automatically share it — all training and evaluation metrics end up in one run.
+
 ---
 
 ## Deploy to Production
@@ -122,6 +136,17 @@ flyte deploy agent_app.py serving_env
 
 The Gradio app runs on the cluster and kicks off the agent as a Flyte task. Each query gets a tracked run with full observability on the platform.
 
+### Train with W&B on the Cluster
+
+```bash
+# Create the secret for the W&B API key
+flyte create secret wandb_api_key <your-key>
+
+flyte run wandb_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+```
+
+Every metric is tracked in W&B and every task is tracked on the Flyte platform — full observability across both systems.
+
 ### Serve for Development (Remote)
 
 ```bash
@@ -144,4 +169,5 @@ Like `deploy` but designed for iteration — lets you override parameters dynami
 | **Agent UI** | `python agent_app.py` | `flyte deploy agent_app.py serving_env` |
 | **Model loading** | Falls back to `model.pt` on disk | `RunOutput` resolves from pipeline |
 | **Secrets** | `.env` file / `load_dotenv()` | `flyte create secret` / `flyte.Secret` |
+| **W&B plugin** | `@wandb_init` + `WANDB_API_KEY` env var | `@wandb_init` + `flyte.Secret` |
 | **Compute** | Your CPU/GPU | `Resources(cpu=2, memory="4Gi", gpu=1)` |

@@ -1,90 +1,47 @@
-"""MNIST training pipeline — demonstrates Flyte local caching, reports, and TUI."""
+"""MNIST training pipeline with W&B experiment tracking via the Flyte W&B plugin.
 
-import io
+Layers W&B logging onto the base ML pipeline — same model, same data,
+but every metric is tracked in Weights & Biases.
+
+The @wandb_init decorator on the parent task creates a W&B run, and child
+tasks automatically share it — all metrics end up in one run.
+"""
+
 import json
-import base64
+
+from dotenv import load_dotenv
+load_dotenv()
 
 import flyte
 import flyte.report
 from flyte.io import File
+from flyteplugins.wandb import wandb_init, get_wandb_run
+
+from cached_ml_pipeline import create_model, get_device, fig_to_html, load_data
 
 image = flyte.Image.from_debian_base(python_version=(3, 12)).with_pip_packages(
-    "torch", "torchvision", "matplotlib",
+    "torch", "torchvision", "matplotlib", "flyteplugins-wandb",
 )
 
 env = flyte.TaskEnvironment(
-    name="ml_pipeline",
+    name="wandb_ml_pipeline",
     image=image,
     resources=flyte.Resources(cpu=2, memory="4Gi", gpu=1),
+    secrets=flyte.Secret(key="wandb_api_key", as_env_var="WANDB_API_KEY"),
 )
 
 
-def get_device():
-    import torch
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
-def create_model():
-    """ResNet18 adapted for MNIST (1-channel 28x28 input)."""
-    import torch.nn as nn
-    from torchvision import models
-
-    model = models.resnet18(num_classes=10)
-    model.conv1 = nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1)
-    model.maxpool = nn.Identity()
-    return model
-
-
-def fig_to_html(fig) -> str:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    return f'<img src="data:image/png;base64,{b64}" />'
-
-
-# NOTE: torch/torchvision are imported inside tasks (not at module level)
-# to avoid file descriptor issues with Flyte's local subprocess management.
-
-
-@env.task(cache="auto")
-async def load_data(data_dir: str = "./data") -> str:
-    """Download MNIST — cached after first run."""
-    import os
-    import urllib.request
-
-    raw_dir = os.path.join(data_dir, "MNIST", "raw")
-    os.makedirs(raw_dir, exist_ok=True)
-
-    base_url = "https://ossci-datasets.s3.amazonaws.com/mnist/"
-    files = [
-        "train-images-idx3-ubyte.gz",
-        "train-labels-idx1-ubyte.gz",
-        "t10k-images-idx3-ubyte.gz",
-        "t10k-labels-idx1-ubyte.gz",
-    ]
-
-    for fname in files:
-        path = os.path.join(raw_dir, fname)
-        if not os.path.exists(path):
-            print(f"Downloading {fname}...")
-            urllib.request.urlretrieve(base_url + fname, path)
-
-    print("Dataset ready.")
-    return data_dir
-
-
+@wandb_init
 @env.task
 async def train(data_dir: str, epochs: int = 5, lr: float = 0.001, batch_size: int = 64) -> tuple[File, str]:
-    """Train ResNet18 on MNIST, return model file and training history."""
+    """Train ResNet18 on MNIST, logging metrics to W&B."""
     import torch
     import torch.nn as nn
     import torch.optim as optim
     from torchvision import datasets, transforms
     from torch.utils.data import DataLoader
+
+    run = get_wandb_run()
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -98,6 +55,10 @@ async def train(data_dir: str, epochs: int = 5, lr: float = 0.001, batch_size: i
     model = create_model().to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
+
+    # Log hyperparameters to W&B
+    if run:
+        run.config.update({"epochs": epochs, "lr": lr, "batch_size": batch_size, "model": "resnet18"})
 
     history = {
         "epochs": epochs, "lr": lr, "batch_size": batch_size,
@@ -128,6 +89,10 @@ async def train(data_dir: str, epochs: int = 5, lr: float = 0.001, batch_size: i
         history["train_acc"].append(epoch_acc)
         print(f"Epoch {epoch + 1}/{epochs} — loss: {epoch_loss:.4f}, acc: {epoch_acc:.4f}")
 
+        # Log epoch metrics to W&B
+        if run:
+            run.log({"train_loss": epoch_loss, "train_acc": epoch_acc, "epoch": epoch + 1})
+
     path = "model.pt"
     torch.save(model.state_dict(), path)
     model_file = await File.from_local(path)
@@ -135,13 +100,16 @@ async def train(data_dir: str, epochs: int = 5, lr: float = 0.001, batch_size: i
     return model_file, json.dumps(history)
 
 
+@wandb_init
 @env.task
 async def evaluate(model_file: File, data_dir: str) -> tuple[float, float]:
-    """Evaluate model on test set, return accuracy and loss."""
+    """Evaluate model on test set, logging results to W&B."""
     import torch
     import torch.nn as nn
     from torchvision import datasets, transforms
     from torch.utils.data import DataLoader
+
+    run = get_wandb_run()
 
     local_path = await model_file.download()
     device = get_device()
@@ -173,21 +141,33 @@ async def evaluate(model_file: File, data_dir: str) -> tuple[float, float]:
     test_acc = correct / total
     test_loss = test_loss / total
     print(f"Test Accuracy: {test_acc:.4f} | Test Loss: {test_loss:.4f}")
+
+    # Log test results to W&B
+    if run:
+        run.log({"test_acc": test_acc, "test_loss": test_loss})
+        run.summary["test_acc"] = test_acc
+        run.summary["test_loss"] = test_loss
+
     return test_acc, test_loss
 
 
+@wandb_init(project="flyte-mnist")
 @env.task(report=True)
-async def pipeline(epochs: int = 5, lr: float = 0.001, batch_size: int = 64, open_report: bool = False) -> tuple[str, File]:
-    """Full MNIST pipeline — train, evaluate, and generate HTML report."""
+async def pipeline(epochs: int = 5, lr: float = 0.001, batch_size: int = 64) -> tuple[str, File]:
+    """Full MNIST pipeline with W&B tracking — train, evaluate, and report."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    run = get_wandb_run()
+    if run:
+        print(f"W&B run: {run.url}")
+
     data_dir = await load_data()
     model_file, history_json = await train(data_dir, epochs=epochs, lr=lr, batch_size=batch_size)
     test_acc, test_loss = await evaluate(model_file, data_dir)
 
     # Build HTML report with training curves
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     history = json.loads(history_json)
     epoch_list = list(range(1, history["epochs"] + 1))
 
@@ -202,8 +182,11 @@ async def pipeline(epochs: int = 5, lr: float = 0.001, batch_size: int = 64, ope
     charts_html = fig_to_html(fig)
     plt.close(fig)
 
+    wandb_link = f'<a href="{run.url}" target="_blank">View in W&B</a>' if run else ""
+
     await flyte.report.replace.aio(
-        f"<h2>MNIST Training Report</h2>"
+        f"<h2>MNIST Training Report (W&B)</h2>"
+        f"{f'<p>{wandb_link}</p>' if wandb_link else ''}"
         f"<h3>Hyperparameters</h3>"
         f"<table border='1' cellpadding='8' cellspacing='0' style='border-collapse:collapse;'>"
         f"<tr><td><b>Epochs</b></td><td>{history['epochs']}</td></tr>"
@@ -219,17 +202,8 @@ async def pipeline(epochs: int = 5, lr: float = 0.001, batch_size: int = 64, ope
     )
     await flyte.report.flush.aio()
 
-    task_ctx = flyte.ctx()
-    if task_ctx:
-        from flyte._internal.runtime import io as flyte_io
-        report_path = flyte_io.report_path(task_ctx.output_path)
-        print(f"Report: {report_path}")
-        if open_report:
-            import webbrowser
-            webbrowser.open(f"file://{report_path}")
-
     return f"Test Accuracy: {test_acc:.4f} | Test Loss: {test_loss:.4f}", model_file
 
 
-# Local:  flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001 --open_report
-# Remote: flyte run cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+# Local:  WANDB_API_KEY=your-key flyte run --local --tui wandb_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+# Remote: flyte run wandb_ml_pipeline.py pipeline --epochs 5 --lr 0.001
