@@ -18,11 +18,11 @@ from tools.search import create_search_tool
 log = logging.getLogger(__name__)
 
 
-def build_research_graph(openai_api_key: str, tavily_api_key: str, max_searches: int = 3):
+def build_research_graph(openai_api_key: str, tavily_api_key: str, max_searches: int = 3, model: str = "gpt-4.1-nano"):
     """Build a research agent that uses Tavily search as a tool."""
     web_search = create_search_tool(tavily_api_key)
     tools = [web_search]
-    llm = ChatOpenAI(model="gpt-4.1-nano", api_key=openai_api_key).bind_tools(tools)
+    llm = ChatOpenAI(model=model, api_key=openai_api_key).bind_tools(tools)
 
     system_prompt = (
         f"You are a research agent. Your job is to thoroughly research a topic by searching the web. "

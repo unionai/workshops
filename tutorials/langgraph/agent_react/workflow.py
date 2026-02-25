@@ -5,7 +5,11 @@ The agent breaks down problems step-by-step, calling tools as needed,
 until it arrives at a final answer.
 
 Usage:
-    python -m agent_react.workflow --local --request "How many words are in 'the quick brown fox' multiplied by 5?"
+    # Local with TUI
+    flyte run --local --tui agent_react/workflow.py react_agent --request "How many words are in 'the quick brown fox' multiplied by 5?"
+
+    # Remote (on Flyte cluster)
+    flyte run agent_react/workflow.py react_agent --request "How many words are in 'the quick brown fox' multiplied by 5?"
 """
 
 import base64
@@ -77,20 +81,3 @@ async def react_agent(request: str, max_steps: int = 10) -> str:
     return answer
 
 
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="ReAct agent with math and string tools")
-    parser.add_argument("--local", action="store_true", help="Run locally with flyte.init()")
-    parser.add_argument("--request", type=str, required=True, help="Task for the agent to solve")
-    parser.add_argument("--max-steps", type=int, default=10, help="Max reasoning steps")
-    args = parser.parse_args()
-
-    if args.local:
-        flyte.init()
-    else:
-        flyte.init_from_config(".flyte/config.yaml")
-
-    log.info(f"Task: {args.request}")
-    execution = flyte.run(react_agent, request=args.request, max_steps=args.max_steps)
-    log.info(f"Execution: {execution.name} | URL: {execution.url}")
