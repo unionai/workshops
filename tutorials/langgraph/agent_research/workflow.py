@@ -24,12 +24,12 @@ import flyte
 import flyte.report
 from langchain_openai import ChatOpenAI
 from config import base_env, OPENAI_API_KEY, TAVILY_API_KEY
-from agent_research.graph import build_research_graph
+from graph import build_research_graph
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
-logging.getLogger("agent_research.graph").setLevel(logging.INFO)
+logging.getLogger("graph").setLevel(logging.INFO)
 logging.getLogger("tools.search").setLevel(logging.INFO)
 
 env = base_env
