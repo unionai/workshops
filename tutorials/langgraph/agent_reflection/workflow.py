@@ -5,7 +5,11 @@ The agent generates a response, critiques it, and refines until the quality
 threshold is met or max iterations are reached.
 
 Usage:
-    python -m agent_reflection.workflow --local --request "Write a Python function to find all prime numbers up to N using the Sieve of Eratosthenes"
+    # Local with TUI
+    flyte run --local --tui agent_reflection/workflow.py reflection_agent --request "Write a Python function to find all prime numbers up to N"
+
+    # Remote (on Flyte cluster)
+    flyte run agent_reflection/workflow.py reflection_agent --request "Write a Python function to find all prime numbers up to N"
 """
 
 import base64
@@ -78,26 +82,3 @@ async def reflection_agent(request: str, quality_threshold: int = 8, max_iterati
     return json.dumps({"response": answer, "score": score, "iterations": iterations})
 
 
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Reflection agent — iterative self-improvement")
-    parser.add_argument("--local", action="store_true", help="Run locally with flyte.init()")
-    parser.add_argument("--request", type=str, required=True, help="Task to accomplish")
-    parser.add_argument("--quality-threshold", type=int, default=8, help="Min quality score 1-10")
-    parser.add_argument("--max-iterations", type=int, default=3, help="Max refinement iterations")
-    args = parser.parse_args()
-
-    if args.local:
-        flyte.init()
-    else:
-        flyte.init_from_config(".flyte/config.yaml")
-
-    log.info(f"Request: {args.request}")
-    execution = flyte.run(
-        reflection_agent,
-        request=args.request,
-        quality_threshold=args.quality_threshold,
-        max_iterations=args.max_iterations,
-    )
-    log.info(f"Execution: {execution.name} | URL: {execution.url}")

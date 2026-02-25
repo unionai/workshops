@@ -9,7 +9,11 @@ Architecture:
 Each task shows up separately in the Flyte UI for tracking and expansion.
 
 Usage:
-    python -m agent_research.workflow --local --query "Compare quantum computing approaches"
+    # Local with TUI
+    flyte run --local --tui agent_research/workflow.py research_workflow --query "Compare quantum computing approaches"
+
+    # Remote (on Flyte cluster)
+    flyte run agent_research/workflow.py research_workflow --query "Compare quantum computing approaches"
 """
 
 import json
@@ -41,7 +45,7 @@ def md_to_html(text: str) -> str:
 # Task 1: Split query into sub-topics
 # ------------------------------------------------------------------
 
-@env.task(report=True)
+@env.task(report=True, cache="auto")
 async def plan_research(query: str, num_topics: int = 3) -> list[str]:
     """Use LLM to break a broad query into focused sub-topics."""
     llm = ChatOpenAI(model=MODEL, api_key=OPENAI_API_KEY)
@@ -83,6 +87,7 @@ async def research_topic(topic: str, max_searches: int = 2) -> str:
         openai_api_key=OPENAI_API_KEY,
         tavily_api_key=TAVILY_API_KEY,
         max_searches=max_searches,
+        model=MODEL,
     )
     result = await graph.ainvoke({"messages": [HumanMessage(content=f"Research this topic: {topic}")]})
     report = result["messages"][-1].content
@@ -91,6 +96,7 @@ async def research_topic(topic: str, max_searches: int = 2) -> str:
     await flyte.report.replace.aio(f"<h2>{topic}</h2>{md_to_html(report)}")
     await flyte.report.flush.aio()
 
+    # JSON string because Flyte tasks need serializable types across task boundaries
     return json.dumps({"topic": topic, "report": report})
 
 
@@ -101,7 +107,7 @@ async def research_topic(topic: str, max_searches: int = 2) -> str:
 @env.task(report=True)
 async def synthesize_reports(query: str, reports_json: str) -> str:
     """Combine sub-topic reports into a final comprehensive report."""
-    reports = json.loads(reports_json)
+    reports = json.loads(reports_json)  # deserialized from parallel research tasks
     llm = ChatOpenAI(model=MODEL, api_key=OPENAI_API_KEY)
     sections = "\n\n---\n\n".join(
         f"## {r['topic']}\n\n{r['report']}" for r in reports
@@ -145,7 +151,7 @@ async def research_workflow(query: str, num_topics: int = 3, max_searches: int =
 
     # Visualize the LangGraph agent graph in the report
     import base64
-    graph = build_research_graph(OPENAI_API_KEY, TAVILY_API_KEY, max_searches)
+    graph = build_research_graph(OPENAI_API_KEY, TAVILY_API_KEY, max_searches, model=MODEL)
     png_bytes = graph.get_graph().draw_mermaid_png()
     img_b64 = base64.b64encode(png_bytes).decode()
     await flyte.report.log.aio(
@@ -166,31 +172,3 @@ async def research_workflow(query: str, num_topics: int = 3, max_searches: int =
     log.info("Workflow complete")
     return result
 
-
-# ------------------------------------------------------------------
-# CLI
-# ------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Multi-agent research workflow")
-    parser.add_argument("--local", action="store_true", help="Run locally with flyte.init()")
-    parser.add_argument("--query", type=str, required=True, help="Research question")
-    parser.add_argument("--num-topics", type=int, default=3, help="Number of sub-topics to research")
-    parser.add_argument("--max-searches", type=int, default=2, help="Max searches per sub-topic")
-    args = parser.parse_args()
-
-    if args.local:
-        flyte.init()
-    else:
-        flyte.init_from_config(".flyte/config.yaml")
-
-    log.info(f"Query: {args.query}")
-    execution = flyte.run(
-        research_workflow,
-        query=args.query,
-        num_topics=args.num_topics,
-        max_searches=args.max_searches,
-    )
-    log.info(f"Execution: {execution.name} | URL: {execution.url}")
