@@ -10,4 +10,4 @@ local:
 task:
   domain: development
   org: tryv2
-  project: plannerworkshops
+  project: langfeb
