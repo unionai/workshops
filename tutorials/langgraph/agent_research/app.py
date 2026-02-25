@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 import flyte
 import flyte.app
 
-from agent_research.workflow import research_workflow
+from workflow import research_workflow
 
 load_dotenv()
 
