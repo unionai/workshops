@@ -126,6 +126,23 @@ A few things to try after the first run:
 - **Add a tool** — create a new `@tool` function in `tools/` (see `tools/search.py` for the pattern), import it in `graph.py`, and add it to the `tools` list. The LLM will automatically discover it via tool calling
 - **Adjust parallelism** — try `--num-topics 5` for broader research, or `--num-topics 1` to watch a single agent work step by step
 
+### Serve it
+
+The same workflow that runs via `flyte run` can be served as a Gradio web app. The app (`agent_research/app.py`) calls `research_workflow` as a Flyte task, so you get the same reports, tracing, and caching — just with a UI on top.
+
+```bash
+# Local app + local task — everything runs on your machine
+RUN_MODE=local python -m agent_research.app
+
+# Local app + remote task — Gradio runs locally, workflow runs on the cluster
+python -m agent_research.app
+
+# Deploy to cluster — Gradio app runs on the cluster too
+flyte deploy agent_research/app.py serving_env
+```
+
+The app includes sliders for sub-topics and searches per topic, plus example queries to get started.
+
 ---
 
 ## More Examples
@@ -205,7 +222,8 @@ tutorials/langgraph/
 ├── agent_research/
 │   ├── __init__.py
 │   ├── graph.py           # LangGraph agent — search loop with tool calling
-│   └── workflow.py        # Flyte tasks — plan, fan-out research, synthesize
+│   ├── workflow.py        # Flyte tasks — plan, fan-out research, synthesize
+│   └── app.py             # Gradio UI — serve the workflow as a web app
 ├── agent_react/
 │   ├── __init__.py
 │   ├── graph.py           # ReAct graph with math + string tools
