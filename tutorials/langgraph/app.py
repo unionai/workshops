@@ -1,9 +1,9 @@
 """Gradio UI for the research agent — kicks off the workflow as a Flyte task.
 
 Development progression:
-  1. Local app + local task:   RUN_MODE=local python -m agent_research.app
-  2. Local app + remote task:  python -m agent_research.app
-  3. Full remote:              flyte deploy agent_research/app.py serving_env
+  1. Local app + local task:   RUN_MODE=local python app.py
+  2. Local app + remote task:  python app.py
+  3. Full remote:              flyte deploy app.py serving_env
 """
 
 import json
@@ -25,7 +25,7 @@ serving_env = flyte.app.AppEnvironment(
     name="research-agent-ui",
     image=flyte.Image.from_debian_base().with_pip_packages(
         "gradio", "python-dotenv", "markdown",
-        "langgraph>=1.0.7", "langchain-openai", "tavily-python", "unionai-reuse",
+        "langgraph>=1.0.7", "langchain-openai", "tavily-python",
     ),
     resources=flyte.Resources(cpu=2, memory="2Gi"),
     secrets=[
@@ -116,6 +116,6 @@ if __name__ == "__main__":
 
     create_demo().launch()
 
-# Local app + local task:   RUN_MODE=local python -m agent_research.app
-# Local app + remote task:  python -m agent_research.app
-# Deploy to cluster:        flyte deploy agent_research/app.py serving_env
+# Local app + local task:   RUN_MODE=local python app.py
+# Local app + remote task:  python app.py
+# Deploy to cluster:        flyte deploy app.py serving_env

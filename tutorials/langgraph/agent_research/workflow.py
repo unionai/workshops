@@ -23,7 +23,7 @@ import markdown
 import flyte
 import flyte.report
 from langchain_openai import ChatOpenAI
-from config import base_env, OPENAI_API_KEY, TAVILY_API_KEY
+from agent_research.config import base_env, OPENAI_API_KEY, TAVILY_API_KEY
 from agent_research.graph import build_research_graph
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)

@@ -13,7 +13,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph, MessagesState
 from langgraph.prebuilt import ToolNode
-from tools.search import create_search_tool
+from agent_research.search import create_search_tool
 
 log = logging.getLogger(__name__)
 
