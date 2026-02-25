@@ -1,5 +1,7 @@
 # Research Agent Workshop
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/unionai/workshops?quickstart=1)
+
 A multi-agent research workflow built with **LangGraph** and **Flyte**. Ask a question, and parallel agents search the web, research sub-topics, and synthesize a final report.
 
 ```
