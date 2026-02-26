@@ -1,0 +1,12 @@
+feast
+flyte[tui]>=2.0.0
+scikit-learn
+xgboost
+joblib
+pandas
+pyarrow
+python-dotenv
+kagglehub
+gradio
+unionai-reuse
+textual

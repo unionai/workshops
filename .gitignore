@@ -8,3 +8,4 @@ traces/
 *.jsonl
 tutorials/starter-examples/flyte-local-dev/data
 *.pt
+data
