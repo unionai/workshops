@@ -34,7 +34,7 @@ fraud-detection/
 ## Setup
 
 ```bash
-cd tutorials/feast/fraud-detection
+cd tutorials/fraud-detection-feast
 
 # Create virtual environment
 uv venv .venv --python 3.11
