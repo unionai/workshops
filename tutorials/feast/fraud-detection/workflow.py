@@ -1,20 +1,29 @@
 """
 Fraud detection ML pipeline using Feast feature store + Flyte orchestration.
 
+Uses the Sparkov simulated credit card transactions dataset with fully
+interpretable features: amount, merchant category, location, user spending
+history, and derived anomaly scores.
+
 Architecture:
-    1. prepare_training_data — join transaction + user features with pandas
-    2. train_model           — train XGBoost classifier, return model as flyte.io.File
-    3. score_transactions    — materialize to Feast online store + score in real time
+    1. prepare_data          — download dataset, engineer features → flyte.io.Dir
+    2. train_model           — train XGBoost classifier → flyte.io.File
+    3. materialize_features  — feast apply + materialize → flyte.io.Dir
+    4. fraud_detection_pipeline — orchestrate all, return model + feast artifacts
 
 Usage:
     flyte run --local workflow.py fraud_detection_pipeline
     flyte run --local --tui workflow.py fraud_detection_pipeline
 """
 
+import asyncio
 import json
 import logging
+import math
+import os
+import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import joblib
 import numpy as np
@@ -30,71 +39,141 @@ log.setLevel(logging.INFO)
 
 env = base_env
 
-FEATURE_COLS = [
-    "Amount", "amount_log", "hour_of_day",
-] + [f"V{i}" for i in range(1, 29)]
+# ------------------------------------------------------------------
+# Feature definitions
+#
+# Transaction features: known at scoring time (from the request)
+# User features: pre-computed aggregates stored in Feast
+# Derived features: computed at both training and scoring time by
+#                   comparing the transaction to the user's profile
+# ------------------------------------------------------------------
 
-FEAST_FEATURES = [
-    "transaction_features:Amount",
-    "transaction_features:amount_log",
-    "transaction_features:hour_of_day",
-] + [f"transaction_features:V{i}" for i in range(1, 29)] + [
-    "user_stats:txn_count",
-    "user_stats:mean_amount",
-    "user_stats:std_amount",
-    "user_stats:max_amount",
-    "user_stats:total_amount",
+TXN_FEATURE_COLS = ["amt", "amt_log", "category_encoded", "merch_lat", "merch_long"]
+
+USER_FEATURE_COLS = [
+    "txn_count", "mean_amt", "std_amt", "max_amt",
+    "home_lat", "home_long", "age",
 ]
 
-ALL_FEATURE_COLS = FEATURE_COLS + [
-    "txn_count", "mean_amount", "std_amount", "max_amount", "total_amount",
+DERIVED_FEATURE_COLS = [
+    "amt_zscore", "amt_ratio", "distance_from_home", "hour", "day_of_week",
 ]
 
+ALL_FEATURE_COLS = TXN_FEATURE_COLS + USER_FEATURE_COLS + DERIVED_FEATURE_COLS
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Compute distance in miles between two (lat, lon) points."""
+    R = 3959  # Earth radius in miles
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+    return 2 * R * np.arcsin(np.sqrt(a))
+
 
 # ------------------------------------------------------------------
-# Task 1: Build training data by joining transaction + user features
-# ------------------------------------------------------------------
-# We join features directly with pandas here — it's fast and simple.
-# Feast's offline store (get_historical_features) does the same thing
-# with point-in-time correctness, but the local file provider is slow
-# on 284K rows. In production you'd use BigQuery/Redshift as the
-# offline store backend for fast historical joins.
+# Task 1: Download dataset and engineer features
 # ------------------------------------------------------------------
 
-@env.task(report=True)
-async def prepare_training_data() -> pd.DataFrame:
-    """Join transaction and user features into a training dataset."""
-    log.info("Loading parquet files...")
-    txn_df = pd.read_parquet("data/transactions.parquet")
-    user_df = pd.read_parquet("data/user_features.parquet")
+@env.task(report=True, cache="auto")
+async def prepare_data() -> flyte.io.Dir:
+    """Download the Sparkov credit card fraud dataset and prepare parquets."""
+    import kagglehub
 
-    # Join user-level aggregates onto each transaction
-    log.info(f"Joining {len(txn_df):,} transactions with {len(user_df):,} user profiles...")
-    training_data = txn_df.merge(
-        user_df[["user_id", "txn_count", "mean_amount", "std_amount", "max_amount", "total_amount"]],
-        on="user_id",
-        how="left",
-    )
+    log.info("Downloading dataset...")
+    dataset_path = kagglehub.dataset_download("kartik2112/fraud-detection")
+    csv_path = os.path.join(dataset_path, "fraudTrain.csv")
+    df = pd.read_csv(csv_path)
+    log.info(f"Loaded {len(df):,} transactions ({int(df['is_fraud'].sum()):,} fraudulent)")
 
-    # Drop rows with missing features
-    before = len(training_data)
-    training_data = training_data.dropna(subset=ALL_FEATURE_COLS)
-    log.info(f"Training data: {len(training_data):,} rows ({before - len(training_data)} dropped)")
+    # Sample for workshop speed (stratified to preserve fraud ratio)
+    if len(df) > 500_000:
+        from sklearn.model_selection import train_test_split
+        df, _ = train_test_split(df, train_size=500_000, stratify=df["is_fraud"], random_state=42)
+        log.info(f"Sampled to {len(df):,} transactions")
 
-    # Report: dataset summary
-    fraud_count = int(training_data["Class"].sum())
-    legit_count = len(training_data) - fraud_count
+    # ------------------------------------------------------------------
+    # Parse timestamps
+    # ------------------------------------------------------------------
+    df["event_timestamp"] = pd.to_datetime(df["trans_date_trans_time"])
+    df["event_timestamp"] = df["event_timestamp"].dt.tz_localize("UTC")
+    df["hour"] = df["event_timestamp"].dt.hour
+    df["day_of_week"] = df["event_timestamp"].dt.dayofweek
+
+    # ------------------------------------------------------------------
+    # Map cc_num → sequential user_id for clean API
+    # ------------------------------------------------------------------
+    cc_nums = df["cc_num"].unique()
+    cc_to_user = {cc: i for i, cc in enumerate(sorted(cc_nums))}
+    df["user_id"] = df["cc_num"].map(cc_to_user)
+
+    # ------------------------------------------------------------------
+    # Feature engineering
+    # ------------------------------------------------------------------
+    df["amt_log"] = np.log1p(df["amt"])
+
+    # Label-encode merchant category
+    categories = sorted(df["category"].unique())
+    cat_to_int = {cat: i for i, cat in enumerate(categories)}
+    df["category_encoded"] = df["category"].map(cat_to_int)
+
+    # Compute age from dob
+    df["dob"] = pd.to_datetime(df["dob"]).dt.tz_localize("UTC")
+    ref_date = df["event_timestamp"].max()
+    df["age"] = ((ref_date - df["dob"]).dt.days / 365.25).astype(int)
+
+    # Distance between buyer and merchant
+    df["distance"] = haversine(df["lat"], df["long"], df["merch_lat"], df["merch_long"])
+
+    # ------------------------------------------------------------------
+    # Build user aggregates
+    # ------------------------------------------------------------------
+    user_stats = df.groupby("user_id").agg(
+        txn_count=("amt", "count"),
+        mean_amt=("amt", "mean"),
+        std_amt=("amt", "std"),
+        max_amt=("amt", "max"),
+        home_lat=("lat", "median"),
+        home_long=("long", "median"),
+        age=("age", "first"),
+    ).reset_index()
+    user_stats["std_amt"] = user_stats["std_amt"].fillna(0)
+    latest_ts = df.groupby("user_id")["event_timestamp"].max().reset_index()
+    user_stats = user_stats.merge(latest_ts, on="user_id")
+
+    # ------------------------------------------------------------------
+    # Save to temp directory
+    # ------------------------------------------------------------------
+    data_dir = tempfile.mkdtemp()
+
+    txn_cols = [
+        "user_id", "event_timestamp",
+        "amt", "amt_log", "category_encoded", "merch_lat", "merch_long",
+        "hour", "day_of_week", "lat", "long", "distance",
+        "is_fraud",
+    ]
+    df[txn_cols].to_parquet(os.path.join(data_dir, "transactions.parquet"), index=False)
+    user_stats.to_parquet(os.path.join(data_dir, "user_features.parquet"), index=False)
+
+    # Save category mapping + cc_num mapping for the app
+    with open(os.path.join(data_dir, "category_mapping.json"), "w") as f:
+        json.dump(cat_to_int, f)
+    with open(os.path.join(data_dir, "user_mapping.json"), "w") as f:
+        json.dump({str(k): v for k, v in cc_to_user.items()}, f)
+
+    fraud_pct = df["is_fraud"].mean() * 100
     html = (
-        f"<h2>Training Data</h2>"
-        f"<p><b>Total:</b> {len(training_data):,} transactions</p>"
-        f"<p><b>Legitimate:</b> {legit_count:,} ({legit_count/len(training_data)*100:.1f}%)</p>"
-        f"<p><b>Fraudulent:</b> {fraud_count:,} ({fraud_count/len(training_data)*100:.3f}%)</p>"
-        f"<p><b>Features:</b> {len(ALL_FEATURE_COLS)}</p>"
+        f"<h2>Data Prepared</h2>"
+        f"<p><b>Transactions:</b> {len(df):,}</p>"
+        f"<p><b>Fraudulent:</b> {int(df['is_fraud'].sum()):,} ({fraud_pct:.2f}%)</p>"
+        f"<p><b>Users:</b> {user_stats['user_id'].nunique():,}</p>"
+        f"<p><b>Categories:</b> {len(categories)}</p>"
     )
     await flyte.report.replace.aio(html)
     await flyte.report.flush.aio()
 
-    return training_data
+    return await flyte.io.Dir.from_local(data_dir)
 
 
 # ------------------------------------------------------------------
@@ -102,23 +181,48 @@ async def prepare_training_data() -> pd.DataFrame:
 # ------------------------------------------------------------------
 
 @env.task(report=True)
-async def train_model(training_data: pd.DataFrame) -> flyte.io.File:
-    """Train an XGBoost classifier on Feast-enriched features."""
+async def train_model(data_dir: flyte.io.Dir) -> flyte.io.File:
+    """Train an XGBoost classifier on the prepared dataset."""
     from sklearn.model_selection import train_test_split
-    from sklearn.metrics import (
-        classification_report, roc_auc_score, confusion_matrix,
-    )
+    from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
     from xgboost import XGBClassifier
 
+    data_path = await data_dir.download()
+    txn_df = pd.read_parquet(os.path.join(data_path, "transactions.parquet"))
+    user_df = pd.read_parquet(os.path.join(data_path, "user_features.parquet"))
+
+    with open(os.path.join(data_path, "category_mapping.json")) as f:
+        category_mapping = json.load(f)
+
+    # Join user-level aggregates onto transactions
+    training_data = txn_df.merge(
+        user_df[["user_id"] + USER_FEATURE_COLS],
+        on="user_id",
+        how="left",
+    )
+
+    # Derived features — compare this transaction to the user's profile
+    training_data["amt_zscore"] = (
+        (training_data["amt"] - training_data["mean_amt"])
+        / training_data["std_amt"].replace(0, 1)
+    )
+    training_data["amt_ratio"] = (
+        training_data["amt"] / training_data["mean_amt"].replace(0, 1)
+    )
+    training_data["distance_from_home"] = haversine(
+        training_data["home_lat"], training_data["home_long"],
+        training_data["merch_lat"], training_data["merch_long"],
+    )
+
+    training_data = training_data.dropna(subset=ALL_FEATURE_COLS)
     X = training_data[ALL_FEATURE_COLS].values
-    y = training_data["Class"].values
+    y = training_data["is_fraud"].values
+    log.info(f"Training on {len(X):,} rows, {int(y.sum()):,} fraud")
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y,
     )
-    log.info(f"Train: {len(X_train):,} | Test: {len(X_test):,}")
 
-    # Handle class imbalance with scale_pos_weight
     n_legit = int((y_train == 0).sum())
     n_fraud = int((y_train == 1).sum())
     scale_pos_weight = n_legit / max(n_fraud, 1)
@@ -143,7 +247,7 @@ async def train_model(training_data: pd.DataFrame) -> flyte.io.File:
     log.info(f"AUC-ROC: {auc:.4f}")
     log.info(f"\n{report}")
 
-    # Report: model performance
+    # Report
     html = (
         f"<h2>Model Performance</h2>"
         f"<p><b>AUC-ROC:</b> {auc:.4f}</p>"
@@ -157,10 +261,9 @@ async def train_model(training_data: pd.DataFrame) -> flyte.io.File:
         f"<pre>{report}</pre>"
     )
 
-    # Feature importance (top 15)
     importance = model.feature_importances_
-    top_idx = np.argsort(importance)[-15:][::-1]
-    html += "<h3>Top 15 Features</h3><ol>"
+    top_idx = np.argsort(importance)[::-1]
+    html += "<h3>Feature Importance</h3><ol>"
     for i in top_idx:
         html += f"<li>{ALL_FEATURE_COLS[i]}: {importance[i]:.4f}</li>"
     html += "</ol>"
@@ -168,129 +271,157 @@ async def train_model(training_data: pd.DataFrame) -> flyte.io.File:
     await flyte.report.replace.aio(html)
     await flyte.report.flush.aio()
 
-    # Save model artifacts to a file — Flyte stores it by reference (no inline blob)
-    model_path = tempfile.mktemp(suffix=".joblib")
+    # Save model + metadata
+    model_path = os.path.join(tempfile.mkdtemp(), "model.joblib")
     joblib.dump({
         "model": model,
         "auc_roc": auc,
-        "confusion_matrix": cm.tolist(),
         "feature_cols": ALL_FEATURE_COLS,
+        "category_mapping": category_mapping,
     }, model_path)
 
     return await flyte.io.File.from_local(model_path)
 
 
 # ------------------------------------------------------------------
-# Task 3: Score transactions using Feast online store
+# Task 3: Set up Feast and materialize user profiles to online store
 # ------------------------------------------------------------------
 
 @env.task(report=True)
-async def score_transactions(model_file: flyte.io.File) -> str:
-    """Materialize features to online store and score sample transactions."""
-    from feast import FeatureStore
+async def materialize_features(data_dir: flyte.io.Dir) -> flyte.io.Dir:
+    """Apply Feast definitions and materialize user profiles to SQLite online store."""
+    from feast import Entity, FeatureStore, FeatureView, Field, FileSource
+    from feast.types import Float64, Int64
 
-    # Load model from Flyte-managed file
-    model_path = await model_file.download()
-    artifacts = joblib.load(model_path)
-    model = artifacts["model"]
-    auc = artifacts["auc_roc"]
+    data_path = await data_dir.download()
 
-    # Materialize features to the online store
-    log.info("Materializing features to online store...")
-    store = FeatureStore(repo_path="feature_repo")
-    store.materialize_incremental(end_date=datetime.now(timezone.utc))
+    # Create a self-contained Feast repo in a temp directory
+    feast_dir = tempfile.mkdtemp()
 
-    # Pick some sample transactions to score
-    txn_df = pd.read_parquet("data/transactions.parquet")
-    sample = txn_df.sample(n=20, random_state=42)
+    # Write feature_store.yaml
+    yaml_content = (
+        "project: fraud_detection\n"
+        f"registry: {feast_dir}/registry.db\n"
+        "provider: local\n"
+        "online_store:\n"
+        "  type: sqlite\n"
+        f"  path: {feast_dir}/online_store.db\n"
+        "offline_store:\n"
+        "  type: file\n"
+        "entity_key_serialization_version: 3\n"
+    )
+    yaml_path = os.path.join(feast_dir, "feature_store.yaml")
+    with open(yaml_path, "w") as f:
+        f.write(yaml_content)
 
-    # Fetch features from the online store
-    log.info(f"Scoring {len(sample)} sample transactions...")
-    entity_rows = [{"user_id": int(row["user_id"])} for _, row in sample.iterrows()]
-    online_features = store.get_online_features(
-        features=FEAST_FEATURES,
-        entity_rows=entity_rows,
-    ).to_df()
+    store = FeatureStore(repo_path=feast_dir)
 
-    # Fill any missing online features with 0
-    online_features = online_features.fillna(0)
+    # Define entity and feature view
+    user = Entity(name="user", join_keys=["user_id"], description="Credit card holder")
 
-    # Score
-    X_score = online_features[ALL_FEATURE_COLS].values
-    probabilities = model.predict_proba(X_score)[:, 1]
-    predictions = model.predict(X_score)
+    user_source = FileSource(
+        path=os.path.join(data_path, "user_features.parquet"),
+        timestamp_field="event_timestamp",
+    )
 
-    # Build results
-    results = []
-    for i, (_, row) in enumerate(sample.iterrows()):
-        results.append({
-            "transaction_id": int(row["transaction_id"]),
-            "user_id": int(row["user_id"]),
-            "amount": float(row["Amount"]),
-            "actual": int(row["Class"]),
-            "predicted": int(predictions[i]),
-            "fraud_probability": float(probabilities[i]),
-        })
+    user_stats = FeatureView(
+        name="user_stats",
+        entities=[user],
+        ttl=timedelta(days=0),  # No expiry — workshop data has old timestamps
+        schema=[
+            Field(name="txn_count", dtype=Int64),
+            Field(name="mean_amt", dtype=Float64),
+            Field(name="std_amt", dtype=Float64),
+            Field(name="max_amt", dtype=Float64),
+            Field(name="home_lat", dtype=Float64),
+            Field(name="home_long", dtype=Float64),
+            Field(name="age", dtype=Int64),
+        ],
+        online=True,
+        source=user_source,
+    )
 
-    # Report: scored transactions
-    html = "<h2>Scored Transactions (Sample)</h2>"
-    html += "<table border='1' cellpadding='6'>"
-    html += "<tr><th>Txn ID</th><th>User</th><th>Amount</th><th>Actual</th><th>Predicted</th><th>Fraud Prob</th></tr>"
-    for r in results:
-        color = "red" if r["fraud_probability"] > 0.5 else "green"
-        html += (
-            f"<tr>"
-            f"<td>{r['transaction_id']}</td>"
-            f"<td>{r['user_id']}</td>"
-            f"<td>${r['amount']:.2f}</td>"
-            f"<td>{'Fraud' if r['actual'] else 'Legit'}</td>"
-            f"<td>{'Fraud' if r['predicted'] else 'Legit'}</td>"
-            f"<td style='color:{color}'>{r['fraud_probability']:.4f}</td>"
-            f"</tr>"
-        )
-    html += "</table>"
+    # Apply and materialize
+    log.info("Applying Feast definitions...")
+    store.apply([user, user_stats])
+
+    log.info("Materializing user profiles to online store...")
+    store.materialize(
+        start_date=datetime(2018, 1, 1, tzinfo=timezone.utc),
+        end_date=datetime.now(timezone.utc),
+    )
+
+    # Rewrite feature_store.yaml with relative paths for portability
+    portable_yaml = (
+        "project: fraud_detection\n"
+        "registry: registry.db\n"
+        "provider: local\n"
+        "online_store:\n"
+        "  type: sqlite\n"
+        "  path: online_store.db\n"
+        "offline_store:\n"
+        "  type: file\n"
+        "entity_key_serialization_version: 3\n"
+    )
+    with open(yaml_path, "w") as f:
+        f.write(portable_yaml)
+
+    html = (
+        f"<h2>Feature Store Materialized</h2>"
+        f"<p><b>Feature view:</b> user_stats (spending profile + location + age)</p>"
+        f"<p><b>Online store:</b> SQLite</p>"
+        f"<p>User profiles are ready for real-time serving.</p>"
+    )
     await flyte.report.replace.aio(html)
     await flyte.report.flush.aio()
 
-    return json.dumps({"scored": results, "auc_roc": auc})
+    return await flyte.io.Dir.from_local(feast_dir)
 
 
 # ------------------------------------------------------------------
-# Orchestrator: prepare → train → score
+# Orchestrator: prepare → train + materialize → done
 # ------------------------------------------------------------------
 
 @env.task(report=True)
-async def fraud_detection_pipeline() -> str:
+async def fraud_detection_pipeline() -> tuple[flyte.io.File, flyte.io.Dir]:
     """
     Full fraud detection pipeline:
-    1. Build training data (pandas join)
-    2. Train XGBoost model
-    3. Score sample transactions via Feast online store
+    1. Download and prepare data
+    2. Train model + materialize features (in parallel)
+    Returns model file and Feast artifacts for serving.
     """
     log.info("Starting fraud detection pipeline")
 
-    await flyte.report.replace.aio("<h2>Fraud Detection Pipeline</h2><p>Preparing training data...</p>")
+    await flyte.report.replace.aio("<h2>Fraud Detection Pipeline</h2><p>Preparing data...</p>")
     await flyte.report.flush.aio()
 
-    training_data = await prepare_training_data()
+    data_dir = await prepare_data()
 
-    await flyte.report.replace.aio("<h2>Fraud Detection Pipeline</h2><p>Training model...</p>")
+    await flyte.report.replace.aio("<h2>Fraud Detection Pipeline</h2><p>Training model + materializing features...</p>")
     await flyte.report.flush.aio()
 
-    model_file = await train_model(training_data)
+    # Train model and materialize features in parallel
+    model_file, feast_dir = await asyncio.gather(
+        train_model(data_dir),
+        materialize_features(data_dir),
+    )
 
-    await flyte.report.replace.aio("<h2>Fraud Detection Pipeline</h2><p>Scoring transactions...</p>")
-    await flyte.report.flush.aio()
+    # Save copies to working directory for local app testing
+    model_local = await model_file.download()
+    feast_local = await feast_dir.download()
+    shutil.copy2(model_local, "model.joblib")
+    if os.path.exists("feast_artifacts"):
+        shutil.rmtree("feast_artifacts")
+    shutil.copytree(feast_local, "feast_artifacts")
+    log.info("Saved local copies: model.joblib, feast_artifacts/")
 
-    result = await score_transactions(model_file)
-
-    data = json.loads(result)
     await flyte.report.replace.aio(
         f"<h2>Pipeline Complete</h2>"
-        f"<p><b>AUC-ROC:</b> {data['auc_roc']:.4f}</p>"
-        f"<p><b>Transactions scored:</b> {len(data['scored'])}</p>"
+        f"<p>Model and feature store artifacts are ready for serving.</p>"
+        f"<p><b>Local:</b> <code>python app.py</code></p>"
+        f"<p><b>Remote:</b> <code>flyte deploy app.py serving_env</code></p>"
     )
     await flyte.report.flush.aio()
 
     log.info("Pipeline complete")
-    return result
+    return model_file, feast_dir
