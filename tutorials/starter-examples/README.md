@@ -10,6 +10,7 @@ Short, self-contained examples showing how to use Flyte for agents, ML, and data
 | [image-classifier](image-classifier/) | Fine-tune ResNet18 on HuggingFace dataset | PyTorch training, multi-task pipeline |
 | [duckdb-etl](duckdb-etl/) | Extract and transform CSV data with SQL | DuckDB, pandas, Flyte reports |
 | [snowflake-etl](snowflake-etl/) | ETL pipeline with Snowflake connector | Snowflake plugin, batch insert |
+| [flyte-local-dev](flyte-local-dev/) | Local dev features — no cluster needed | `cache`, `report`, `@flyte.trace`, TUI, local serving |
 
 ## Quick start
 
