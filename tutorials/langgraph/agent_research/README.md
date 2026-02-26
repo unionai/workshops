@@ -32,6 +32,7 @@ agent_research/
 
 ## Setup
 
+Quick setup for code spaces:
 ```
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv .venv --python 3.11
@@ -41,8 +42,11 @@ uv pip install -r requirements.txt
 uv pip install keyrings.alt 
 ```
 
+Setup for your local machine
+`git clone https://github.com/unionai/workshops`
+
 ```bash
-cd agent_research
+cd wokrshops/tutorials/langgraph/agent_research
 
 # Create virtual environment
 uv venv .venv --python 3.11
