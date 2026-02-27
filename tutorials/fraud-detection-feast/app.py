@@ -193,13 +193,33 @@ async def score(
     }
 
     X = pd.DataFrame([feature_row])[app.state.feature_cols].values
-    probability = float(app.state.model.predict_proba(X)[0, 1])
-    prediction = int(app.state.model.predict(X)[0])
+    model_probability = float(app.state.model.predict_proba(X)[0, 1])
+
+    # ------------------------------------------------------------------
+    # Rule overrides — catch obvious fraud the model can't extrapolate to
+    # Tree-based models can't extrapolate beyond training data ranges,
+    # so production systems combine ML scores with business rules.
+    # ------------------------------------------------------------------
+    probability = model_probability
+    rule_applied = None
+    if amt_zscore > 10 and distance > 500:
+        probability = max(probability, 0.8)
+        rule_applied = f"Rule override: z-score {amt_zscore:.1f} + distance {distance:.0f}mi → min 80%"
+    elif amt_zscore > 10:
+        probability = max(probability, 0.5)
+        rule_applied = f"Rule override: z-score {amt_zscore:.1f} → min 50%"
+    elif distance > 1000:
+        probability = max(probability, 0.3)
+        rule_applied = f"Rule override: distance {distance:.0f}mi → min 30%"
+
+    prediction = 1 if probability > 0.5 else 0
 
     # ------------------------------------------------------------------
     # Explainability signals
     # ------------------------------------------------------------------
     signals = []
+    if rule_applied:
+        signals.append(rule_applied)
     if mean_amt > 0 and amt > mean_amt + 2 * std_amt:
         signals.append(f"Amount ${amt:.2f} is {amt_zscore:.1f} std devs above user avg (${mean_amt:.2f})")
     if distance > 100:
@@ -219,8 +239,14 @@ async def score(
         },
         "fraud_prediction": "Fraud" if prediction else "Legit",
         "fraud_probability": round(probability, 4),
+        "model_probability": round(model_probability, 4),
         "risk_level": "HIGH" if probability > 0.5 else "MEDIUM" if probability > 0.1 else "LOW",
         "signals": signals,
+        "scoring": {
+            "amt_zscore": round(amt_zscore, 2),
+            "distance_from_home": round(distance, 1),
+            "rule_applied": rule_applied is not None,
+        },
         "user_profile": {
             "txn_count": txn_count,
             "mean_amt": round(mean_amt, 2),

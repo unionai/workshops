@@ -97,13 +97,19 @@ def score_transaction(user_id, amt, category, merch_lat, merch_long, hour, day_o
         f"- **Age:** {profile.get('age', 'N/A')}"
     )
 
-    # Format transaction
+    # Format transaction + scoring details
     txn = data.get("transaction", {})
+    scoring = data.get("scoring", {})
+    model_prob = data.get("model_probability", prob)
     txn_md = (
         f"- **Amount:** ${txn.get('amt', amt):.2f}\n"
         f"- **Category:** {txn.get('category', category)}\n"
         f"- **Hour (UTC):** {txn.get('hour', 'N/A')}\n"
-        f"- **Day of week:** {txn.get('day_of_week', 'N/A')}"
+        f"- **Day of week:** {txn.get('day_of_week', 'N/A')}\n"
+        f"- **Amount z-score:** {scoring.get('amt_zscore', 'N/A')}\n"
+        f"- **Distance from home:** {scoring.get('distance_from_home', 'N/A')} mi\n"
+        f"- **Model probability:** {model_prob:.1%}"
+        + (f"\n- **Rule override applied**" if scoring.get('rule_applied') else "")
     )
 
     return verdict, signals_md, profile_md, txn_md
