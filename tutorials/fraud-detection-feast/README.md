@@ -84,14 +84,14 @@ The pipeline saves `model.joblib` and `feast_artifacts/` to the working director
 python app.py
 ```
 
-Test with different transactions:
+Test with different transactions (pass `hour` and `day_of_week` to control the transaction time):
 
 ```bash
-# Normal grocery purchase, local merchant
-curl "http://localhost:8080/score?user_id=42&amt=25.00&category=grocery_pos&merch_lat=33.9&merch_long=-80.3"
+# Normal grocery purchase, local merchant, afternoon
+curl "http://localhost:8080/score?user_id=42&amt=25.00&category=grocery_pos&merch_lat=33.9&merch_long=-80.3&hour=14&day_of_week=2"
 
-# Suspiciously large purchase at a far-away merchant
-curl "http://localhost:8080/score?user_id=42&amt=9999.99&category=shopping_net&merch_lat=48.8&merch_long=2.3"
+# Suspiciously large purchase at a far-away merchant, late night
+curl "http://localhost:8080/score?user_id=42&amt=9999.99&category=shopping_net&merch_lat=48.8&merch_long=2.3&hour=23&day_of_week=3"
 ```
 
 ```json
@@ -99,21 +99,25 @@ curl "http://localhost:8080/score?user_id=42&amt=9999.99&category=shopping_net&m
   "user_id": 42,
   "transaction": {"amt": 9999.99, "category": "shopping_net", "hour": 23, "day_of_week": 3},
   "fraud_prediction": "Fraud",
-  "fraud_probability": 0.5658,
+  "fraud_probability": 0.8,
+  "model_probability": 0.5658,
   "risk_level": "HIGH",
   "signals": [
+    "Rule override: z-score 49.1 + distance 3923mi → min 80%",
     "Amount $9999.99 is 49.1 std devs above user avg ($61.63)",
     "Transaction 3923 miles from user's usual area",
     "High-value transaction (>$1,000)"
   ],
+  "scoring": {"amt_zscore": 49.13, "distance_from_home": 3923.0, "rule_applied": true},
   "user_profile": {"txn_count": 1188, "mean_amt": 61.63, "std_amt": 202.33, "age": 38}
 }
 ```
 
 The scoring flow mirrors a real payment system:
-- **From the request**: transaction amount, merchant category, merchant location
+- **From the request**: transaction amount, merchant category, merchant location, time
 - **From Feast**: user's spending history, home location, age
-- **Computed at scoring time**: amount z-score, distance from home, time features
+- **Computed at scoring time**: amount z-score, distance from home
+- **Rule overrides**: business rules catch extreme cases the model can't extrapolate to
 - **Signals**: human-readable flags explaining why a transaction looks suspicious
 
 ---
@@ -139,7 +143,7 @@ Every time you retrain (re-run the pipeline), redeploying the app picks up the n
 ### Test the remote endpoint
 
 ```bash
-curl "https://<app-url>/score?user_id=42&amt=500.00&category=grocery_pos&merch_lat=40.71&merch_long=-74.01"
+curl "https://<app-url>/score?user_id=42&amt=500.00&category=grocery_pos&merch_lat=40.71&merch_long=-74.01&hour=22&day_of_week=3"
 ```
 
 ---
