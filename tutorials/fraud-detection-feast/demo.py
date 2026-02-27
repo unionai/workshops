@@ -38,7 +38,7 @@ CATEGORIES = [
 ]
 
 
-def score_transaction(user_id, amt, category, merch_lat, merch_long):
+def score_transaction(user_id, amt, category, merch_lat, merch_long, hour, day_of_week):
     """Call the scoring API and format the response."""
     api_url = os.environ.get(API_URL_ENV, "http://localhost:8080")
     logger.info(f"Calling {api_url}/score with user_id={user_id}, amt={amt}, category={category}")
@@ -51,6 +51,8 @@ def score_transaction(user_id, amt, category, merch_lat, merch_long):
                 "category": category,
                 "merch_lat": float(merch_lat),
                 "merch_long": float(merch_long),
+                "hour": int(hour),
+                "day_of_week": int(day_of_week),
             },
             timeout=60,
         )
@@ -124,6 +126,12 @@ def build_gradio_app():
                 )
                 merch_lat = gr.Number(label="Merchant Latitude", value=33.9)
                 merch_long = gr.Number(label="Merchant Longitude", value=-80.3)
+                hour = gr.Slider(label="Hour (UTC)", minimum=0, maximum=23, step=1, value=22)
+                day_of_week = gr.Dropdown(
+                    label="Day of Week",
+                    choices=[(d, i) for i, d in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])],
+                    value=3,
+                )
                 score_btn = gr.Button("Score Transaction", variant="primary")
 
             with gr.Column(scale=1):
@@ -139,7 +147,7 @@ def build_gradio_app():
 
         score_btn.click(
             fn=score_transaction,
-            inputs=[user_id, amt, category, merch_lat, merch_long],
+            inputs=[user_id, amt, category, merch_lat, merch_long, hour, day_of_week],
             outputs=[verdict, signals, profile, txn_info],
             show_progress="minimal",
         )
@@ -148,12 +156,12 @@ def build_gradio_app():
         gr.Markdown(
             "### Quick Tests\n"
             "Try these scenarios to see how the model responds:\n\n"
-            "| Scenario | User ID | Amount | Category | Lat | Long |\n"
-            "|----------|---------|--------|----------|-----|------|\n"
-            "| Normal grocery | 42 | $25 | grocery_pos | 33.9 | -80.3 |\n"
-            "| Large online purchase | 42 | $2,500 | shopping_net | 33.9 | -80.3 |\n"
-            "| Far-away transaction | 42 | $100 | travel | 48.8 | 2.3 |\n"
-            "| Suspicious: big + far | 42 | $9,999 | shopping_net | 48.8 | 2.3 |"
+            "| Scenario | User ID | Amount | Category | Lat | Long | Hour | Day |\n"
+            "|----------|---------|--------|----------|-----|------|------|-----|\n"
+            "| Normal grocery | 42 | $25 | grocery_pos | 33.9 | -80.3 | 14 | Wed |\n"
+            "| Late-night large purchase | 42 | $2,500 | shopping_net | 33.9 | -80.3 | 2 | Wed |\n"
+            "| Far-away transaction | 42 | $100 | travel | 48.8 | 2.3 | 22 | Thu |\n"
+            "| Suspicious: big + far + late | 42 | $9,999 | shopping_net | 48.8 | 2.3 | 23 | Thu |"
         )
 
     return blocks
