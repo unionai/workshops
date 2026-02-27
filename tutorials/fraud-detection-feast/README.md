@@ -146,15 +146,25 @@ curl "https://<app-url>/score?user_id=42&amt=500.00&category=grocery_pos&merch_l
 
 ## Step 4: Gradio Demo UI
 
-Launch an interactive UI that calls the scoring API:
+An interactive Gradio UI that calls the scoring API. Works locally and deployed.
+
+### Run locally
 
 ```bash
 # Against local app (run `python app.py` in another terminal first)
 python demo.py
 
-# Against remote deployment
+# Against remote scoring API
 API_URL=https://<app-url> python demo.py
 ```
+
+### Deploy to Flyte
+
+```bash
+flyte deploy demo.py demo_env
+```
+
+The demo uses a uvicorn factory pattern to avoid Gradio pickle issues — Flyte pickles a bare FastAPI app, but uvicorn builds the full Gradio app fresh on the worker.
 
 Opens a browser UI where you can adjust user ID, amount, category, and merchant location — then see the fraud prediction, risk signals, and user profile in real time.
 

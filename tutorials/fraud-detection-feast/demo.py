@@ -128,7 +128,7 @@ def build_gradio_app():
 
             with gr.Column(scale=1):
                 gr.Markdown("### Results")
-                verdict = gr.Markdown(label="Prediction")
+                verdict = gr.Markdown(label="Prediction", value="*Click Score to analyze a transaction.*")
                 signals = gr.Markdown(label="Risk Signals")
 
                 with gr.Accordion("User Profile (from Feast)", open=False):
@@ -141,6 +141,7 @@ def build_gradio_app():
             fn=score_transaction,
             inputs=[user_id, amt, category, merch_lat, merch_long],
             outputs=[verdict, signals, profile, txn_info],
+            show_progress="minimal",
         )
 
         gr.Markdown("---")
