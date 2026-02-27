@@ -20,13 +20,14 @@ fraud-scorer (app)
 ## Project Structure
 
 ```
-fraud-detection/
+fraud-detection-feast/
 ├── README.md               # You are here
 ├── requirements.txt        # Dependencies
 ├── config.py               # Flyte environment config
 ├── prep.py                 # Standalone data prep (optional, for local dev)
 ├── workflow.py             # Flyte tasks: prepare, train, materialize
-└── app.py                  # FastAPI scoring app (consumes pipeline artifacts)
+├── app.py                  # FastAPI scoring app (consumes pipeline artifacts)
+└── demo.py                 # Gradio UI for interactive fraud scoring
 ```
 
 ---
@@ -140,6 +141,22 @@ Every time you retrain (re-run the pipeline), redeploying the app picks up the n
 ```bash
 curl "https://<app-url>/score?user_id=42&amt=500.00&category=grocery_pos&merch_lat=40.71&merch_long=-74.01"
 ```
+
+---
+
+## Step 4: Gradio Demo UI
+
+Launch an interactive UI that calls the scoring API:
+
+```bash
+# Against local app (run `python app.py` in another terminal first)
+python demo.py
+
+# Against remote deployment
+API_URL=https://<app-url> python demo.py
+```
+
+Opens a browser UI where you can adjust user ID, amount, category, and merchant location — then see the fraud prediction, risk signals, and user profile in real time.
 
 ---
 
