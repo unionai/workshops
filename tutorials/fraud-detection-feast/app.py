@@ -121,6 +121,8 @@ async def score(
     category: str = "grocery_pos",
     merch_lat: float = 40.0,
     merch_long: float = -74.0,
+    hour: int | None = None,
+    day_of_week: int | None = None,
 ) -> dict:
     """Score a transaction for fraud risk.
 
@@ -137,8 +139,8 @@ async def score(
     amt_log = float(np.log1p(amt))
     cat_mapping = app.state.category_mapping
     category_encoded = cat_mapping.get(category, 0)
-    hour = now.hour
-    day_of_week = now.weekday()
+    hour = hour if hour is not None else now.hour
+    day_of_week = day_of_week if day_of_week is not None else now.weekday()
 
     # ------------------------------------------------------------------
     # User profile features (from Feast online store)
