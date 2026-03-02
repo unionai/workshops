@@ -13,7 +13,7 @@ import flyte
 from flyte.app import Parameter, RunOutput
 from flyte.app.extras import FastAPIAppEnvironment
 
-from cached_ml_pipeline import create_model
+from ml_pipeline import create_model
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

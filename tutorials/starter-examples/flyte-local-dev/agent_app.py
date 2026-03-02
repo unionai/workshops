@@ -12,7 +12,7 @@ import os
 import flyte
 import flyte.app
 
-from research_agent import agent
+from agent_research import agent
 
 load_dotenv()
 

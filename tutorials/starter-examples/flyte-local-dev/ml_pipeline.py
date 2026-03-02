@@ -50,9 +50,9 @@ def fig_to_html(fig) -> str:
 # to avoid file descriptor issues with Flyte's local subprocess management.
 
 
-@env.task(cache="auto")
+@env.task(cache="auto", retries=2)
 async def load_data(data_dir: str = "./data") -> str:
-    """Download MNIST — cached after first run."""
+    """Download MNIST — cached after first run, retries on network failure."""
     import os
     import urllib.request
 
@@ -231,5 +231,5 @@ async def pipeline(epochs: int = 5, lr: float = 0.001, batch_size: int = 64, ope
     return f"Test Accuracy: {test_acc:.4f} | Test Loss: {test_loss:.4f}", model_file
 
 
-# Local:  flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001 --open_report
-# Remote: flyte run cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+# Local:  flyte run --local --tui ml_pipeline.py pipeline --epochs 5 --lr 0.001 --open_report
+# Remote: flyte run ml_pipeline.py pipeline --epochs 5 --lr 0.001

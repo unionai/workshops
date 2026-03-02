@@ -81,9 +81,9 @@ def build_report_html(request: str, messages: list) -> str:
     return "\n".join(html_parts)
 
 
-@env.task(cache="auto", report=True)
+@env.task(cache="auto", retries=2, report=True)
 async def agent(request: str) -> str:
-    """Research agent — cached, traced, with HTML report."""
+    """Research agent — retries on API failure, cached, traced, with HTML report."""
     answer, messages = await run_agent(request)
 
     await flyte.report.replace.aio(build_report_html(request, messages))
@@ -92,5 +92,5 @@ async def agent(request: str) -> str:
     return answer
 
 
-# Local:  flyte run --local --tui research_agent.py agent --request "What is the population of France and what is 10% of it?"
-# Remote: flyte run research_agent.py agent --request "What is the population of France and what is 10% of it?"
+# Local:  flyte run --local --tui agent_research.py agent --request "What is the population of France and what is 10% of it?"
+# Remote: flyte run agent_research.py agent --request "What is the population of France and what is 10% of it?"

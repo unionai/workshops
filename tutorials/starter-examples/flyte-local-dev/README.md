@@ -6,9 +6,9 @@ Build, test, and iterate locally — then deploy the same code to a Flyte cluste
 
 | Script | What it does |
 |--------|-------------|
-| `cached_ml_pipeline.py` | Train ResNet18 on MNIST with caching, HTML reports, and TUI |
+| `ml_pipeline.py` | Train ResNet18 on MNIST with caching, retries, HTML reports, and TUI |
 | `serve_model.py` | Serve predictions via FastAPI — locally or on a cluster |
-| `research_agent.py` | LangGraph agent with DuckDuckGo search, caching, tracing, and reports |
+| `agent_research.py` | LangGraph agent with DuckDuckGo search, caching, tracing, and reports |
 | `agent_app.py` | Gradio UI that kicks off the agent as a Flyte task |
 | `wandb_ml_pipeline.py` | ML pipeline with W&B experiment tracking via the Flyte W&B plugin |
 
@@ -40,20 +40,20 @@ Everything runs on your machine — no cluster, no Docker.
 
 ```bash
 # First run — downloads data, trains model, generates HTML report
-flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+flyte run --local --tui ml_pipeline.py pipeline --epochs 5 --lr 0.001
 
 # Auto-open the report in your browser
-flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001 --open_report
+flyte run --local --tui ml_pipeline.py pipeline --epochs 5 --lr 0.001 --open_report
 
 # Change hyperparameters — data download is cached, only training re-runs
-flyte run --local --tui cached_ml_pipeline.py pipeline --epochs 10 --lr 0.0005 --batch_size 128
+flyte run --local --tui ml_pipeline.py pipeline --epochs 10 --lr 0.0005 --batch_size 128
 ```
 
 ### Serve Locally
 
 ```bash
 # Train first (saves model.pt)
-flyte run --local cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+flyte run --local ml_pipeline.py pipeline --epochs 5 --lr 0.001
 
 # Serve predictions
 python serve_model.py
@@ -71,7 +71,7 @@ flyte start tui
 ### Research Agent (CLI)
 
 ```bash
-flyte run --local --tui research_agent.py agent --request "What is the population of France and what is 10% of it?"
+flyte run --local --tui agent_research.py agent --request "What is the population of France and what is 10% of it?"
 ```
 
 ### Research Agent (Gradio UI)
@@ -97,7 +97,7 @@ export WANDB_API_KEY=your-key
 flyte run --local --tui wandb_ml_pipeline.py pipeline --epochs 5 --lr 0.001
 ```
 
-Same pipeline as `cached_ml_pipeline.py` but every metric is logged to Weights & Biases. The `@wandb_init` decorator on the parent task creates a W&B run, and child tasks automatically share it — all training and evaluation metrics end up in one run.
+Same pipeline as `ml_pipeline.py` but every metric is logged to Weights & Biases. The `@wandb_init` decorator on the parent task creates a W&B run, and child tasks automatically share it — all training and evaluation metrics end up in one run.
 
 ---
 
@@ -108,7 +108,7 @@ The same code runs on a remote Flyte cluster — swap `--local` for cluster exec
 ### Train on the Cluster (with GPUs)
 
 ```bash
-flyte run cached_ml_pipeline.py pipeline --epochs 5 --lr 0.001
+flyte run ml_pipeline.py pipeline --epochs 5 --lr 0.001
 ```
 
 The `TaskEnvironment` already defines the image, resources, and GPU — Flyte builds the container and schedules the work.
@@ -164,6 +164,7 @@ Like `deploy` but designed for iteration — lets you override parameters dynami
 | **Run pipeline** | `flyte run --local` | `flyte run` |
 | **TUI** | `--tui` flag | Dashboard in UI |
 | **Caching** | `cache="auto"` — local SQLite | `cache="auto"` — cluster cache |
+| **Retries** | `retries=N` — with exponential backoff | `retries=N` — Flyte managed retries |
 | **Reports** | `report=True` — local HTML file | `report=True` — in Flyte UI |
 | **Serve** | `python serve_model.py` | `flyte deploy serve_model.py serving_env` |
 | **Agent UI** | `python agent_app.py` | `flyte deploy agent_app.py serving_env` |
