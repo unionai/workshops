@@ -9,3 +9,7 @@ traces/
 tutorials/starter-examples/flyte-local-dev/data
 *.pt
 data
+.claude
+claude.md
+*.joblib
+feast_artifacts
