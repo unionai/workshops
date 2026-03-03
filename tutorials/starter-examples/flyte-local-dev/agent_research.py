@@ -1,4 +1,7 @@
-"""LangGraph research agent — demonstrates Flyte caching, tracing, and reports."""
+"""Multi-agent research — demonstrates parallel agents with asyncio.gather in Flyte."""
+
+import asyncio
+import json
 
 from dotenv import load_dotenv
 from ddgs import DDGS
@@ -35,7 +38,10 @@ async def search(query: str) -> str:
 @tool
 @flyte.trace
 async def calculate(expression: str) -> str:
-    """Evaluate a math expression with numbers and operators only. Example: '68000000 * 0.1' not 'population * 0.1'."""
+    """
+    Evaluate a math expression with numbers and operators only.
+    Example: '68000000 * 0.1' not 'population * 0.1'.
+     """
     try:
         return str(eval(expression))
     except Exception as e:
@@ -57,40 +63,54 @@ async def run_agent(request: str) -> tuple[str, list]:
     return result["messages"][-1].content, result["messages"]
 
 
-def build_report_html(request: str, messages: list) -> str:
-    """Build an HTML reasoning trace from agent messages."""
-    html_parts = [f"<h2>Agent Trace</h2><p><b>Request:</b> {request}</p><hr>"]
-    for msg in messages:
-        role = msg.type if hasattr(msg, "type") else "unknown"
-        content = str(msg.content) if msg.content else ""
-        if role == "human":
-            html_parts.append(f"<p><b>User:</b> {content}</p>")
-        elif role == "ai":
-            html_parts.append(f"<p><b>Agent:</b> {content}</p>")
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    html_parts.append(
-                        f"<p style='margin-left:20px; color:#666;'>"
-                        f"Tool call: <code>{tc['name']}({tc['args']})</code></p>"
-                    )
-        elif role == "tool":
-            html_parts.append(
-                f"<p style='margin-left:20px; color:#080;'>"
-                f"Tool result: <code>{content[:500]}</code></p>"
-            )
-    return "\n".join(html_parts)
+# -- Parallel research tasks --------------------------------------------------
+
+@env.task(cache="auto", retries=2)
+async def search_topic(topic: str) -> str:
+    """Research a single sub-topic using the ReAct agent."""
+    answer, _ = await run_agent(topic)
+    return json.dumps({"topic": topic, "answer": answer})
 
 
 @env.task(cache="auto", retries=2, report=True)
-async def agent(request: str) -> str:
-    """Research agent — retries on API failure, cached, traced, with HTML report."""
-    answer, messages = await run_agent(request)
+async def research(request: str) -> str:
+    """Multi-agent research: plan sub-topics, search in parallel, synthesize."""
+    llm = ChatOpenAI(model="gpt-4o-mini")
 
-    await flyte.report.replace.aio(build_report_html(request, messages))
+    # 1. Plan — split the request into sub-questions
+    plan_response = await llm.ainvoke(
+        f"Break this research question into exactly 3 focused sub-questions. "
+        f"Return ONLY a JSON array of strings, nothing else.\n\n"
+        f"Question: {request}"
+    )
+    try:
+        topics = json.loads(plan_response.content)
+    except json.JSONDecodeError:
+        topics = [request]
+
+    # 2. Fan out — research each sub-topic in parallel
+    result_jsons = await asyncio.gather(*[search_topic(t) for t in topics])
+    results = [json.loads(r) for r in result_jsons]
+
+    # 3. Synthesize — combine findings into a final report
+    sections = "\n\n".join(f"### {r['topic']}\n{r['answer']}" for r in results)
+    synthesis = await llm.ainvoke(
+        f"You researched this question: {request}\n\n"
+        f"Here are findings from parallel research agents:\n\n{sections}\n\n"
+        f"Write a concise final report that synthesizes all findings. "
+        f"Highlight key connections and end with takeaways."
+    )
+
+    # 4. Report
+    html = f"<h2>Research Report</h2><p><b>Query:</b> {request}</p><hr>"
+    for r in results:
+        html += f"<h3>{r['topic']}</h3><p>{r['answer']}</p>"
+    html += f"<hr><h3>Synthesis</h3><p>{synthesis.content}</p>"
+    await flyte.report.replace.aio(html)
     await flyte.report.flush.aio()
 
-    return answer
+    return synthesis.content
 
 
-# Local:  flyte run --local --tui agent_research.py agent --request "What is the population of France and what is 10% of it?"
-# Remote: flyte run agent_research.py agent --request "What is the population of France and what is 10% of it?"
+# Local:  flyte run --local --tui agent_research.py research --request "Compare the tech industries of Japan, South Korea, and Germany"
+# Remote: flyte run agent_research.py research --request "Compare the tech industries of Japan, South Korea, and Germany"
