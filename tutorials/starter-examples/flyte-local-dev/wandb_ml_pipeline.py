@@ -17,7 +17,7 @@ import flyte.report
 from flyte.io import File
 from flyteplugins.wandb import wandb_init, get_wandb_run
 
-from cached_ml_pipeline import create_model, get_device, fig_to_html, load_data
+from ml_pipeline import create_model, get_device, fig_to_html, load_data
 
 image = flyte.Image.from_debian_base(python_version=(3, 12)).with_pip_packages(
     "torch", "torchvision", "matplotlib", "flyteplugins-wandb",
