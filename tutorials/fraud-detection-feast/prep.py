@@ -1,14 +1,4 @@
-"""
-Download the Sparkov credit card fraud dataset and prepare Parquet files for Feast.
-
-Usage:
-    python prep.py
-
-Creates:
-    data/transactions.parquet  — per-transaction features with timestamps
-    data/user_features.parquet — aggregated per-user spending profiles
-    data/category_mapping.json — category name → integer mapping
-"""
+"""Download Sparkov fraud dataset and prepare parquets. Usage: python prep.py"""
 
 import json
 import os
@@ -17,25 +7,15 @@ import numpy as np
 import pandas as pd
 import kagglehub
 
-
-def haversine(lat1, lon1, lat2, lon2):
-    """Compute distance in miles between two (lat, lon) points."""
-    R = 3959
-    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    return 2 * R * np.arcsin(np.sqrt(a))
+from shared import haversine
 
 
 def main():
     os.makedirs("data", exist_ok=True)
 
-    # Download dataset
     print("Downloading Sparkov credit card fraud dataset...")
     path = kagglehub.dataset_download("kartik2112/fraud-detection")
-    csv_path = os.path.join(path, "fraudTrain.csv")
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(os.path.join(path, "fraudTrain.csv"))
     print(f"Loaded {len(df):,} transactions ({df['is_fraud'].sum():,} fraudulent)")
 
     # Sample for workshop speed

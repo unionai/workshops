@@ -1,6 +1,5 @@
 from dotenv import load_dotenv
 import flyte
-
 load_dotenv()
 
 base_env = flyte.TaskEnvironment(
