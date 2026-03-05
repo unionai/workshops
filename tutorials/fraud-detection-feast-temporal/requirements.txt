@@ -1,0 +1,13 @@
+temporalio>=1.8.0
+feast
+scikit-learn
+xgboost
+joblib
+pandas
+pyarrow
+python-dotenv
+kagglehub
+fastapi
+uvicorn
+gradio
+requests
