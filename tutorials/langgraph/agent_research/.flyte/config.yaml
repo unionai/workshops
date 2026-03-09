@@ -9,5 +9,5 @@ local:
   persistence: true
 task:
   domain: development
-  org: tryv2
-  project: langfeb
+  org: demo
+  project: plannerworkshops
