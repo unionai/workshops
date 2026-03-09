@@ -252,5 +252,5 @@ async def pipeline(
     return f"Test Accuracy: {test_acc:.4f} | Test Loss: {test_loss:.4f}", model_file
 
 
-# # Local:  flyte run --local --tui ml_pipeline.py pipeline --epochs 5 --lr 0.001 --open_report
+# # Local:  flyte run --local --tui ml_pipeline.py pipeline --epochs 3 --lr 0.001 --open_report
 # Remote: flyte run ml_pipeline.py pipeline --epochs 5 --lr 0.001

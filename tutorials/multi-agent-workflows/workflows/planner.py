@@ -387,3 +387,6 @@ if __name__ == "__main__":
         print(f"Execution: {execution.name}")
         print(f"URL: {execution.url}")
         print(f"{'='*60}\n")
+
+
+        # flyte run --local --tui workflows/planner.py planner_agent_workflow --user_request "Compare the tech industries of Japan, South Korea, and Germany"                                     
