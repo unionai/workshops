@@ -15,7 +15,7 @@ class MazeObservation(Observation):
     """What the agent sees after each step."""
     grid: List[List[str]] = Field(default_factory=list)
     agent_pos: Tuple[int, int] = (1, 1)
-    exit_pos: Tuple[int, int] = (6, 6)
+    exit_pos: Tuple[int, int] = (5, 5)
     steps_taken: int = 0
 
 
