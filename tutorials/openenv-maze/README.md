@@ -67,7 +67,7 @@ By default the pipeline uses bfloat16 and gradient checkpointing to fit on small
 flyte run --local maze_rl.py pipeline --training_steps 3
 
 # Full precision, no checkpointing (faster on A100/H100)
-flyte run maze_rl.py pipeline --training_steps 10 --use_bfloat16 false --gradient_checkpointing false
+flyte run maze_rl.py pipeline --training_steps 10 --no-use_bfloat16 --no-gradient_checkpointing
 ```
 
 | Flag | Default | Effect |
