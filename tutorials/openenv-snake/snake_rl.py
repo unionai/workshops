@@ -612,6 +612,8 @@ async def train_step(
     lr: float = 1e-5,
     step_idx: int = 0,
     checkpoint_file: File | None = None,
+    use_bfloat16: bool = True,
+    gradient_checkpointing: bool = True,
 ) -> tuple[File, str]:
     """One GRPO iteration for Snake."""
     import torch
@@ -625,16 +627,18 @@ async def train_step(
         model_path = os.path.join(extract_dir, f"checkpoint_step_{step_idx - 1}")
 
     device = get_device()
-    print(f"  Step {step_idx} | device={device}")
+    dtype = torch.bfloat16 if use_bfloat16 else torch.float32
+    print(f"  Step {step_idx} | device={device} | dtype={dtype} | grad_ckpt={gradient_checkpointing}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16  # bf16 to fit in GPU memory (fp16 causes NaN in softmax)
+        model_path, torch_dtype=dtype
     ).to(device)
     model.train()
-    model.gradient_checkpointing_enable()  # trade compute for memory during backprop
+    if gradient_checkpointing:
+        model.gradient_checkpointing_enable()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     client = create_snake_client(env_url)
@@ -736,6 +740,7 @@ async def eval_model(
     num_episodes: int = 20,
     step_idx: int = 0,
     checkpoint_file: File | None = None,
+    use_bfloat16: bool = True,
 ) -> str:
     """Evaluate the model on Snake, returning scores and best replay."""
     import torch
@@ -749,11 +754,12 @@ async def eval_model(
         model_path = os.path.join(extract_dir, f"checkpoint_step_{step_idx}")
 
     device = get_device()
+    dtype = torch.bfloat16 if use_bfloat16 else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16  # bf16 to fit in GPU memory (fp16 causes NaN in softmax)
+        model_path, torch_dtype=dtype
     ).to(device)
     model.eval()
 
@@ -821,6 +827,8 @@ async def pipeline(
     group_size: int = 4,
     eval_episodes: int = 20,
     lr: float = 1e-5,
+    use_bfloat16: bool = True,
+    gradient_checkpointing: bool = True,
     open_report: bool = False,
 ) -> tuple[str, File]:
     """Full Snake RL pipeline: baselines -> GRPO training -> eval -> visual report."""
@@ -850,7 +858,7 @@ async def pipeline(
 
         # 2. Evaluate untrained model
         print("\n=== Evaluating untrained model ===")
-        eval_results = [json.loads(await eval_model(model_id, env_url, eval_episodes, 0))]
+        eval_results = [json.loads(await eval_model(model_id, env_url, eval_episodes, 0, use_bfloat16=use_bfloat16))]
         print(f"  Untrained: avg_score={eval_results[0]['avg_score']:.2f}")
 
         # 3. Training loop
@@ -867,7 +875,9 @@ async def pipeline(
                 group_size=group_size,
                 lr=lr,
                 step_idx=step,
-                checkpoint_file=prev_checkpoint,  # pass File for remote download
+                checkpoint_file=prev_checkpoint,
+                use_bfloat16=use_bfloat16,
+                gradient_checkpointing=gradient_checkpointing,
             )
             train_metrics.append(json.loads(metrics_json))
 
@@ -875,6 +885,7 @@ async def pipeline(
             eval_json = await eval_model(
                 model_id, env_url, eval_episodes, step,
                 checkpoint_file=checkpoint_file,
+                use_bfloat16=use_bfloat16,
             )
             eval_results.append(json.loads(eval_json))
             prev_checkpoint = checkpoint_file

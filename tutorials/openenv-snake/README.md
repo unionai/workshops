@@ -84,6 +84,23 @@ flyte run snake_rl.py pipeline \
   --rollouts_per_step 32
 ```
 
+## Performance Tuning
+
+By default the pipeline uses bfloat16 and gradient checkpointing to fit on smaller GPUs and Apple Silicon. On larger hardware you can disable these for faster training:
+
+```bash
+# Default (memory-optimized for local dev / small GPUs)
+flyte run --local snake_rl.py pipeline --training_steps 3
+
+# Full precision, no checkpointing (faster on A100/H100)
+flyte run snake_rl.py pipeline --training_steps 10 --use_bfloat16 false --gradient_checkpointing false
+```
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--use_bfloat16` | `true` | Half-precision — halves memory, minimal speed cost on modern GPUs |
+| `--gradient_checkpointing` | `true` | Recomputes activations in backward pass — ~30% slower but large memory savings |
+
 ## Architecture
 
 ```
