@@ -1,0 +1,6 @@
+flyte[tui]>=2.0
+torch
+transformers
+openenv-core
+matplotlib
+uvicorn
