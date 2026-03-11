@@ -1,19 +1,19 @@
-"""Train an LLM to play Snake via GRPO using a custom OpenEnv environment + Flyte.
+"""Train an LLM to navigate mazes via GRPO using a custom OpenEnv environment + Flyte.
 
 Demonstrates:
-- Building a custom OpenEnv environment (Snake game)
+- Building a custom OpenEnv environment (maze with DFS generation)
 - Running the env server locally and connecting via EnvClient
-- GRPO training loop with distance-based reward shaping
-- Visual HTML replay with frame slider embedded in Flyte reports
+- GRPO training loop with distance/wall/revisit reward shaping
+- Visual HTML replay with path trace embedded in Flyte reports
 
 Run the env server (separate terminal):
-  cd tutorials/openenv-snake && python -m snake_env.server.app
+  cd tutorials/openenv-maze && python -m maze_env.server.app
 
 Run locally:
-  flyte run --local snake_rl.py pipeline --training_steps 3
+  flyte run --local maze_rl.py pipeline --training_steps 3
 
 Run on a cluster:
-  flyte run snake_rl.py pipeline --training_steps 10
+  flyte run maze_rl.py pipeline --training_steps 10
 """
 
 import base64
@@ -37,28 +37,27 @@ from openenv.core.env_server import Action, Observation, State
 from pydantic import Field as PydanticField
 
 # ---------------------------------------------------------------------------
-# Models (shared with snake_env server)
+# Models (shared with maze_env server)
 # ---------------------------------------------------------------------------
 
 
-class SnakeAction(Action):
-    """Action: choose a direction to move the snake."""
+class MazeAction(Action):
+    """Action: choose a direction to move in the maze."""
     direction: str = "RIGHT"
 
 
-class SnakeObservation(Observation):
+class MazeObservation(Observation):
     """What the agent sees after each step."""
     grid: List[List[str]] = PydanticField(default_factory=list)
-    snake: List[Tuple[int, int]] = PydanticField(default_factory=list)
-    apple: Tuple[int, int] = (0, 0)
-    score: int = 0
-    death_reason: str = ""
+    agent_pos: Tuple[int, int] = (1, 1)
+    exit_pos: Tuple[int, int] = (6, 6)
+    steps_taken: int = 0
 
 
-class SnakeState(State):
-    """Metadata about the current episode."""
-    score: int = 0
-    grid_size: int = 10
+class MazeState(State):
+    """Metadata about the current maze episode."""
+    maze_seed: int = 0
+    optimal_path_length: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -66,20 +65,19 @@ class SnakeState(State):
 # ---------------------------------------------------------------------------
 
 
-class SnakeEnv(EnvClient[SnakeAction, SnakeObservation, SnakeState]):
-    """Client that connects to a Snake OpenEnv server."""
+class MazeEnv(EnvClient[MazeAction, MazeObservation, MazeState]):
+    """Client that connects to a Maze OpenEnv server."""
 
-    def _step_payload(self, action: SnakeAction) -> dict:
+    def _step_payload(self, action: MazeAction) -> dict:
         return {"direction": action.direction}
 
-    def _parse_result(self, payload: dict) -> StepResult[SnakeObservation]:
+    def _parse_result(self, payload: dict) -> StepResult[MazeObservation]:
         obs_data = payload.get("observation", payload)
-        observation = SnakeObservation(
+        observation = MazeObservation(
             grid=obs_data.get("grid", []),
-            snake=[tuple(p) for p in obs_data.get("snake", [])],
-            apple=tuple(obs_data.get("apple", (0, 0))),
-            score=obs_data.get("score", 0),
-            death_reason=obs_data.get("death_reason", ""),
+            agent_pos=tuple(obs_data.get("agent_pos", (1, 1))),
+            exit_pos=tuple(obs_data.get("exit_pos", (6, 6))),
+            steps_taken=obs_data.get("steps_taken", 0),
             done=payload.get("done", False),
             reward=payload.get("reward"),
         )
@@ -89,12 +87,12 @@ class SnakeEnv(EnvClient[SnakeAction, SnakeObservation, SnakeState]):
             done=payload.get("done", False),
         )
 
-    def _parse_state(self, payload: dict) -> SnakeState:
-        return SnakeState(
+    def _parse_state(self, payload: dict) -> MazeState:
+        return MazeState(
             episode_id=payload.get("episode_id"),
             step_count=payload.get("step_count", 0),
-            score=payload.get("score", 0),
-            grid_size=payload.get("grid_size", 10),
+            maze_seed=payload.get("maze_seed", 0),
+            optimal_path_length=payload.get("optimal_path_length", 0),
         )
 
 
@@ -103,7 +101,7 @@ class SnakeEnv(EnvClient[SnakeAction, SnakeObservation, SnakeState]):
 # ---------------------------------------------------------------------------
 
 env = flyte.TaskEnvironment(
-    name="snake_rl",
+    name="maze_rl",
     image=flyte.Image.from_debian_base().with_pip_packages(
         "torch",
         "transformers",
@@ -121,10 +119,10 @@ env = flyte.TaskEnvironment(
 DEFAULT_ENV_URL = "http://localhost:8000"
 
 SYSTEM_PROMPT = (
-    "You are playing Snake on a 10x10 grid.\n"
-    "The grid uses: H=head, S=body, A=apple, .=empty\n"
+    "You are navigating an 8x8 maze.\n"
+    "The grid uses: # = wall, . = open path, A = you (agent), E = exit\n"
     "You MUST respond with exactly one word: UP, DOWN, LEFT, or RIGHT.\n"
-    "Strategy: Move toward the apple (A) while avoiding walls and your own body (S)."
+    "Strategy: Find the shortest path from A to E while avoiding walls (#)."
 )
 
 DIRECTIONS = ["UP", "DOWN", "LEFT", "RIGHT"]
@@ -138,7 +136,7 @@ DIRECTIONS = ["UP", "DOWN", "LEFT", "RIGHT"]
 class EpisodeFrame:
     step: int
     grid: list[list[str]]
-    score: int
+    agent_pos: tuple[int, int]
     action: str
     reward: float
 
@@ -147,8 +145,8 @@ class EpisodeFrame:
 class EpisodeRecording:
     frames: list[EpisodeFrame] = field(default_factory=list)
     total_reward: float = 0.0
-    final_score: int = 0
-    death_reason: str = ""
+    solved: bool = False
+    steps_to_solve: int = 0
     length: int = 0
 
 
@@ -162,8 +160,8 @@ def get_device():
 
     if torch.cuda.is_available():
         return torch.device("cuda")
-    # if torch.backends.mps.is_available():
-    #     return torch.device("mps")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
     return torch.device("cpu")
 
 
@@ -186,17 +184,15 @@ def fig_to_html(fig) -> str:
     return f'<img src="data:image/png;base64,{b64}" />'
 
 
-def format_observation(grid: list[list[str]], snake, apple, score: int) -> str:
-    """Render the grid as text for the LLM."""
+def format_observation(grid: list[list[str]], agent_pos, exit_pos, steps_taken: int) -> str:
+    """Render the maze grid as text for the LLM."""
     rows = [" ".join(row) for row in grid]
     grid_text = "\n".join(rows)
-    head = snake[0] if snake else (0, 0)
     return (
-        f"Grid:\n{grid_text}\n\n"
-        f"Head position: row={head[0]}, col={head[1]}\n"
-        f"Apple position: row={apple[0]}, col={apple[1]}\n"
-        f"Score: {score}\n"
-        f"Snake length: {len(snake)}\n"
+        f"Maze:\n{grid_text}\n\n"
+        f"Your position: row={agent_pos[0]}, col={agent_pos[1]}\n"
+        f"Exit position: row={exit_pos[0]}, col={exit_pos[1]}\n"
+        f"Steps taken: {steps_taken}\n"
         "Which direction? Reply UP, DOWN, LEFT, or RIGHT."
     )
 
@@ -210,12 +206,12 @@ def parse_direction(text: str) -> str:
     return random.choice(DIRECTIONS)
 
 
-def create_snake_client(env_url: str):
-    """Create a connected Snake env client."""
-    client = SnakeEnv(
+def create_maze_client(env_url: str):
+    """Create a connected Maze env client."""
+    client = MazeEnv(
         base_url=env_url,
         connect_timeout_s=30.0,
-        message_timeout_s=300.0,  # 5 min — long episodes on slow inference
+        message_timeout_s=300.0,
     )
     client.connect()
     return client
@@ -228,24 +224,21 @@ def safe_step(client, action, env_url: str):
     except Exception:
         client.close()
         client.connect()
-        # After reconnect we've lost the episode, reset and return done
         result = client.reset()
         result.observation.done = True
         result.observation.reward = -1.0
-        result.observation.death_reason = "disconnect"
         result.done = True
         return result
 
 
 def start_env_server():
-    """Start the Snake env server as a background process. Returns the process."""
-    server_script = os.path.join(os.path.dirname(__file__), "snake_env", "server", "app.py")
+    """Start the Maze env server as a background process."""
+    server_script = os.path.join(os.path.dirname(__file__), "maze_env", "server", "app.py")
     proc = subprocess.Popen(
         [sys.executable, server_script],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    # Give server time to start
     time.sleep(3)
     return proc
 
@@ -255,14 +248,14 @@ def start_env_server():
 # ---------------------------------------------------------------------------
 
 
-def generate_replay_html(recordings: list[EpisodeRecording], title: str = "Snake Replay") -> str:
-    """Generate HTML with a slider to step through recorded Snake episodes."""
+def generate_replay_html(recordings: list[EpisodeRecording], title: str = "Maze Replay") -> str:
+    """Generate HTML with canvas rendering, path trace overlay, and frame slider."""
 
     CELL_COLORS = {
-        ".": "#1a1a2e",
-        "S": "#00b894",
-        "H": "#fdcb6e",
-        "A": "#e17055",
+        "#": "#2d3436",
+        ".": "#dfe6e9",
+        "A": "#fdcb6e",
+        "E": "#00b894",
     }
 
     episodes_json = []
@@ -272,15 +265,15 @@ def generate_replay_html(recordings: list[EpisodeRecording], title: str = "Snake
             frames.append({
                 "step": f.step,
                 "grid": f.grid,
-                "score": f.score,
+                "agent_pos": list(f.agent_pos),
                 "action": f.action,
                 "reward": round(f.reward, 3),
             })
         episodes_json.append({
             "frames": frames,
             "total_reward": round(rec.total_reward, 3),
-            "final_score": rec.final_score,
-            "death_reason": rec.death_reason,
+            "solved": rec.solved,
+            "steps_to_solve": rec.steps_to_solve,
             "length": rec.length,
         })
 
@@ -289,61 +282,61 @@ def generate_replay_html(recordings: list[EpisodeRecording], title: str = "Snake
       <h3 style="color: #fdcb6e; margin-top: 0;">{title}</h3>
       <div style="margin-bottom: 10px;">
         <label>Episode:
-          <select id="ep-select" onchange="changeEpisode()" style="background:#1a1a2e;color:#ccc;padding:4px;border:1px solid #333;">
+          <select id="maze-ep-select" onchange="mazeChangeEpisode()" style="background:#1a1a2e;color:#ccc;padding:4px;border:1px solid #333;">
           </select>
         </label>
-        <span id="ep-info" style="margin-left: 15px;"></span>
+        <span id="maze-ep-info" style="margin-left: 15px;"></span>
       </div>
       <div style="margin-bottom: 10px;">
-        <label>Step: <span id="step-label">0</span></label><br>
-        <input type="range" id="step-slider" min="0" max="0" value="0" oninput="renderFrame()"
+        <label>Step: <span id="maze-step-label">0</span></label><br>
+        <input type="range" id="maze-step-slider" min="0" max="0" value="0" oninput="mazeRenderFrame()"
                style="width: 300px;">
-        <button onclick="playReplay()" id="play-btn" style="margin-left:10px;padding:4px 12px;background:#00b894;color:#fff;border:none;border-radius:4px;cursor:pointer;">Play</button>
+        <button onclick="mazePlayReplay()" id="maze-play-btn" style="margin-left:10px;padding:4px 12px;background:#00b894;color:#fff;border:none;border-radius:4px;cursor:pointer;">Play</button>
       </div>
       <div style="display:flex; gap: 20px; align-items: flex-start;">
-        <canvas id="snake-canvas" width="300" height="300" style="border: 2px solid #333; border-radius: 4px;"></canvas>
-        <div id="frame-info" style="font-size: 14px; line-height: 1.6;"></div>
+        <canvas id="maze-canvas" width="320" height="320" style="border: 2px solid #333; border-radius: 4px;"></canvas>
+        <div id="maze-frame-info" style="font-size: 14px; line-height: 1.6;"></div>
       </div>
     </div>
 
     <script>
-    const EPISODES = {json.dumps(episodes_json)};
-    const COLORS = {json.dumps(CELL_COLORS)};
-    let currentEp = 0;
-    let playInterval = null;
+    const MAZE_EPISODES = {json.dumps(episodes_json)};
+    const MAZE_COLORS = {json.dumps(CELL_COLORS)};
+    let mazeCurrentEp = 0;
+    let mazePlayInterval = null;
 
-    function init() {{
-      const sel = document.getElementById('ep-select');
-      EPISODES.forEach((ep, i) => {{
+    function mazeInit() {{
+      const sel = document.getElementById('maze-ep-select');
+      MAZE_EPISODES.forEach((ep, i) => {{
         const opt = document.createElement('option');
         opt.value = i;
-        opt.text = 'Episode ' + (i+1) + ' (score: ' + ep.final_score + ')';
+        opt.text = 'Episode ' + (i+1) + (ep.solved ? ' (SOLVED in ' + ep.steps_to_solve + ')' : ' (failed)');
         sel.appendChild(opt);
       }});
-      changeEpisode();
+      mazeChangeEpisode();
     }}
 
-    function changeEpisode() {{
-      currentEp = parseInt(document.getElementById('ep-select').value);
-      const ep = EPISODES[currentEp];
-      const slider = document.getElementById('step-slider');
+    function mazeChangeEpisode() {{
+      mazeCurrentEp = parseInt(document.getElementById('maze-ep-select').value);
+      const ep = MAZE_EPISODES[mazeCurrentEp];
+      const slider = document.getElementById('maze-step-slider');
       slider.max = Math.max(ep.frames.length - 1, 0);
       slider.value = 0;
-      document.getElementById('ep-info').textContent =
-        'Score: ' + ep.final_score + ' | Reward: ' + ep.total_reward +
-        (ep.death_reason ? ' | Died: ' + ep.death_reason : ' | Survived');
-      renderFrame();
+      document.getElementById('maze-ep-info').textContent =
+        (ep.solved ? 'SOLVED in ' + ep.steps_to_solve + ' steps' : 'Failed (' + ep.length + ' steps)') +
+        ' | Reward: ' + ep.total_reward;
+      mazeRenderFrame();
     }}
 
-    function renderFrame() {{
-      const ep = EPISODES[currentEp];
-      const idx = parseInt(document.getElementById('step-slider').value);
+    function mazeRenderFrame() {{
+      const ep = MAZE_EPISODES[mazeCurrentEp];
+      const idx = parseInt(document.getElementById('maze-step-slider').value);
       const frame = ep.frames[idx];
       if (!frame) return;
 
-      document.getElementById('step-label').textContent = frame.step;
+      document.getElementById('maze-step-label').textContent = frame.step;
 
-      const canvas = document.getElementById('snake-canvas');
+      const canvas = document.getElementById('maze-canvas');
       const ctx = canvas.getContext('2d');
       const grid = frame.grid;
       const rows = grid.length;
@@ -352,42 +345,91 @@ def generate_replay_html(recordings: list[EpisodeRecording], title: str = "Snake
       const cellH = canvas.height / rows;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw base grid
       for (let r = 0; r < rows; r++) {{
         for (let c = 0; c < cols; c++) {{
-          ctx.fillStyle = COLORS[grid[r][c]] || '#1a1a2e';
-          ctx.fillRect(c * cellW, r * cellH, cellW - 1, cellH - 1);
+          const cell = grid[r][c];
+          ctx.fillStyle = MAZE_COLORS[cell] || '#dfe6e9';
+          ctx.fillRect(c * cellW, r * cellH, cellW, cellH);
+          // Grid lines
+          ctx.strokeStyle = '#636e72';
+          ctx.lineWidth = 0.5;
+          ctx.strokeRect(c * cellW, r * cellH, cellW, cellH);
         }}
       }}
 
-      document.getElementById('frame-info').innerHTML =
+      // Draw path trace — show visited cells as faded blue dots
+      for (let i = 1; i <= idx; i++) {{
+        const prevFrame = ep.frames[i];
+        if (prevFrame && prevFrame.agent_pos) {{
+          const pr = prevFrame.agent_pos[0];
+          const pc = prevFrame.agent_pos[1];
+          // Only draw on open cells (not walls)
+          if (grid[pr] && grid[pr][pc] !== '#') {{
+            ctx.fillStyle = 'rgba(116, 185, 255, 0.4)';
+            ctx.beginPath();
+            ctx.arc(pc * cellW + cellW/2, pr * cellH + cellH/2, cellW * 0.2, 0, Math.PI * 2);
+            ctx.fill();
+          }}
+        }}
+      }}
+
+      // Draw exit marker
+      const exitR = ep.frames[0].grid.length - 2;
+      const exitC = ep.frames[0].grid[0].length - 2;
+      ctx.fillStyle = '#00b894';
+      ctx.fillRect(exitC * cellW + 2, exitR * cellH + 2, cellW - 4, cellH - 4);
+      ctx.fillStyle = '#fff';
+      ctx.font = Math.floor(cellW * 0.5) + 'px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('E', exitC * cellW + cellW/2, exitR * cellH + cellH/2);
+
+      // Draw agent
+      if (frame.agent_pos) {{
+        const ar = frame.agent_pos[0];
+        const ac = frame.agent_pos[1];
+        ctx.fillStyle = '#fdcb6e';
+        ctx.beginPath();
+        ctx.arc(ac * cellW + cellW/2, ar * cellH + cellH/2, cellW * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#2d3436';
+        ctx.font = Math.floor(cellW * 0.4) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('A', ac * cellW + cellW/2, ar * cellH + cellH/2);
+      }}
+
+      document.getElementById('maze-frame-info').innerHTML =
         'Action: <b>' + frame.action + '</b><br>' +
         'Reward: ' + frame.reward + '<br>' +
-        'Score: ' + frame.score;
+        'Step: ' + frame.step;
     }}
 
-    function playReplay() {{
-      if (playInterval) {{
-        clearInterval(playInterval);
-        playInterval = null;
-        document.getElementById('play-btn').textContent = 'Play';
+    function mazePlayReplay() {{
+      if (mazePlayInterval) {{
+        clearInterval(mazePlayInterval);
+        mazePlayInterval = null;
+        document.getElementById('maze-play-btn').textContent = 'Play';
         return;
       }}
-      document.getElementById('play-btn').textContent = 'Pause';
-      const slider = document.getElementById('step-slider');
-      playInterval = setInterval(() => {{
+      document.getElementById('maze-play-btn').textContent = 'Pause';
+      const slider = document.getElementById('maze-step-slider');
+      mazePlayInterval = setInterval(() => {{
         let val = parseInt(slider.value);
         if (val >= parseInt(slider.max)) {{
-          clearInterval(playInterval);
-          playInterval = null;
-          document.getElementById('play-btn').textContent = 'Play';
+          clearInterval(mazePlayInterval);
+          mazePlayInterval = null;
+          document.getElementById('maze-play-btn').textContent = 'Play';
           return;
         }}
         slider.value = val + 1;
-        renderFrame();
+        mazeRenderFrame();
       }}, 200);
     }}
 
-    init();
+    mazeInit();
     </script>
     """
 
@@ -398,9 +440,8 @@ def generate_replay_html(recordings: list[EpisodeRecording], title: str = "Snake
 
 
 def play_episode_record(client, model, tokenizer, device, temperature=0.7):
-    """Play one Snake episode. Returns (trajectory, shaped_reward, recording)."""
+    """Play one maze episode. Returns (trajectory, shaped_reward, recording)."""
     import torch
-
 
     try:
         result = client.reset()
@@ -412,16 +453,17 @@ def play_episode_record(client, model, tokenizer, device, temperature=0.7):
     recording = EpisodeRecording()
     total_reward = 0.0
 
-    # Record initial frame
     obs = result.observation
     recording.frames.append(EpisodeFrame(
-        step=0, grid=obs.grid, score=obs.score, action="START", reward=0.0,
+        step=0, grid=obs.grid, agent_pos=tuple(obs.agent_pos),
+        action="START", reward=0.0,
     ))
 
     step_num = 0
-    while not result.done and step_num < 200:
+    solved = False
+    while not result.done and step_num < 100:
         obs = result.observation
-        user_prompt = format_observation(obs.grid, obs.snake, obs.apple, obs.score)
+        user_prompt = format_observation(obs.grid, obs.agent_pos, obs.exit_pos, obs.steps_taken)
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -447,7 +489,6 @@ def play_episode_record(client, model, tokenizer, device, temperature=0.7):
         gen_ids = outputs.sequences[0, prompt_len:]
         gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
 
-        # Log-prob of generated tokens
         log_probs = []
         for i, score in enumerate(outputs.scores):
             if i < len(gen_ids):
@@ -455,7 +496,7 @@ def play_episode_record(client, model, tokenizer, device, temperature=0.7):
                 log_probs.append(lp[gen_ids[i]].item())
 
         direction = parse_direction(gen_text)
-        result = safe_step(client, SnakeAction(direction=direction), "")
+        result = safe_step(client, MazeAction(direction=direction), "")
 
         step_num += 1
         reward = result.reward or 0.0
@@ -468,24 +509,28 @@ def play_episode_record(client, model, tokenizer, device, temperature=0.7):
             "action": gen_text.strip(),
         })
 
-        # Record frame
         obs = result.observation
         recording.frames.append(EpisodeFrame(
-            step=step_num, grid=obs.grid, score=obs.score,
+            step=step_num, grid=obs.grid,
+            agent_pos=tuple(obs.agent_pos),
             action=direction, reward=reward,
         ))
 
+        # Check if solved (reward of 10.0 = reached exit)
+        if reward >= 10.0:
+            solved = True
+
     recording.total_reward = total_reward
-    recording.final_score = result.observation.score
-    recording.death_reason = result.observation.death_reason
+    recording.solved = solved
+    recording.steps_to_solve = step_num if solved else 0
     recording.length = step_num
 
     return trajectory, total_reward, recording
 
 
 def play_episode_baseline(client, policy="random"):
-    """Play one Snake episode with a simple policy. Returns recording."""
-
+    """Play one maze episode with a simple policy. Returns recording."""
+    from collections import deque
 
     try:
         result = client.reset()
@@ -496,52 +541,67 @@ def play_episode_baseline(client, policy="random"):
     recording = EpisodeRecording()
     obs = result.observation
     recording.frames.append(EpisodeFrame(
-        step=0, grid=obs.grid, score=obs.score, action="START", reward=0.0,
+        step=0, grid=obs.grid, agent_pos=tuple(obs.agent_pos),
+        action="START", reward=0.0,
     ))
 
     total_reward = 0.0
     step_num = 0
+    solved = False
 
-    while not result.done and step_num < 200:
+    # For wall-follower: track visited for BFS fallback
+    visited_for_follower = set()
+
+    while not result.done and step_num < 100:
         obs = result.observation
+        agent_r, agent_c = obs.agent_pos
+        exit_r, exit_c = obs.exit_pos
+        grid = obs.grid
 
         if policy == "random":
             direction = random.choice(DIRECTIONS)
-        elif policy == "greedy":
-            # Move toward apple, avoiding immediate death
-            head_r, head_c = obs.snake[0]
-            apple_r, apple_c = obs.apple
-            body_set = set(map(tuple, obs.snake))
-
-            candidates = []
+        elif policy == "wall_follower":
+            # BFS-based pathfinding toward exit (acts as smart baseline)
+            best_dir = None
+            best_dist = float("inf")
             for d in DIRECTIONS:
                 dr, dc = {"UP": (-1, 0), "DOWN": (1, 0), "LEFT": (0, -1), "RIGHT": (0, 1)}[d]
-                nr, nc = head_r + dr, head_c + dc
-                if 0 <= nr < 10 and 0 <= nc < 10 and (nr, nc) not in body_set:
-                    dist = abs(nr - apple_r) + abs(nc - apple_c)
-                    candidates.append((dist, d))
-            if candidates:
-                candidates.sort()
-                direction = candidates[0][1]
-            else:
-                direction = random.choice(DIRECTIONS)
+                nr, nc = agent_r + dr, agent_c + dc
+                if (
+                    0 <= nr < len(grid)
+                    and 0 <= nc < len(grid[0])
+                    and grid[nr][nc] != "#"
+                ):
+                    dist = abs(nr - exit_r) + abs(nc - exit_c)
+                    # Prefer unvisited cells
+                    if (nr, nc) in visited_for_follower:
+                        dist += 5
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_dir = d
+            direction = best_dir or random.choice(DIRECTIONS)
+            visited_for_follower.add((agent_r, agent_c))
         else:
             direction = random.choice(DIRECTIONS)
 
-        result = safe_step(client, SnakeAction(direction=direction), "")
+        result = safe_step(client, MazeAction(direction=direction), "")
         step_num += 1
         reward = result.reward or 0.0
         total_reward += reward
 
         obs = result.observation
         recording.frames.append(EpisodeFrame(
-            step=step_num, grid=obs.grid, score=obs.score,
+            step=step_num, grid=obs.grid,
+            agent_pos=tuple(obs.agent_pos),
             action=direction, reward=reward,
         ))
 
+        if reward >= 10.0:
+            solved = True
+
     recording.total_reward = total_reward
-    recording.final_score = result.observation.score
-    recording.death_reason = result.observation.death_reason
+    recording.solved = solved
+    recording.steps_to_solve = step_num if solved else 0
     recording.length = step_num
 
     return recording
@@ -556,44 +616,51 @@ def play_episode_baseline(client, policy="random"):
 async def eval_baselines(
     env_url: str = DEFAULT_ENV_URL, num_episodes: int = 50
 ) -> str:
-    """Play Snake with random and greedy policies to set baselines."""
-
+    """Play maze with random and wall-follower policies to set baselines."""
 
     results = {}
     best_recordings = {}
 
-    for policy in ["random", "greedy"]:
-        scores = []
+    for policy in ["random", "wall_follower"]:
+        solve_count = 0
+        steps_to_solve = []
+        rewards = []
         best_rec = None
-        best_score = -1
-        client = create_snake_client(env_url)
+        best_reward = float("-inf")
+        client = create_maze_client(env_url)
         try:
             for _ in range(num_episodes):
                 rec = play_episode_baseline(client, policy=policy)
-                scores.append(rec.final_score)
-                if rec.final_score > best_score:
-                    best_score = rec.final_score
+                rewards.append(rec.total_reward)
+                if rec.solved:
+                    solve_count += 1
+                    steps_to_solve.append(rec.steps_to_solve)
+                if rec.total_reward > best_reward:
+                    best_reward = rec.total_reward
                     best_rec = rec
         finally:
             client.close()
 
-        avg_score = sum(scores) / len(scores)
+        solve_rate = solve_count / num_episodes
+        avg_steps = sum(steps_to_solve) / len(steps_to_solve) if steps_to_solve else 0
+        avg_reward = sum(rewards) / len(rewards)
         results[policy] = {
-            "avg_score": avg_score,
-            "max_score": max(scores),
-            "avg_length": sum(1 for _ in scores) / len(scores),
+            "solve_rate": solve_rate,
+            "avg_steps_to_solve": avg_steps,
+            "avg_reward": avg_reward,
         }
         if best_rec:
             best_recordings[policy] = {
-                "frames": [{"step": f.step, "grid": f.grid, "score": f.score,
+                "frames": [{"step": f.step, "grid": f.grid,
+                            "agent_pos": list(f.agent_pos),
                             "action": f.action, "reward": f.reward}
                            for f in best_rec.frames],
                 "total_reward": best_rec.total_reward,
-                "final_score": best_rec.final_score,
-                "death_reason": best_rec.death_reason,
+                "solved": best_rec.solved,
+                "steps_to_solve": best_rec.steps_to_solve,
                 "length": best_rec.length,
             }
-        print(f"  {policy}: avg_score={avg_score:.2f}, max={max(scores)}")
+        print(f"  {policy}: solve_rate={solve_rate:.2f}, avg_steps={avg_steps:.1f}, avg_reward={avg_reward:.2f}")
 
     return json.dumps({"results": results, "recordings": best_recordings})
 
@@ -615,11 +682,10 @@ async def train_step(
     use_bfloat16: bool = True,
     gradient_checkpointing: bool = True,
 ) -> tuple[File, str]:
-    """One GRPO iteration for Snake."""
+    """One GRPO iteration for maze navigation."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    # If a checkpoint File is provided, download and extract it
     if checkpoint_file is not None:
         local_tar = await checkpoint_file.download()
         extract_dir = f"prev_checkpoint_{step_idx}"
@@ -641,10 +707,10 @@ async def train_step(
         model.gradient_checkpointing_enable()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    client = create_snake_client(env_url)
+    client = create_maze_client(env_url)
 
     all_rewards = []
-    all_scores = []
+    all_solved = []
     total_loss = 0.0
     num_groups = max(num_rollouts // group_size, 1)
 
@@ -659,7 +725,7 @@ async def train_step(
                 )
                 group_trajs.append(traj)
                 group_rewards.append(reward)
-                all_scores.append(rec.final_score)
+                all_solved.append(rec.solved)
 
             all_rewards.extend(group_rewards)
 
@@ -701,7 +767,7 @@ async def train_step(
     finally:
         client.close()
 
-    avg_score = sum(all_scores) / len(all_scores) if all_scores else 0
+    solve_rate = sum(all_solved) / len(all_solved) if all_solved else 0
     avg_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0
 
     # Save checkpoint
@@ -716,12 +782,11 @@ async def train_step(
     metrics = json.dumps({
         "step": step_idx,
         "avg_reward": avg_reward,
-        "avg_score": avg_score,
+        "solve_rate": solve_rate,
         "loss": total_loss / num_groups,
     })
-    print(f"  Step {step_idx} | avg_score={avg_score:.2f} avg_reward={avg_reward:.2f}")
+    print(f"  Step {step_idx} | solve_rate={solve_rate:.2f} avg_reward={avg_reward:.2f}")
 
-    # Free GPU/MPS memory before returning
     del model, optimizer
     cleanup_memory()
 
@@ -742,11 +807,10 @@ async def eval_model(
     checkpoint_file: File | None = None,
     use_bfloat16: bool = True,
 ) -> str:
-    """Evaluate the model on Snake, returning scores and best replay."""
+    """Evaluate the model on maze navigation, returning metrics and best replay."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    # If a checkpoint File is provided, download and extract it
     if checkpoint_file is not None:
         local_tar = await checkpoint_file.download()
         extract_dir = f"eval_checkpoint_{step_idx}"
@@ -763,20 +827,25 @@ async def eval_model(
     ).to(device)
     model.eval()
 
-    client = create_snake_client(env_url)
-    scores = []
+    client = create_maze_client(env_url)
     direction_counts = {d: 0 for d in DIRECTIONS}
+    solve_count = 0
+    steps_to_solve = []
+    rewards = []
     best_rec = None
-    best_score = -1
+    best_reward = float("-inf")
 
     try:
         for _ in range(num_episodes):
             traj, reward, rec = play_episode_record(
                 client, model, tokenizer, device, temperature=0.0
             )
-            scores.append(rec.final_score)
-            if rec.final_score > best_score:
-                best_score = rec.final_score
+            rewards.append(reward)
+            if rec.solved:
+                solve_count += 1
+                steps_to_solve.append(rec.steps_to_solve)
+            if reward > best_reward:
+                best_reward = reward
                 best_rec = rec
             for s in traj:
                 d = parse_direction(s["action"])
@@ -784,30 +853,31 @@ async def eval_model(
     finally:
         client.close()
 
-    avg_score = sum(scores) / len(scores)
+    solve_rate = solve_count / num_episodes
+    avg_steps = sum(steps_to_solve) / len(steps_to_solve) if steps_to_solve else 0
+    avg_reward = sum(rewards) / len(rewards)
 
-    # Serialize best recording
     best_replay = None
     if best_rec:
         best_replay = {
-            "frames": [{"step": f.step, "grid": f.grid, "score": f.score,
+            "frames": [{"step": f.step, "grid": f.grid,
+                        "agent_pos": list(f.agent_pos),
                         "action": f.action, "reward": f.reward}
                        for f in best_rec.frames],
             "total_reward": best_rec.total_reward,
-            "final_score": best_rec.final_score,
-            "death_reason": best_rec.death_reason,
+            "solved": best_rec.solved,
+            "steps_to_solve": best_rec.steps_to_solve,
             "length": best_rec.length,
         }
 
-    # Free GPU/MPS memory before returning
     del model
     cleanup_memory()
 
     return json.dumps({
         "step": step_idx,
-        "avg_score": avg_score,
-        "max_score": max(scores),
-        "scores": scores,
+        "solve_rate": solve_rate,
+        "avg_steps_to_solve": avg_steps,
+        "avg_reward": avg_reward,
         "direction_distribution": direction_counts,
         "best_replay": best_replay,
     })
@@ -831,9 +901,7 @@ async def pipeline(
     gradient_checkpointing: bool = True,
     open_report: bool = False,
 ) -> tuple[str, File]:
-    """Full Snake RL pipeline: baselines -> GRPO training -> eval -> visual report."""
-
-
+    """Full Maze RL pipeline: baselines -> GRPO training -> eval -> visual report."""
 
     device = get_device()
     print(f"Device: {device}")
@@ -843,7 +911,7 @@ async def pipeline(
     # Start env server if using localhost
     server_proc = None
     if "localhost" in env_url or "127.0.0.1" in env_url:
-        print("Starting local Snake env server...")
+        print("Starting local Maze env server...")
         server_proc = start_env_server()
         print("Server started.\n")
 
@@ -853,13 +921,13 @@ async def pipeline(
         baselines_json = json.loads(await eval_baselines(env_url, num_episodes=50))
         baselines = baselines_json["results"]
         baseline_recordings = baselines_json.get("recordings", {})
-        print(f"  Random: avg_score={baselines['random']['avg_score']:.2f}")
-        print(f"  Greedy: avg_score={baselines['greedy']['avg_score']:.2f}")
+        print(f"  Random:        solve_rate={baselines['random']['solve_rate']:.2f}")
+        print(f"  Wall-follower: solve_rate={baselines['wall_follower']['solve_rate']:.2f}")
 
         # 2. Evaluate untrained model
         print("\n=== Evaluating untrained model ===")
         eval_results = [json.loads(await eval_model(model_id, env_url, eval_episodes, 0, use_bfloat16=use_bfloat16))]
-        print(f"  Untrained: avg_score={eval_results[0]['avg_score']:.2f}")
+        print(f"  Untrained: solve_rate={eval_results[0]['solve_rate']:.2f}")
 
         # 3. Training loop
         prev_checkpoint = None
@@ -881,7 +949,6 @@ async def pipeline(
             )
             train_metrics.append(json.loads(metrics_json))
 
-            # Eval the checkpoint (pass File so remote task can download it)
             eval_json = await eval_model(
                 model_id, env_url, eval_episodes, step,
                 checkpoint_file=checkpoint_file,
@@ -889,7 +956,7 @@ async def pipeline(
             )
             eval_results.append(json.loads(eval_json))
             prev_checkpoint = checkpoint_file
-            print(f"  Eval avg_score: {eval_results[-1]['avg_score']:.2f}")
+            print(f"  Eval solve_rate: {eval_results[-1]['solve_rate']:.2f}")
 
     finally:
         if server_proc:
@@ -902,40 +969,44 @@ async def pipeline(
     import matplotlib.pyplot as plt
 
     steps_list = [e["step"] for e in eval_results]
-    avg_scores = [e["avg_score"] for e in eval_results]
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
-    # Chart 1: Average score over training
+    # Chart 1: Solve rate over training
     ax = axes[0]
-    ax.plot(steps_list, avg_scores, "b-o", markersize=6, linewidth=2, label="GRPO Agent")
+    solve_rates = [e["solve_rate"] for e in eval_results]
+    ax.plot(steps_list, solve_rates, "b-o", markersize=6, linewidth=2, label="GRPO Agent")
     ax.axhline(
-        baselines["random"]["avg_score"],
+        baselines["random"]["solve_rate"],
         color="r", linestyle="--",
-        label=f"Random ({baselines['random']['avg_score']:.2f})",
+        label=f"Random ({baselines['random']['solve_rate']:.2f})",
     )
     ax.axhline(
-        baselines["greedy"]["avg_score"],
+        baselines["wall_follower"]["solve_rate"],
         color="g", linestyle="--",
-        label=f"Greedy ({baselines['greedy']['avg_score']:.2f})",
+        label=f"Wall-follower ({baselines['wall_follower']['solve_rate']:.2f})",
     )
     ax.set_xlabel("Training Step")
-    ax.set_ylabel("Avg Score (Apples)")
-    ax.set_title("Score Over Training")
+    ax.set_ylabel("Solve Rate")
+    ax.set_title("Solve Rate Over Training")
     ax.legend()
     ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1.05)
 
-    # Chart 2: Training reward
+    # Chart 2: Avg steps to solve
     ax = axes[1]
-    if train_metrics:
-        ax.plot(
-            [m["step"] for m in train_metrics],
-            [m["avg_reward"] for m in train_metrics],
-            "m-o", markersize=6,
+    avg_steps_list = [e["avg_steps_to_solve"] for e in eval_results]
+    ax.plot(steps_list, avg_steps_list, "m-o", markersize=6, linewidth=2)
+    if baselines["wall_follower"]["avg_steps_to_solve"] > 0:
+        ax.axhline(
+            baselines["wall_follower"]["avg_steps_to_solve"],
+            color="g", linestyle="--",
+            label=f"Wall-follower ({baselines['wall_follower']['avg_steps_to_solve']:.0f})",
         )
+        ax.legend()
     ax.set_xlabel("Training Step")
-    ax.set_ylabel("Avg Episode Reward")
-    ax.set_title("Training Reward")
+    ax.set_ylabel("Avg Steps to Solve")
+    ax.set_title("Efficiency (lower = better)")
     ax.grid(True, alpha=0.3)
 
     # Chart 3: Direction distribution
@@ -960,42 +1031,56 @@ async def pipeline(
 
     # Build replay HTML from best episodes
     replay_recs = []
-    # Add baseline best recordings
     for policy_name, rec_data in baseline_recordings.items():
         rec = EpisodeRecording(
-            frames=[EpisodeFrame(**f) for f in rec_data["frames"]],
+            frames=[EpisodeFrame(
+                step=f["step"], grid=f["grid"],
+                agent_pos=tuple(f["agent_pos"]),
+                action=f["action"], reward=f["reward"],
+            ) for f in rec_data["frames"]],
             total_reward=rec_data["total_reward"],
-            final_score=rec_data["final_score"],
-            death_reason=rec_data["death_reason"],
+            solved=rec_data["solved"],
+            steps_to_solve=rec_data["steps_to_solve"],
             length=rec_data["length"],
         )
         replay_recs.append(rec)
 
-    # Add model best replays
     for e in eval_results:
         replay_data = e.get("best_replay")
         if replay_data:
             rec = EpisodeRecording(
-                frames=[EpisodeFrame(**f) for f in replay_data["frames"]],
+                frames=[EpisodeFrame(
+                    step=f["step"], grid=f["grid"],
+                    agent_pos=tuple(f["agent_pos"]),
+                    action=f["action"], reward=f["reward"],
+                ) for f in replay_data["frames"]],
                 total_reward=replay_data["total_reward"],
-                final_score=replay_data["final_score"],
-                death_reason=replay_data["death_reason"],
+                solved=replay_data["solved"],
+                steps_to_solve=replay_data["steps_to_solve"],
                 length=replay_data["length"],
             )
             replay_recs.append(rec)
 
-    replay_html = generate_replay_html(replay_recs, title="Snake Game Replays")
+    replay_html = generate_replay_html(replay_recs, title="Maze Navigation Replays")
 
     final = eval_results[-1]
     await flyte.report.replace.aio(
-        f"<h2>Snake RL Training Report</h2>"
+        f"<h2>Maze RL Training Report</h2>"
         f"<h3>Results</h3>"
         f"<table border='1' cellpadding='8' cellspacing='0' style='border-collapse:collapse;'>"
-        f"<tr><th>Policy</th><th>Avg Score</th><th>Max Score</th></tr>"
-        f"<tr><td>Random</td><td>{baselines['random']['avg_score']:.2f}</td><td>{baselines['random']['max_score']}</td></tr>"
-        f"<tr><td>Greedy</td><td>{baselines['greedy']['avg_score']:.2f}</td><td>{baselines['greedy']['max_score']}</td></tr>"
-        f"<tr><td><b>GRPO Agent (step 0)</b></td><td>{eval_results[0]['avg_score']:.2f}</td><td>{eval_results[0]['max_score']}</td></tr>"
-        f"<tr><td><b>GRPO Agent (final)</b></td><td><b>{final['avg_score']:.2f}</b></td><td><b>{final['max_score']}</b></td></tr>"
+        f"<tr><th>Policy</th><th>Solve Rate</th><th>Avg Steps</th><th>Avg Reward</th></tr>"
+        f"<tr><td>Random</td><td>{baselines['random']['solve_rate']:.2f}</td>"
+        f"<td>{baselines['random']['avg_steps_to_solve']:.0f}</td>"
+        f"<td>{baselines['random']['avg_reward']:.2f}</td></tr>"
+        f"<tr><td>Wall-follower</td><td>{baselines['wall_follower']['solve_rate']:.2f}</td>"
+        f"<td>{baselines['wall_follower']['avg_steps_to_solve']:.0f}</td>"
+        f"<td>{baselines['wall_follower']['avg_reward']:.2f}</td></tr>"
+        f"<tr><td><b>GRPO Agent (step 0)</b></td><td>{eval_results[0]['solve_rate']:.2f}</td>"
+        f"<td>{eval_results[0]['avg_steps_to_solve']:.0f}</td>"
+        f"<td>{eval_results[0]['avg_reward']:.2f}</td></tr>"
+        f"<tr><td><b>GRPO Agent (final)</b></td><td><b>{final['solve_rate']:.2f}</b></td>"
+        f"<td><b>{final['avg_steps_to_solve']:.0f}</b></td>"
+        f"<td><b>{final['avg_reward']:.2f}</b></td></tr>"
         f"</table>"
         f"<h3>Training Progress</h3>{charts_html}"
         f"<h3>Visual Replay</h3>{replay_html}"
@@ -1020,13 +1105,13 @@ async def pipeline(
             webbrowser.open(f"file://{report_path}")
 
     summary = (
-        f"Final avg_score: {final['avg_score']:.2f} "
-        f"(random: {baselines['random']['avg_score']:.2f}, "
-        f"greedy: {baselines['greedy']['avg_score']:.2f})"
+        f"Final solve_rate: {final['solve_rate']:.2f} "
+        f"(random: {baselines['random']['solve_rate']:.2f}, "
+        f"wall-follower: {baselines['wall_follower']['solve_rate']:.2f})"
     )
     return summary, checkpoint_file
 
 
-# Server:  cd tutorials/openenv-snake && python -m snake_env.server.app
-# Local:   flyte run --local snake_rl.1py pipeline --training_steps 3
-# Remote:  flyte run snake_rl.py pipeline --training_steps 10
+# Server:  cd tutorials/openenv-maze && python -m maze_env.server.app
+# Local:   flyte run --local maze_rl.py pipeline --training_steps 3
+# Remote:  flyte run maze_rl.py pipeline --training_steps 10

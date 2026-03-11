@@ -12,4 +12,7 @@ data
 .claude
 claude.md
 *.joblib
+*.tar.gz
+checkpoint_step_*/
+eval_checkpoint_*/
 feast_artifacts
