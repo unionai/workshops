@@ -27,7 +27,7 @@ class MazeEnvironment(Environment[MazeAction, MazeObservation, MazeState]):
         super().__init__()
         self._grid: list[list[str]] = []
         self._agent_pos = (1, 1)
-        self._exit_pos = (6, 6)
+        self._exit_pos = (5, 5)
         self._done = False
         self._step_count = 0
         self._episode_id = ""
@@ -46,9 +46,8 @@ class MazeEnvironment(Environment[MazeAction, MazeObservation, MazeState]):
         self._done = False
         self._step_count = 0
 
-        self._grid = self._generate_maze(self._maze_seed)
+        self._grid = self._generate_maze(self._maze_seed)  # also sets self._exit_pos
         self._agent_pos = (1, 1)
-        self._exit_pos = (self.ROWS - 2, self.COLS - 2)
         self._visited = {self._agent_pos}
 
         # BFS for optimal path length
@@ -148,9 +147,12 @@ class MazeEnvironment(Environment[MazeAction, MazeObservation, MazeState]):
 
         carve(1, 1)
 
-        # Ensure exit cell is open
-        self._exit_pos = (self.ROWS - 2, self.COLS - 2)
-        grid[self._exit_pos[0]][self._exit_pos[1]] = "."
+        # Exit must be on an odd coordinate so DFS guarantees connectivity.
+        # On 8x8 grid, odd cells are 1, 3, 5 — use bottom-right odd cell.
+        exit_r = self.ROWS - 2 if (self.ROWS - 2) % 2 == 1 else self.ROWS - 3
+        exit_c = self.COLS - 2 if (self.COLS - 2) % 2 == 1 else self.COLS - 3
+        self._exit_pos = (exit_r, exit_c)
+        grid[exit_r][exit_c] = "."
 
         return grid
 
