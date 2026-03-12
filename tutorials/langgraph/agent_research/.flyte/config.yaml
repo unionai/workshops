@@ -2,12 +2,10 @@ local:
   persistence: true
 admin:
   authType: DeviceFlow
-  endpoint: dns:///tryv2.hosted.unionai.cloud
+  endpoint: dns:///demo.hosted.unionai.cloud
 image:
   builder: remote
-local:
-  persistence: true
 task:
   domain: development
   org: demo
-  project: plannerworkshops
+  project: flytesnacks
