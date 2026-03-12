@@ -136,7 +136,7 @@ flyte create config \
 
 # Store your API keys as secrets
 flyte create secret SAGE_OPENAI_API_KEY
-flyte create secret SAGE_TAVILY_API_KEY
+flyte create secret TAVILY_API_KEY
 ```
 
 ### Run the workflow remotely
