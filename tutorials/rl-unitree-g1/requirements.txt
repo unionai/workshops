@@ -1,0 +1,6 @@
+gymnasium[mujoco]
+torch
+numpy
+Pillow
+matplotlib
+flyte[tui]>=2.0
