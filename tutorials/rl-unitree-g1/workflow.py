@@ -20,7 +20,9 @@ import base64
 import logging
 
 # Use EGL for headless MuJoCo rendering (required in containers without a display)
-os.environ["MUJOCO_GL"] = "egl"
+import sys
+if sys.platform == "linux":
+    os.environ["MUJOCO_GL"] = "egl"
 
 import flyte
 import flyte.report
@@ -616,10 +618,10 @@ async def train_agent(
     )
     await flyte.report.flush.aio()
 
-    # ── Evaluate random baseline ─────────────────────────────────────────
+    # ── Evaluate random baseline (no frames — we'll replay at the end) ──
     baseline_file = await evaluate(
         checkpoint=None, label="Random Policy",
-        num_episodes=5, max_steps=max_steps, capture_frames=True,
+        num_episodes=5, max_steps=max_steps, capture_frames=False,
     )
     baseline_path = await baseline_file.download()
     with open(baseline_path) as f:
@@ -627,43 +629,10 @@ async def train_agent(
     baseline_reward = baseline["mean_reward"]
     log.info(f"Random baseline: {baseline_reward:.1f}")
 
-    replays = []
-    if baseline.get("frames_b64"):
-        replays.append({"label": baseline["label"], "reward": baseline["best_reward"], "iteration": 0, "frames_b64": baseline["frames_b64"]})
-        # Add baseline replay tab immediately
-        ep = replays[0]
-        tab = flyte.report.get_tab("Random Policy")
-        uid = "tab_baseline"
-        frames_json = json.dumps(ep["frames_b64"])
-        tab.log(
-            f"<h3>Random Policy</h3><p>Reward: {ep['reward']:.1f}</p>"
-            f'<div style="font-family:monospace;background:#0f0f23;color:#ccc;padding:12px;border-radius:8px;">'
-            f'<img id="f-{uid}" src="data:image/jpeg;base64,{ep["frames_b64"][0]}" style="max-width:480px;display:block;border:2px solid #333;border-radius:4px;"/><br/>'
-            f'<input type="range" id="s-{uid}" min="0" max="{len(ep["frames_b64"])-1}" value="0" style="width:480px;"/>'
-            f' <span id="l-{uid}">Step 0/{len(ep["frames_b64"])-1}</span>'
-            f'<script>(function(){{var F={frames_json};'
-            f'var s=document.getElementById("s-{uid}"),i=document.getElementById("f-{uid}"),l=document.getElementById("l-{uid}");'
-            f's.oninput=function(){{i.src="data:image/jpeg;base64,"+F[this.value];'
-            f'l.textContent="Step "+this.value+"/{len(ep["frames_b64"])-1}";}};'
-            f'}})();</script></div>'
-        )
-        await flyte.report.flush.aio()
-
-    # ── Helper: pick top 3 by reward + most recent ─────────────────────
-    def _pick_replays(all_replays):
-        if not all_replays:
-            return []
-        sorted_by_reward = sorted(all_replays, key=lambda r: r["reward"], reverse=True)
-        top3 = sorted_by_reward[:3]
-        latest = all_replays[-1]
-        picked = list(top3)
-        if latest not in top3:
-            picked.append(latest)
-        picked.sort(key=lambda r: r["iteration"])
-        return picked
-
     # ── Training loop ────────────────────────────────────────────────────
     checkpoint = None
+    best_checkpoint = None
+    best_reward = float("-inf")
     history = []
 
     import torch
@@ -694,56 +663,32 @@ async def train_agent(
         ckpt = torch.load(local, map_location="cpu")
         loss = ckpt.get("loss", 0.0)
 
-        # Evaluate updated policy — always capture frames
+        # Evaluate — no frames during training, just reward numbers
         eval_file = await evaluate(
             checkpoint=checkpoint,
             label=f"Iteration {i}",
             num_episodes=5,
             max_steps=max_steps,
-            capture_frames=True,
+            capture_frames=False,
         )
         eval_path = await eval_file.download()
         with open(eval_path) as f:
             eval_result = json.load(f)
 
+        iter_reward = eval_result["mean_reward"]
         history.append({
             "iteration": i,
-            "eval_reward": eval_result["mean_reward"],
+            "eval_reward": iter_reward,
             "best_reward": eval_result["best_reward"],
             "loss": loss,
         })
 
-        if eval_result.get("frames_b64"):
-            replays.append({
-                "label": eval_result["label"],
-                "reward": eval_result["best_reward"],
-                "iteration": i,
-                "frames_b64": eval_result["frames_b64"],
-            })
+        # Track best checkpoint
+        if iter_reward > best_reward:
+            best_reward = iter_reward
+            best_checkpoint = checkpoint
 
-        # Select top 3 by reward + most recent for replay tabs
-        shown_replays = _pick_replays(replays)
-        tab_names = ["Best #1", "Best #2", "Best #3", "Latest"]
-        for idx, ep in enumerate(shown_replays):
-            is_latest = idx == len(shown_replays) - 1 and ep is replays[-1] and len(shown_replays) > 3
-            tab_label = tab_names[idx] if idx < len(tab_names) else f"Replay {idx+1}"
-            tab = flyte.report.get_tab(tab_label)
-            uid = f"tab{idx}-iter{i}"
-            frames_json = json.dumps(ep["frames_b64"])
-            tab.log(
-                f"<h3>{ep['label']}</h3><p>Reward: {ep['reward']:.1f}</p>"
-                f'<div style="font-family:monospace;background:#0f0f23;color:#ccc;padding:12px;border-radius:8px;">'
-                f'<img id="f-{uid}" src="data:image/jpeg;base64,{ep["frames_b64"][0]}" style="max-width:480px;display:block;border:2px solid #333;border-radius:4px;"/><br/>'
-                f'<input type="range" id="s-{uid}" min="0" max="{len(ep["frames_b64"])-1}" value="0" style="width:480px;"/>'
-                f' <span id="l-{uid}">Step 0/{len(ep["frames_b64"])-1}</span>'
-                f'<script>(function(){{var F={frames_json};'
-                f'var s=document.getElementById("s-{uid}"),i=document.getElementById("f-{uid}"),l=document.getElementById("l-{uid}");'
-                f's.oninput=function(){{i.src="data:image/jpeg;base64,"+F[this.value];'
-                f'l.textContent="Step "+this.value+"/{len(ep["frames_b64"])-1}";}};'
-                f'}})();</script></div>'
-            )
-
-        log.info(f"  Reward: {eval_result['mean_reward']:.1f} | Loss: {loss:.4f}")
+        log.info(f"  Reward: {iter_reward:.1f} | Loss: {loss:.4f}")
 
         # Update main report after each iteration
         charts_html = generate_training_charts(history, baseline_reward)
@@ -753,10 +698,55 @@ async def train_agent(
         )
         await flyte.report.flush.aio()
 
+    # ── Replay best model and baseline with frames ─────────────────────
+    log.info("Generating replay for best model and baseline...")
+    replays = []
+
+    # Baseline replay
+    baseline_replay_file = await evaluate(
+        checkpoint=None, label="Random Policy",
+        num_episodes=1, max_steps=max_steps, capture_frames=True,
+    )
+    baseline_replay_path = await baseline_replay_file.download()
+    with open(baseline_replay_path) as f:
+        baseline_replay = json.load(f)
+    if baseline_replay.get("frames_b64"):
+        replays.append({"label": "Random Policy", "reward": baseline_replay["best_reward"], "frames_b64": baseline_replay["frames_b64"]})
+
+    # Best model replay
+    if best_checkpoint is not None:
+        best_iter = max(history, key=lambda h: h["eval_reward"])
+        best_replay_file = await evaluate(
+            checkpoint=best_checkpoint, label=f"Best (Iter {best_iter['iteration']})",
+            num_episodes=1, max_steps=max_steps, capture_frames=True,
+        )
+        best_replay_path = await best_replay_file.download()
+        with open(best_replay_path) as f:
+            best_replay = json.load(f)
+        if best_replay.get("frames_b64"):
+            replays.append({"label": f"Best (Iter {best_iter['iteration']})", "reward": best_replay["best_reward"], "frames_b64": best_replay["frames_b64"]})
+
+    # Add replay tabs
+    for idx, ep in enumerate(replays):
+        tab = flyte.report.get_tab(ep["label"][:25])
+        uid = f"final_tab{idx}"
+        frames_json = json.dumps(ep["frames_b64"])
+        tab.log(
+            f"<h3>{ep['label']}</h3><p>Reward: {ep['reward']:.1f}</p>"
+            f'<div style="font-family:monospace;background:#0f0f23;color:#ccc;padding:12px;border-radius:8px;">'
+            f'<img id="f-{uid}" src="data:image/jpeg;base64,{ep["frames_b64"][0]}" style="max-width:480px;display:block;border:2px solid #333;border-radius:4px;"/><br/>'
+            f'<input type="range" id="s-{uid}" min="0" max="{len(ep["frames_b64"])-1}" value="0" style="width:480px;"/>'
+            f' <span id="l-{uid}">Step 0/{len(ep["frames_b64"])-1}</span>'
+            f'<script>(function(){{var F={frames_json};'
+            f'var s=document.getElementById("s-{uid}"),i=document.getElementById("f-{uid}"),l=document.getElementById("l-{uid}");'
+            f's.oninput=function(){{i.src="data:image/jpeg;base64,"+F[this.value];'
+            f'l.textContent="Step "+this.value+"/{len(ep["frames_b64"])-1}";}};'
+            f'}})();</script></div>'
+        )
+
     # ── Build final report ───────────────────────────────────────────────
     charts_html = generate_training_charts(history, baseline_reward)
-    final_replays = _pick_replays(replays)
-    replay_html = generate_replay_html(final_replays) if final_replays else ""
+    replay_html = generate_replay_html(replays) if replays else ""
 
     best = max(history, key=lambda h: h["eval_reward"])
     improvement = best["eval_reward"] - baseline_reward
