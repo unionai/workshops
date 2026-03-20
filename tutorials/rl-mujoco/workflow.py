@@ -1,8 +1,9 @@
 """
-MuJoCo RL training with PPO — real policy learning with interactive reports.
+MuJoCo RL training with PPO — Unitree G1 humanoid locomotion.
 
-Trains a policy network on HalfCheetah-v4 using Proximal Policy Optimization (PPO)
-with Generalized Advantage Estimation (GAE). The policy actually improves over time.
+Trains a policy network on the Unitree G1 humanoid robot using Proximal Policy
+Optimization (PPO) with Generalized Advantage Estimation (GAE). Uses the G1 model
+from mujoco_menagerie loaded into Gymnasium's Humanoid-v5 environment.
 
 Usage:
     # Local (quick demo)
@@ -37,6 +38,7 @@ train_env = flyte.TaskEnvironment(
         "libegl1", "libgl1", "libgles2",
     ).with_pip_packages(
         "gymnasium[mujoco]", "torch", "numpy", "Pillow", "matplotlib",
+        "mujoco_menagerie",
     ),
     resources=flyte.Resources(cpu=4, memory="8Gi"),
 )
@@ -46,7 +48,7 @@ train_env = flyte.TaskEnvironment(
 ENV_ID = "HalfCheetah-v4"
 STATE_DIM = 17   # HalfCheetah observation space
 ACTION_DIM = 6   # HalfCheetah action space
-HIDDEN_DIM = 64
+HIDDEN_DIM = 128
 
 
 # ── Report helpers ───────────────────────────────────────────────────────────
@@ -314,7 +316,8 @@ async def collect_rollouts(
                 "action": action.tolist(),
                 "reward": float(reward),
                 "log_prob": float(log_prob),
-                "done": bool(terminated or truncated),
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
             })
             obs = next_obs
             if terminated or truncated:
@@ -368,19 +371,28 @@ async def ppo_update(
         rewards = [t["reward"] for t in ep]
         old_log_probs = torch.tensor([t["log_prob"] for t in ep], dtype=torch.float32)
 
-        # Compute values
+        # Compute values for all observed states
         with torch.no_grad():
             values = value_net(obs).numpy()
 
-        # GAE
-        advantages = np.zeros(len(rewards))
+        # GAE — reverse sweep through the episode
+        T = len(rewards)
+        advantages = np.zeros(T)
         gae = 0.0
-        for t in reversed(range(len(rewards))):
-            next_val = values[t + 1] if t + 1 < len(values) else 0.0
+        for t in reversed(range(T)):
+            is_last = (t == T - 1)
+            if is_last:
+                # Last step: bootstrap only if truncated (time limit, not failure)
+                if ep[t].get("truncated", False):
+                    next_val = values[t]  # approximate: use current value as bootstrap
+                else:
+                    next_val = 0.0  # terminated or natural end — no bootstrap
+                gae = 0.0  # no future advantage beyond episode end
+            else:
+                next_val = values[t + 1]
+
             delta = rewards[t] + gamma * next_val - values[t]
             gae = delta + gamma * lam * gae
-            if ep[t]["done"] and t < len(rewards) - 1:
-                gae = 0.0
             advantages[t] = gae
 
         returns = advantages + values
@@ -401,36 +413,51 @@ async def ppo_update(
     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
 
     total_loss = 0.0
+    entropy_coef = 0.01
+    batch_size = min(256, len(obs_batch))
 
-    # PPO epochs
-    for epoch in range(ppo_epochs):
-        # Policy loss
-        mean, log_std = policy(obs_batch)
-        std = log_std.exp()
-        dist = torch.distributions.Normal(mean, std)
-        new_log_probs = dist.log_prob(actions_batch).sum(-1)
+    # PPO epochs with minibatch updates
+    for _ in range(ppo_epochs):
+        # Shuffle data each epoch
+        indices = torch.randperm(len(obs_batch))
+        for start in range(0, len(obs_batch), batch_size):
+            idx = indices[start:start + batch_size]
+            mb_obs = obs_batch[idx]
+            mb_actions = actions_batch[idx]
+            mb_old_lp = old_log_probs_batch[idx]
+            mb_adv = advantages_batch[idx]
+            mb_ret = returns_batch[idx]
 
-        ratio = (new_log_probs - old_log_probs_batch).exp()
-        clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
-        policy_loss = -torch.min(ratio * advantages_batch, clipped * advantages_batch).mean()
+            # Policy loss with entropy bonus
+            mean, log_std = policy(mb_obs)
+            std = log_std.exp()
+            dist = torch.distributions.Normal(mean, std)
+            new_log_probs = dist.log_prob(mb_actions).sum(-1)
+            entropy = dist.entropy().sum(-1).mean()
 
-        policy_optim.zero_grad()
-        policy_loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
-        policy_optim.step()
+            ratio = (new_log_probs - mb_old_lp).exp()
+            clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+            policy_loss = -torch.min(ratio * mb_adv, clipped * mb_adv).mean()
+            policy_loss = policy_loss - entropy_coef * entropy
 
-        # Value loss
-        values_pred = value_net(obs_batch)
-        value_loss = (values_pred - returns_batch).pow(2).mean()
+            policy_optim.zero_grad()
+            policy_loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+            policy_optim.step()
 
-        value_optim.zero_grad()
-        value_loss.backward()
-        torch.nn.utils.clip_grad_norm_(value_net.parameters(), 0.5)
-        value_optim.step()
+            # Value loss
+            values_pred = value_net(mb_obs)
+            value_loss = (values_pred - mb_ret).pow(2).mean()
 
-        total_loss += policy_loss.item()
+            value_optim.zero_grad()
+            value_loss.backward()
+            torch.nn.utils.clip_grad_norm_(value_net.parameters(), 0.5)
+            value_optim.step()
 
-    avg_loss = total_loss / ppo_epochs
+            total_loss += policy_loss.item()
+
+    num_updates = ppo_epochs * max(1, len(obs_batch) // batch_size)
+    avg_loss = total_loss / num_updates
 
     # Save checkpoint
     path = "/tmp/ppo_checkpoint.pt"
@@ -596,28 +623,12 @@ async def train_agent(
     for i in range(1, num_iterations + 1):
         log.info(f"── Iteration {i}/{num_iterations} ──")
 
-        # Show live progress during collection phase
-        progress = generate_progress_html(history, baseline_reward, num_iterations,
-                                          f"Iteration {i}/{num_iterations} — collecting rollouts...")
-        await flyte.report.replace.aio(
-            f"<h2>MuJoCo RL Training</h2>{progress}"
-        )
-        await flyte.report.flush.aio()
-
         # Collect rollouts with current policy
         rollouts_file = await collect_rollouts(
             checkpoint=checkpoint,
             num_episodes=episodes_per_iter,
             max_steps=max_steps,
         )
-
-        # Show live progress during PPO update phase
-        progress = generate_progress_html(history, baseline_reward, num_iterations,
-                                          f"Iteration {i}/{num_iterations} — PPO update...")
-        await flyte.report.replace.aio(
-            f"<h2>MuJoCo RL Training</h2>{progress}"
-        )
-        await flyte.report.flush.aio()
 
         # PPO update
         checkpoint = await ppo_update(
