@@ -4,3 +4,4 @@ numpy
 Pillow
 matplotlib
 flyte[tui]>=2.0
+unionai-reuse

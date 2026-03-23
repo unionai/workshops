@@ -37,13 +37,19 @@ log.setLevel(logging.INFO)
 train_env = flyte.TaskEnvironment(
     name="unitree-g1-rl",
     image=flyte.Image.from_debian_base().with_apt_packages(
-        "libegl1", "libgl1", "libgles2", "git",
+        "libegl1", "libegl-mesa0", "libgl1", "libgl1-mesa-dri", "libgles2", "libglx-mesa0", "git",
     ).with_pip_packages(
-        "gymnasium[mujoco]", "torch", "numpy", "Pillow", "matplotlib",
+        "gymnasium[mujoco]", "torch", "numpy", "Pillow", "matplotlib", "unionai-reuse",
     ).with_commands([
         "git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie.git /opt/mujoco_menagerie",
     ]),
-    resources=flyte.Resources(cpu=4, memory="8Gi"),
+    resources=flyte.Resources(cpu=8, memory="16Gi"),
+    reusable=flyte.ReusePolicy(
+        replicas=2,
+        idle_ttl=60,
+        concurrency=10,
+        scaledown_ttl=60,
+    ),
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -52,30 +58,130 @@ HIDDEN_DIM = 256
 
 # G1 env config — passed to Humanoid-v5 with the G1 XML
 G1_ENV_KWARGS = {
-    "healthy_z_range": (0.5, 1.5),      # G1 is ~1.27m tall standing
-    "healthy_reward": 5.0,               # stay alive bonus
-    "forward_reward_weight": 1.25,       # reward for forward velocity
-    "ctrl_cost_weight": 0.1,             # penalize large actuator commands
-    "contact_cost_weight": 5e-7,
-    "reset_noise_scale": 0.01,           # small noise so it starts near standing
+    "healthy_z_range": (0.6, 1.4),      # G1 pelvis at ~0.79m; tight range prevents "almost fallen = healthy"
+    "healthy_reward": 0.0,               # disable built-in alive bonus — custom wrapper handles it
+    "forward_reward_weight": 0.0,        # disable built-in forward reward — custom wrapper handles it
+    "ctrl_cost_weight": 0.0,             # disable built-in ctrl cost — custom wrapper handles it
+    "contact_cost_weight": 0.0,          # disable built-in contact cost
+    "reset_noise_scale": 0.005,          # very small noise so it starts near standing
     "terminate_when_unhealthy": True,
     "exclude_current_positions_from_observation": True,
     "include_cfrc_ext_in_observation": True,
-    "frame_skip": 5,
+    "frame_skip": 4,                     # finer control for complex humanoid
 }
+
+# Target walking speed in m/s
+TARGET_VELOCITY = 0.8
+
+
+class G1RewardWrapper:
+    """Custom reward wrapper for Unitree G1 walking.
+
+    Replaces the default Gymnasium reward with terms from MuJoCo Playground
+    and legged_gym that produce real walking:
+    - Velocity tracking (exponential kernel at target speed)
+    - Alive bonus (small)
+    - Termination penalty (large)
+    - Vertical velocity penalty (don't fall)
+    - Angular velocity penalty (don't tumble)
+    - Action rate penalty (smooth movements)
+    - Orientation penalty (stay upright)
+    """
+
+    def __init__(self, env):
+        self.env = env
+        # Expose gym.Env interface for SyncVectorEnv compatibility
+        self.observation_space = env.observation_space
+        self.action_space = env.action_space
+        self.spec = getattr(env, "spec", None)
+        self.metadata = getattr(env, "metadata", {})
+        self.render_mode = getattr(env, "render_mode", None)
+        self.np_random = getattr(env, "np_random", None)
+        self.prev_action = None
+
+    def reset(self, **kwargs):
+        self.prev_action = None
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        import numpy as np
+        obs, _base_reward, terminated, truncated, info = self.env.step(action)
+
+        # Access MuJoCo state for custom rewards
+        data = self.env.unwrapped.data
+
+        # 1. Velocity tracking — exponential kernel peaked at target speed
+        x_vel = data.qvel[0]
+        vel_error = (x_vel - TARGET_VELOCITY) ** 2
+        tracking_reward = 1.5 * np.exp(-vel_error / 0.25)
+
+        # 2. Small alive bonus
+        alive_bonus = 0.5
+
+        # 3. Termination penalty — make falling very costly
+        death_penalty = -50.0 if terminated else 0.0
+
+        # 4. Vertical velocity penalty — don't bounce or fall
+        z_vel = data.qvel[2]
+        z_vel_penalty = -2.0 * z_vel ** 2
+
+        # 5. Angular velocity penalty — don't tumble (roll/pitch)
+        ang_vel_xy = data.qvel[3:5]
+        ang_vel_penalty = -0.15 * np.sum(ang_vel_xy ** 2)
+
+        # 6. Action rate penalty — smooth actions = smooth walking
+        if self.prev_action is not None:
+            action_rate_penalty = -0.01 * np.sum((action - self.prev_action) ** 2)
+        else:
+            action_rate_penalty = 0.0
+        self.prev_action = action.copy()
+
+        # 7. Orientation penalty — penalize torso tilt from upright
+        #    qpos[3:7] is torso quaternion (w, x, y, z); upright means w~1, x~0, y~0
+        quat = data.qpos[3:7]
+        # Tilt = 1 - w^2 (0 when upright, ~1 when sideways/fallen)
+        tilt = 1.0 - quat[0] ** 2
+        orientation_penalty = -2.0 * tilt
+
+        # 8. Control cost — moderate penalty for large torques
+        ctrl_penalty = -0.01 * np.sum(action ** 2)
+
+        reward = (
+            tracking_reward
+            + alive_bonus
+            + death_penalty
+            + z_vel_penalty
+            + ang_vel_penalty
+            + action_rate_penalty
+            + orientation_penalty
+            + ctrl_penalty
+        )
+
+        return obs, float(reward), terminated, truncated, info
+
+    def render(self):
+        return self.env.render()
+
+    def close(self):
+        return self.env.close()
+
+    @property
+    def unwrapped(self):
+        return self.env.unwrapped
 
 
 def _make_env(render_mode=None):
-    """Create the Unitree G1 environment using Humanoid-v5 with the G1 XML."""
+    """Create the Unitree G1 environment with custom reward shaping."""
     import gymnasium as gym
 
     xml_path = "/opt/mujoco_menagerie/unitree_g1/scene.xml"
-    return gym.make(
+    env = gym.make(
         "Humanoid-v5",
         xml_file=xml_path,
         render_mode=render_mode,
         **G1_ENV_KWARGS,
     )
+    return G1RewardWrapper(env)
 
 
 def _get_dims():
@@ -270,6 +376,51 @@ def generate_training_charts(history: list[dict], baseline_reward: float) -> str
     return html
 
 
+# ── Observation normalizer ────────────────────────────────────────────────────
+
+class ObsNormalizer:
+    """Running mean/std normalizer for observations. Stabilizes training by
+    ensuring all inputs to the policy network are roughly zero-mean, unit-variance."""
+
+    def __init__(self, dim: int):
+        import numpy as np
+        self.mean = np.zeros(dim, dtype=np.float64)
+        self.var = np.ones(dim, dtype=np.float64)
+        self.count = 1e-4  # avoid division by zero
+
+    def update(self, batch):
+        """Update running stats with a batch of observations (N x dim)."""
+        import numpy as np
+        batch = np.asarray(batch, dtype=np.float64)
+        batch_mean = batch.mean(axis=0)
+        batch_var = batch.var(axis=0)
+        batch_count = batch.shape[0]
+
+        # Welford's online algorithm for combining stats
+        delta = batch_mean - self.mean
+        total = self.count + batch_count
+        self.mean = self.mean + delta * batch_count / total
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta**2 * self.count * batch_count / total
+        self.var = m2 / total
+        self.count = total
+
+    def normalize(self, obs):
+        """Normalize observations using running stats."""
+        import numpy as np
+        return (np.asarray(obs) - self.mean) / (np.sqrt(self.var) + 1e-8)
+
+    def state_dict(self):
+        return {"mean": self.mean.tolist(), "var": self.var.tolist(), "count": float(self.count)}
+
+    def load_state_dict(self, d):
+        import numpy as np
+        self.mean = np.array(d["mean"], dtype=np.float64)
+        self.var = np.array(d["var"], dtype=np.float64)
+        self.count = d["count"]
+
+
 # ── Policy network ───────────────────────────────────────────────────────────
 
 def _build_policy_and_value(state_dim: int, action_dim: int):
@@ -287,7 +438,7 @@ def _build_policy_and_value(state_dim: int, action_dim: int):
                 nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.Tanh(),
             )
             self.mean = nn.Linear(HIDDEN_DIM, action_dim)
-            self.log_std = nn.Parameter(torch.full((action_dim,), -0.5))
+            self.log_std = nn.Parameter(torch.full((action_dim,), -2.0))
 
         def forward(self, x):
             h = self.net(x)
@@ -310,60 +461,87 @@ def _build_policy_and_value(state_dim: int, action_dim: int):
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
 
+NUM_PARALLEL_ENVS = 32  # number of environments to run simultaneously
+
+
 @train_env.task
 async def collect_rollouts(
     checkpoint: File | None,
     num_episodes: int = 10,
     max_steps: int = 1000,
 ) -> File:
-    """Collect rollouts using the current policy."""
+    """Collect rollouts using vectorized parallel environments."""
     import torch
+    import numpy as np
+    import gymnasium as gym
 
-    # Detect dims from the environment
     state_dim, action_dim = _get_dims()
 
     policy, _, device = _build_policy_and_value(state_dim, action_dim)
+    obs_norm = ObsNormalizer(state_dim)
+
     if checkpoint is not None:
         local = await checkpoint.download()
         ckpt = torch.load(local, map_location=device)
         policy.load_state_dict(ckpt["policy"])
+        if "obs_norm" in ckpt:
+            obs_norm.load_state_dict(ckpt["obs_norm"])
     policy.eval()
 
-    all_episodes = []
-    for ep_idx in range(num_episodes):
-        env = _make_env()
-        obs, _ = env.reset(seed=ep_idx)
-        transitions = []
+    n_envs = min(NUM_PARALLEL_ENVS, num_episodes)
+    envs = gym.vector.SyncVectorEnv([lambda: _make_env() for _ in range(n_envs)])
 
-        for _ in range(max_steps):
-            with torch.no_grad():
-                obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
-                mean, log_std = policy(obs_t)
-                std = log_std.exp()
-                dist = torch.distributions.Normal(mean, std)
-                action_t = dist.sample()
-                log_prob = dist.log_prob(action_t).sum(-1).item()
-                action = action_t.squeeze(0).numpy()
+    all_episodes = []       # completed episodes
+    # Per-env accumulators
+    ep_transitions = [[] for _ in range(n_envs)]
 
-            next_obs, reward, terminated, truncated, _ = env.step(action)
-            transitions.append({
-                "obs": obs.tolist(),
-                "action": action.tolist(),
-                "reward": float(reward),
-                "log_prob": float(log_prob),
-                "terminated": bool(terminated),
-                "truncated": bool(truncated),
+    obs, _ = envs.reset()
+    episodes_completed = 0
+
+    while episodes_completed < num_episodes:
+        # Normalize and forward through policy
+        obs_normed = obs_norm.normalize(obs).astype(np.float32)
+        with torch.no_grad():
+            obs_t = torch.from_numpy(obs_normed)
+            mean, log_std = policy(obs_t)
+            std = log_std.exp()
+            dist = torch.distributions.Normal(mean, std)
+            actions_t = dist.sample()
+            log_probs = dist.log_prob(actions_t).sum(-1)
+            actions = actions_t.numpy()
+
+        next_obs, rewards, terminateds, truncateds, infos = envs.step(actions)
+
+        # Update normalizer with raw observations
+        obs_norm.update(obs)
+
+        # Record transitions for each env
+        for i in range(n_envs):
+            ep_transitions[i].append({
+                "obs": obs[i].tolist(),
+                "action": actions[i].tolist(),
+                "reward": float(rewards[i]),
+                "log_prob": float(log_probs[i].item()),
+                "terminated": bool(terminateds[i]),
+                "truncated": bool(truncateds[i]),
             })
-            obs = next_obs
-            if terminated or truncated:
-                break
 
-        env.close()
-        all_episodes.append(transitions)
+            # If this env's episode ended, save it and start fresh
+            if terminateds[i] or truncateds[i]:
+                all_episodes.append(ep_transitions[i])
+                ep_transitions[i] = []
+                episodes_completed += 1
+                if episodes_completed >= num_episodes:
+                    break
 
+        obs = next_obs
+
+    envs.close()
+
+    # Save rollouts + normalizer state
     path = "/tmp/rollouts.json"
     with open(path, "w") as f:
-        json.dump(all_episodes, f)
+        json.dump({"episodes": all_episodes, "obs_norm": obs_norm.state_dict()}, f)
     return await File.from_local(path)
 
 
@@ -371,11 +549,11 @@ async def collect_rollouts(
 async def ppo_update(
     rollouts_file: File,
     checkpoint: File | None,
-    ppo_epochs: int = 10,
-    clip_eps: float = 0.1,
-    lr: float = 1e-4,
-    gamma: float = 0.99,
-    lam: float = 0.95,
+    ppo_epochs: int = 5,
+    clip_eps: float = 0.2,
+    lr: float = 3e-5,
+    gamma: float = 0.95,
+    lam: float = 0.9,
 ) -> File:
     """Run PPO update on collected rollouts. Returns updated checkpoint."""
     import torch
@@ -383,11 +561,17 @@ async def ppo_update(
 
     rollouts_path = await rollouts_file.download()
     with open(rollouts_path) as f:
-        episodes = json.load(f)
+        rollout_data = json.load(f)
+    episodes = rollout_data["episodes"]
+    obs_norm_state = rollout_data["obs_norm"]
 
     # Infer dims from the rollout data
     state_dim = len(episodes[0][0]["obs"])
     action_dim = len(episodes[0][0]["action"])
+
+    # Load observation normalizer from rollouts
+    obs_norm = ObsNormalizer(state_dim)
+    obs_norm.load_state_dict(obs_norm_state)
 
     policy, value_net, device = _build_policy_and_value(state_dim, action_dim)
     policy_optim = torch.optim.Adam(policy.parameters(), lr=lr)
@@ -406,12 +590,13 @@ async def ppo_update(
     all_obs, all_actions, all_old_log_probs, all_advantages, all_returns = [], [], [], [], []
 
     for ep in episodes:
-        obs = torch.tensor([t["obs"] for t in ep], dtype=torch.float32)
+        raw_obs = np.array([t["obs"] for t in ep], dtype=np.float32)
+        obs = torch.tensor(obs_norm.normalize(raw_obs).astype(np.float32))
         actions = torch.tensor([t["action"] for t in ep], dtype=torch.float32)
         rewards = [t["reward"] for t in ep]
         old_log_probs = torch.tensor([t["log_prob"] for t in ep], dtype=torch.float32)
 
-        # Compute values for all observed states
+        # Compute values for normalized observations
         with torch.no_grad():
             values = value_net(obs).numpy()
 
@@ -452,7 +637,7 @@ async def ppo_update(
     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
 
     total_loss = 0.0
-    entropy_coef = 0.01
+    entropy_coef = 0.002
     batch_size = min(512, len(obs_batch))
 
     # PPO epochs with minibatch updates
@@ -480,7 +665,7 @@ async def ppo_update(
 
             policy_optim.zero_grad()
             policy_loss.backward()
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), 2.0)
             policy_optim.step()
 
             # Value loss
@@ -489,7 +674,7 @@ async def ppo_update(
 
             value_optim.zero_grad()
             value_loss.backward()
-            torch.nn.utils.clip_grad_norm_(value_net.parameters(), 0.5)
+            torch.nn.utils.clip_grad_norm_(value_net.parameters(), 2.0)
             value_optim.step()
 
             total_loss += policy_loss.item()
@@ -497,13 +682,14 @@ async def ppo_update(
     num_updates = ppo_epochs * max(1, len(obs_batch) // batch_size)
     avg_loss = total_loss / num_updates
 
-    # Save checkpoint with dims so other tasks can rebuild the network
+    # Save checkpoint with dims and normalizer so other tasks can rebuild
     path = "/tmp/ppo_checkpoint.pt"
     torch.save({
         "policy": policy.state_dict(),
         "value": value_net.state_dict(),
         "policy_optim": policy_optim.state_dict(),
         "value_optim": value_optim.state_dict(),
+        "obs_norm": obs_norm.state_dict(),
         "loss": avg_loss,
         "state_dim": state_dim,
         "action_dim": action_dim,
@@ -523,14 +709,19 @@ async def evaluate(
     import torch
     from PIL import Image
 
+    import numpy as np
+
     state_dim, action_dim = _get_dims()
 
     policy = None
+    obs_norm = ObsNormalizer(state_dim)
     if checkpoint is not None:
         policy, _, device = _build_policy_and_value(state_dim, action_dim)
         local = await checkpoint.download()
         ckpt = torch.load(local, map_location=device)
         policy.load_state_dict(ckpt["policy"])
+        if "obs_norm" in ckpt:
+            obs_norm.load_state_dict(ckpt["obs_norm"])
         policy.eval()
 
     best_reward = -float("inf")
@@ -548,6 +739,13 @@ async def evaluate(
 
         for step in range(max_steps):
             if capture_frames and step % frame_every == 0 and len(frames) < max_frames:
+                # Track the robot with the camera
+                base_env = env.unwrapped
+                robot_pos = base_env.data.qpos[:3].copy()
+                cam = base_env.mujoco_renderer._get_viewer("rgb_array").cam
+                cam.lookat[0] = robot_pos[0]
+                cam.lookat[1] = robot_pos[1]
+                cam.lookat[2] = robot_pos[2]
                 frame = env.render()
                 buf = io.BytesIO()
                 Image.fromarray(frame).resize((320, 240)).save(buf, format="JPEG", quality=70)
@@ -555,7 +753,8 @@ async def evaluate(
 
             if policy is not None:
                 with torch.no_grad():
-                    obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+                    obs_normed = obs_norm.normalize(obs).astype(np.float32)
+                    obs_t = torch.tensor(obs_normed).unsqueeze(0)
                     mean, _ = policy(obs_t)
                     action = mean.squeeze(0).numpy()
             else:
@@ -576,10 +775,16 @@ async def evaluate(
     mean_reward = sum(all_rewards) / len(all_rewards)
     log.info(f"[Eval] {label}: mean={mean_reward:.1f}, best={best_reward:.1f}")
 
-    await flyte.report.replace.aio(
+    report_html = (
         f"<h3>{label}</h3>"
         f"<p>Mean reward: {mean_reward:.1f} | Best: {best_reward:.1f}</p>"
     )
+    if capture_frames and best_frames:
+        replay_html = generate_replay_html([
+            {"label": label, "reward": best_reward, "frames_b64": best_frames},
+        ])
+        report_html += replay_html
+    await flyte.report.replace.aio(report_html)
     await flyte.report.flush.aio()
 
     result_path = "/tmp/eval_result.json"
@@ -599,9 +804,9 @@ async def evaluate(
 async def train_agent(
     num_iterations: int = 15,
     episodes_per_iter: int = 20,
-    ppo_epochs: int = 15,
+    ppo_epochs: int = 5,
     max_steps: int = 1000,
-    lr: float = 1e-4,
+    lr: float = 3e-5,
 ) -> str:
     """
     PPO training loop for the Unitree G1 humanoid.
@@ -705,7 +910,7 @@ async def train_agent(
     # Baseline replay
     baseline_replay_file = await evaluate(
         checkpoint=None, label="Random Policy",
-        num_episodes=1, max_steps=max_steps, capture_frames=True,
+        num_episodes=5, max_steps=max_steps, capture_frames=True,
     )
     baseline_replay_path = await baseline_replay_file.download()
     with open(baseline_replay_path) as f:
@@ -713,12 +918,12 @@ async def train_agent(
     if baseline_replay.get("frames_b64"):
         replays.append({"label": "Random Policy", "reward": baseline_replay["best_reward"], "frames_b64": baseline_replay["frames_b64"]})
 
-    # Best model replay
+    # Best model replay — run 5 episodes, keep frames from the best one
     if best_checkpoint is not None:
         best_iter = max(history, key=lambda h: h["eval_reward"])
         best_replay_file = await evaluate(
             checkpoint=best_checkpoint, label=f"Best (Iter {best_iter['iteration']})",
-            num_episodes=1, max_steps=max_steps, capture_frames=True,
+            num_episodes=5, max_steps=max_steps, capture_frames=True,
         )
         best_replay_path = await best_replay_file.download()
         with open(best_replay_path) as f:
