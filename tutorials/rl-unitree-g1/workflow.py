@@ -42,19 +42,26 @@ g1_image = flyte.Image.from_debian_base().with_apt_packages(
     "git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie.git /opt/mujoco_menagerie",
 ])
 
-# Workers — lightweight, many run in parallel
+# Workers — lightweight, many run in parallel for rollout collection + evaluation
 worker_env = flyte.TaskEnvironment(
     name="unitree-g1-worker",
     image=g1_image,
     resources=flyte.Resources(cpu=2, memory="8Gi"),
 )
 
-# Orchestrator — needs more memory for merging rollouts + PPO update
+# GPU — PPO update only (allocated briefly each iteration, not held during rollouts)
+gpu_env = flyte.TaskEnvironment(
+    name="unitree-g1-gpu",
+    image=g1_image,
+    resources=flyte.Resources(cpu=4, memory="24Gi", gpu=1),
+)
+
+# Orchestrator — lightweight, just coordinates workers and GPU task
 train_env = flyte.TaskEnvironment(
     name="unitree-g1-train",
     image=g1_image,
-    resources=flyte.Resources(cpu=4, memory="24Gi"),
-    depends_on=[worker_env],
+    resources=flyte.Resources(cpu=2, memory="8Gi"),
+    depends_on=[worker_env, gpu_env],
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -453,7 +460,7 @@ def _build_policy_and_value(state_dim: int, action_dim: int):
     import torch
     import torch.nn as nn
 
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     class Policy(nn.Module):
         def __init__(self):
@@ -563,15 +570,69 @@ async def collect_rollouts(
     return await File.from_local(path)
 
 
-def ppo_update(episodes, policy, value_net, policy_optim, value_optim, obs_norm,
-               ppo_epochs=5, clip_eps=0.2, gamma=0.95, lam=0.9):
-    """Run PPO update on collected episodes. Returns average loss."""
+@gpu_env.task(retries=3)
+async def ppo_update(
+    rollout_files: list[File],
+    checkpoint: File | None,
+    ppo_epochs: int = 5,
+    clip_eps: float = 0.2,
+    lr: float = 3e-5,
+    gamma: float = 0.95,
+    lam: float = 0.9,
+) -> File:
+    """Merge rollouts from parallel workers and run PPO update on GPU. Returns updated checkpoint."""
     import torch
     import numpy as np
 
+    # Merge episodes and obs normalizer stats from all workers
+    all_episodes = []
+    state_dim = None
+
+    for rollout_file in rollout_files:
+        rollout_path = await rollout_file.download()
+        with open(rollout_path) as f:
+            rollout_data = json.load(f)
+        all_episodes.extend(rollout_data["episodes"])
+        if state_dim is None:
+            state_dim = len(rollout_data["episodes"][0][0]["obs"])
+
+    action_dim = len(all_episodes[0][0]["action"])
+    log.info(f"PPO update: {len(all_episodes)} episodes on {torch.device('cuda' if torch.cuda.is_available() else 'cpu')}")
+
+    # Build networks on GPU
+    policy, value_net, device = _build_policy_and_value(state_dim, action_dim)
+    policy_optim = torch.optim.Adam(policy.parameters(), lr=lr)
+    value_optim = torch.optim.Adam(value_net.parameters(), lr=lr)
+
+    # Merge obs normalizer from all workers
+    obs_norm = ObsNormalizer(state_dim)
+    for rollout_file in rollout_files:
+        rollout_path = await rollout_file.download()
+        with open(rollout_path) as f:
+            rollout_data = json.load(f)
+        worker_norm = ObsNormalizer(state_dim)
+        worker_norm.load_state_dict(rollout_data["obs_norm"])
+        obs_norm.merge(worker_norm)
+
+    # Load existing checkpoint
+    if checkpoint is not None:
+        local = await checkpoint.download()
+        ckpt = torch.load(local, map_location=device)
+        policy.load_state_dict(ckpt["policy"])
+        value_net.load_state_dict(ckpt["value"])
+        policy_optim.load_state_dict(ckpt["policy_optim"])
+        value_optim.load_state_dict(ckpt["value_optim"])
+        if "obs_norm" in ckpt:
+            # Start from checkpoint normalizer, then merge worker updates
+            base_norm = ObsNormalizer(state_dim)
+            base_norm.load_state_dict(ckpt["obs_norm"])
+            base_norm.merge(obs_norm)
+            obs_norm = base_norm
+
+    # Compute GAE on CPU, then move batches to GPU for training
     all_obs, all_actions, all_old_log_probs, all_advantages, all_returns = [], [], [], [], []
 
-    for ep in episodes:
+    for ep in all_episodes:
         raw_obs = np.array([t["obs"] for t in ep], dtype=np.float32)
         obs = torch.tensor(obs_norm.normalize(raw_obs).astype(np.float32))
         actions = torch.tensor([t["action"] for t in ep], dtype=torch.float32)
@@ -579,7 +640,7 @@ def ppo_update(episodes, policy, value_net, policy_optim, value_optim, obs_norm,
         old_log_probs = torch.tensor([t["log_prob"] for t in ep], dtype=torch.float32)
 
         with torch.no_grad():
-            values = value_net(obs).numpy()
+            values = value_net(obs.to(device)).cpu().numpy()
 
         T = len(rewards)
         advantages = np.zeros(T)
@@ -607,11 +668,11 @@ def ppo_update(episodes, policy, value_net, policy_optim, value_optim, obs_norm,
         all_advantages.append(torch.tensor(advantages, dtype=torch.float32))
         all_returns.append(torch.tensor(returns, dtype=torch.float32))
 
-    obs_batch = torch.cat(all_obs)
-    actions_batch = torch.cat(all_actions)
-    old_log_probs_batch = torch.cat(all_old_log_probs)
-    advantages_batch = torch.cat(all_advantages)
-    returns_batch = torch.cat(all_returns)
+    obs_batch = torch.cat(all_obs).to(device)
+    actions_batch = torch.cat(all_actions).to(device)
+    old_log_probs_batch = torch.cat(all_old_log_probs).to(device)
+    advantages_batch = torch.cat(all_advantages).to(device)
+    returns_batch = torch.cat(all_returns).to(device)
 
     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
 
@@ -656,7 +717,21 @@ def ppo_update(episodes, policy, value_net, policy_optim, value_optim, obs_norm,
             total_loss += policy_loss.item()
 
     num_updates = ppo_epochs * max(1, len(obs_batch) // batch_size)
-    return total_loss / num_updates
+    avg_loss = total_loss / num_updates
+
+    # Save checkpoint
+    path = "/tmp/ppo_checkpoint.pt"
+    torch.save({
+        "policy": {k: v.cpu() for k, v in policy.state_dict().items()},
+        "value": {k: v.cpu() for k, v in value_net.state_dict().items()},
+        "policy_optim": policy_optim.state_dict(),
+        "value_optim": value_optim.state_dict(),
+        "obs_norm": obs_norm.state_dict(),
+        "loss": avg_loss,
+        "state_dim": state_dim,
+        "action_dim": action_dim,
+    }, path)
+    return await File.from_local(path)
 
 
 def run_eval(policy, obs_norm, num_episodes, max_steps):
@@ -676,10 +751,11 @@ def run_eval(policy, obs_norm, num_episodes, max_steps):
         for _ in range(max_steps):
             if policy is not None:
                 with torch.no_grad():
+                    device = next(policy.parameters()).device
                     obs_normed = obs_norm.normalize(obs).astype(np.float32)
-                    obs_t = torch.tensor(obs_normed).unsqueeze(0)
+                    obs_t = torch.tensor(obs_normed).unsqueeze(0).to(device)
                     mean, _ = policy(obs_t)
-                    action = mean.squeeze(0).numpy()
+                    action = mean.squeeze(0).cpu().numpy()
             else:
                 action = env.action_space.sample()
 
@@ -751,10 +827,11 @@ async def evaluate(
 
             if policy is not None:
                 with torch.no_grad():
+                    device = next(policy.parameters()).device
                     obs_normed = obs_norm.normalize(obs).astype(np.float32)
-                    obs_t = torch.tensor(obs_normed).unsqueeze(0)
+                    obs_t = torch.tensor(obs_normed).unsqueeze(0).to(device)
                     mean, _ = policy(obs_t)
-                    action = mean.squeeze(0).numpy()
+                    action = mean.squeeze(0).cpu().numpy()
             else:
                 action = env.action_space.sample()
 
@@ -817,7 +894,6 @@ async def train_agent(
     3. Build final report with training curves + episode replays
     """
     import torch
-    import numpy as np
 
     log.info(f"Starting PPO training: {num_iterations} iterations, {episodes_per_iter} episodes each")
 
@@ -827,15 +903,12 @@ async def train_agent(
     )
     await flyte.report.flush.aio()
 
-    # ── Setup — all state lives in memory ─────────────────────────────
+    # ── Setup ─────────────────────────────────────────────────────────
     state_dim, action_dim = _get_dims()
-    policy, value_net, device = _build_policy_and_value(state_dim, action_dim)
-    policy_optim = torch.optim.Adam(policy.parameters(), lr=lr)
-    value_optim = torch.optim.Adam(value_net.parameters(), lr=lr)
     obs_norm = ObsNormalizer(state_dim)
 
     # Evaluate random baseline
-    baseline_mean, baseline_best = run_eval(None, obs_norm, num_episodes=5, max_steps=max_steps)
+    baseline_mean, _ = run_eval(None, obs_norm, num_episodes=5, max_steps=max_steps)
     baseline_reward = baseline_mean
     log.info(f"Random baseline: {baseline_reward:.1f}")
 
@@ -843,7 +916,7 @@ async def train_agent(
     best_reward = float("-inf")
     best_checkpoint_file = None
     history = []
-    checkpoint_file = None  # File on S3 for passing to parallel workers
+    checkpoint_file = None  # File on S3 for passing to workers + GPU task
 
     import asyncio
 
@@ -853,14 +926,10 @@ async def train_agent(
     for i in range(1, num_iterations + 1):
         log.info(f"── Iteration {i}/{num_iterations} ({num_workers} workers × {eps_per_worker} episodes) ──")
 
-        # Linear LR decay — full LR at start, 10% at end
+        # Linear LR decay
         iter_lr = lr * max(0.1, 1.0 - 0.9 * (i - 1) / max(1, num_iterations - 1))
-        for pg in policy_optim.param_groups:
-            pg["lr"] = iter_lr
-        for pg in value_optim.param_groups:
-            pg["lr"] = iter_lr
 
-        # Fan out rollout collection across parallel Flyte tasks
+        # Fan out rollout collection across parallel CPU workers
         rollout_files = await asyncio.gather(*[
             collect_rollouts(
                 checkpoint=checkpoint_file,
@@ -869,48 +938,29 @@ async def train_agent(
             )
             for _ in range(num_workers)
         ])
+        log.info(f"  Collected {eps_per_worker * num_workers} episodes from {num_workers} workers")
 
-        # Merge episodes from all workers
-        all_episodes = []
-        merged_obs_norm = ObsNormalizer(state_dim)
-        if checkpoint_file is not None:
-            # Start from current normalizer state
-            merged_obs_norm.load_state_dict(obs_norm.state_dict())
-
-        for rollout_file in rollout_files:
-            rollout_path = await rollout_file.download()
-            with open(rollout_path) as f:
-                rollout_data = json.load(f)
-            all_episodes.extend(rollout_data["episodes"])
-            # Merge normalizer stats from each worker
-            worker_norm = ObsNormalizer(state_dim)
-            worker_norm.load_state_dict(rollout_data["obs_norm"])
-            merged_obs_norm.merge(worker_norm)
-
-        obs_norm = merged_obs_norm
-        log.info(f"  Collected {len(all_episodes)} episodes from {num_workers} workers")
-
-        # PPO update (in-memory)
-        loss = ppo_update(
-            all_episodes, policy, value_net, policy_optim, value_optim, obs_norm,
+        # PPO update on GPU task — merges rollouts, updates policy, returns checkpoint
+        checkpoint_file = await ppo_update(
+            rollout_files=list(rollout_files),
+            checkpoint=checkpoint_file,
             ppo_epochs=ppo_epochs,
+            lr=iter_lr,
         )
 
-        # Evaluate (in-memory — fast)
-        eval_mean, eval_best = run_eval(policy, obs_norm, num_episodes=5, max_steps=max_steps)
+        # Load checkpoint for eval + tracking
+        local = await checkpoint_file.download()
+        ckpt = torch.load(local, map_location="cpu")
+        loss = ckpt.get("loss", 0.0)
+        obs_norm = ObsNormalizer(state_dim)
+        if "obs_norm" in ckpt:
+            obs_norm.load_state_dict(ckpt["obs_norm"])
 
-        # Save checkpoint for next iteration's workers
-        ckpt_path = "/tmp/ppo_checkpoint.pt"
-        torch.save({
-            "policy": policy.state_dict(),
-            "value": value_net.state_dict(),
-            "policy_optim": policy_optim.state_dict(),
-            "value_optim": value_optim.state_dict(),
-            "obs_norm": obs_norm.state_dict(),
-            "state_dim": state_dim,
-            "action_dim": action_dim,
-        }, ckpt_path)
-        checkpoint_file = await File.from_local(ckpt_path)
+        # Evaluate (in-memory on orchestrator — lightweight, no GPU needed)
+        policy, _, _ = _build_policy_and_value(state_dim, action_dim)
+        policy.load_state_dict(ckpt["policy"])
+        policy.eval()
+        eval_mean, eval_best = run_eval(policy, obs_norm, num_episodes=5, max_steps=max_steps)
 
         history.append({
             "iteration": i,
@@ -926,23 +976,12 @@ async def train_agent(
 
         log.info(f"  Reward: {eval_mean:.1f} | Loss: {loss:.4f}")
 
-        # Periodic checkpoint + replay via evaluate task
+        # Periodic replay via evaluate task
         if i % eval_every == 0 or i == num_iterations:
-            ckpt_path = f"/tmp/ppo_checkpoint_iter{i}.pt"
-            torch.save({
-                "policy": policy.state_dict(),
-                "value": value_net.state_dict(),
-                "policy_optim": policy_optim.state_dict(),
-                "value_optim": value_optim.state_dict(),
-                "obs_norm": obs_norm.state_dict(),
-                "state_dim": state_dim,
-                "action_dim": action_dim,
-            }, ckpt_path)
-            iter_checkpoint = await File.from_local(ckpt_path)
-            log.info(f"  Checkpoint saved — running replay for iteration {i}...")
+            log.info(f"  Running replay for iteration {i}...")
 
             replay_file = await evaluate(
-                checkpoint=iter_checkpoint,
+                checkpoint=checkpoint_file,
                 label=f"Iter {i}",
                 num_episodes=3,
                 max_steps=max_steps,
