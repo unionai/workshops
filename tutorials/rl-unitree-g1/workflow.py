@@ -459,47 +459,29 @@ def _build_policy_and_value(state_dim: int, action_dim: int):
     return Policy().to(device), Value().to(device), device
 
 
-# ── Tasks ────────────────────────────────────────────────────────────────────
+# ── Training helpers (run in-memory inside train_agent) ──────────────────────
 
 NUM_PARALLEL_ENVS = 32  # number of environments to run simultaneously
 
 
-@train_env.task
-async def collect_rollouts(
-    checkpoint: File | None,
-    num_episodes: int = 10,
-    max_steps: int = 1000,
-) -> File:
-    """Collect rollouts using vectorized parallel environments."""
+def collect_rollouts(policy, obs_norm, num_episodes, max_steps):
+    """Collect rollouts using vectorized parallel environments. Returns list of episodes."""
     import torch
     import numpy as np
     import gymnasium as gym
 
-    state_dim, action_dim = _get_dims()
-
-    policy, _, device = _build_policy_and_value(state_dim, action_dim)
-    obs_norm = ObsNormalizer(state_dim)
-
-    if checkpoint is not None:
-        local = await checkpoint.download()
-        ckpt = torch.load(local, map_location=device)
-        policy.load_state_dict(ckpt["policy"])
-        if "obs_norm" in ckpt:
-            obs_norm.load_state_dict(ckpt["obs_norm"])
     policy.eval()
 
     n_envs = min(NUM_PARALLEL_ENVS, num_episodes)
     envs = gym.vector.SyncVectorEnv([lambda: _make_env() for _ in range(n_envs)])
 
-    all_episodes = []       # completed episodes
-    # Per-env accumulators
+    all_episodes = []
     ep_transitions = [[] for _ in range(n_envs)]
 
     obs, _ = envs.reset()
     episodes_completed = 0
 
     while episodes_completed < num_episodes:
-        # Normalize and forward through policy
         obs_normed = obs_norm.normalize(obs).astype(np.float32)
         with torch.no_grad():
             obs_t = torch.from_numpy(obs_normed)
@@ -511,11 +493,8 @@ async def collect_rollouts(
             actions = actions_t.numpy()
 
         next_obs, rewards, terminateds, truncateds, infos = envs.step(actions)
-
-        # Update normalizer with raw observations
         obs_norm.update(obs)
 
-        # Record transitions for each env
         for i in range(n_envs):
             ep_transitions[i].append({
                 "obs": obs[i].tolist(),
@@ -526,7 +505,6 @@ async def collect_rollouts(
                 "truncated": bool(truncateds[i]),
             })
 
-            # If this env's episode ended, save it and start fresh
             if terminateds[i] or truncateds[i]:
                 all_episodes.append(ep_transitions[i])
                 ep_transitions[i] = []
@@ -537,56 +515,15 @@ async def collect_rollouts(
         obs = next_obs
 
     envs.close()
-
-    # Save rollouts + normalizer state
-    path = "/tmp/rollouts.json"
-    with open(path, "w") as f:
-        json.dump({"episodes": all_episodes, "obs_norm": obs_norm.state_dict()}, f)
-    return await File.from_local(path)
+    return all_episodes
 
 
-@train_env.task
-async def ppo_update(
-    rollouts_file: File,
-    checkpoint: File | None,
-    ppo_epochs: int = 5,
-    clip_eps: float = 0.2,
-    lr: float = 3e-5,
-    gamma: float = 0.95,
-    lam: float = 0.9,
-) -> File:
-    """Run PPO update on collected rollouts. Returns updated checkpoint."""
+def ppo_update(episodes, policy, value_net, policy_optim, value_optim, obs_norm,
+               ppo_epochs=5, clip_eps=0.2, gamma=0.95, lam=0.9):
+    """Run PPO update on collected episodes. Returns average loss."""
     import torch
     import numpy as np
 
-    rollouts_path = await rollouts_file.download()
-    with open(rollouts_path) as f:
-        rollout_data = json.load(f)
-    episodes = rollout_data["episodes"]
-    obs_norm_state = rollout_data["obs_norm"]
-
-    # Infer dims from the rollout data
-    state_dim = len(episodes[0][0]["obs"])
-    action_dim = len(episodes[0][0]["action"])
-
-    # Load observation normalizer from rollouts
-    obs_norm = ObsNormalizer(state_dim)
-    obs_norm.load_state_dict(obs_norm_state)
-
-    policy, value_net, device = _build_policy_and_value(state_dim, action_dim)
-    policy_optim = torch.optim.Adam(policy.parameters(), lr=lr)
-    value_optim = torch.optim.Adam(value_net.parameters(), lr=lr)
-
-    # Load existing checkpoint
-    if checkpoint is not None:
-        local = await checkpoint.download()
-        ckpt = torch.load(local, map_location=device)
-        policy.load_state_dict(ckpt["policy"])
-        value_net.load_state_dict(ckpt["value"])
-        policy_optim.load_state_dict(ckpt["policy_optim"])
-        value_optim.load_state_dict(ckpt["value_optim"])
-
-    # Flatten episodes into one batch with GAE computation
     all_obs, all_actions, all_old_log_probs, all_advantages, all_returns = [], [], [], [], []
 
     for ep in episodes:
@@ -596,11 +533,9 @@ async def ppo_update(
         rewards = [t["reward"] for t in ep]
         old_log_probs = torch.tensor([t["log_prob"] for t in ep], dtype=torch.float32)
 
-        # Compute values for normalized observations
         with torch.no_grad():
             values = value_net(obs).numpy()
 
-        # GAE — reverse sweep through the episode
         T = len(rewards)
         advantages = np.zeros(T)
         gae = 0.0
@@ -633,14 +568,12 @@ async def ppo_update(
     advantages_batch = torch.cat(all_advantages)
     returns_batch = torch.cat(all_returns)
 
-    # Normalize advantages
     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
 
     total_loss = 0.0
     entropy_coef = 0.002
     batch_size = min(512, len(obs_batch))
 
-    # PPO epochs with minibatch updates
     for _ in range(ppo_epochs):
         indices = torch.randperm(len(obs_batch))
         for start in range(0, len(obs_batch), batch_size):
@@ -651,7 +584,6 @@ async def ppo_update(
             mb_adv = advantages_batch[idx]
             mb_ret = returns_batch[idx]
 
-            # Policy loss with entropy bonus
             mean, log_std = policy(mb_obs)
             std = log_std.exp()
             dist = torch.distributions.Normal(mean, std)
@@ -668,7 +600,6 @@ async def ppo_update(
             torch.nn.utils.clip_grad_norm_(policy.parameters(), 2.0)
             policy_optim.step()
 
-            # Value loss
             values_pred = value_net(mb_obs)
             value_loss = (values_pred - mb_ret).pow(2).mean()
 
@@ -680,21 +611,42 @@ async def ppo_update(
             total_loss += policy_loss.item()
 
     num_updates = ppo_epochs * max(1, len(obs_batch) // batch_size)
-    avg_loss = total_loss / num_updates
+    return total_loss / num_updates
 
-    # Save checkpoint with dims and normalizer so other tasks can rebuild
-    path = "/tmp/ppo_checkpoint.pt"
-    torch.save({
-        "policy": policy.state_dict(),
-        "value": value_net.state_dict(),
-        "policy_optim": policy_optim.state_dict(),
-        "value_optim": value_optim.state_dict(),
-        "obs_norm": obs_norm.state_dict(),
-        "loss": avg_loss,
-        "state_dim": state_dim,
-        "action_dim": action_dim,
-    }, path)
-    return await File.from_local(path)
+
+def run_eval(policy, obs_norm, num_episodes, max_steps):
+    """Quick evaluation — returns mean and best reward. No rendering."""
+    import torch
+    import numpy as np
+
+    if policy is not None:
+        policy.eval()
+    all_rewards = []
+
+    for ep_idx in range(num_episodes):
+        env = _make_env()
+        obs, _ = env.reset(seed=ep_idx + 1000)
+        total_reward = 0.0
+
+        for _ in range(max_steps):
+            if policy is not None:
+                with torch.no_grad():
+                    obs_normed = obs_norm.normalize(obs).astype(np.float32)
+                    obs_t = torch.tensor(obs_normed).unsqueeze(0)
+                    mean, _ = policy(obs_t)
+                    action = mean.squeeze(0).numpy()
+            else:
+                action = env.action_space.sample()
+
+            obs, reward, terminated, truncated, _ = env.step(action)
+            total_reward += reward
+            if terminated or truncated:
+                break
+
+        env.close()
+        all_rewards.append(total_reward)
+
+    return sum(all_rewards) / len(all_rewards), max(all_rewards)
 
 
 @train_env.task(report=True)
@@ -704,6 +656,7 @@ async def evaluate(
     num_episodes: int = 5,
     max_steps: int = 1000,
     capture_frames: bool = True,
+    show_report: bool = True,
 ) -> File:
     """Evaluate a policy and capture MuJoCo frames for the best episode."""
     import torch
@@ -775,17 +728,18 @@ async def evaluate(
     mean_reward = sum(all_rewards) / len(all_rewards)
     log.info(f"[Eval] {label}: mean={mean_reward:.1f}, best={best_reward:.1f}")
 
-    report_html = (
-        f"<h3>{label}</h3>"
-        f"<p>Mean reward: {mean_reward:.1f} | Best: {best_reward:.1f}</p>"
-    )
-    if capture_frames and best_frames:
-        replay_html = generate_replay_html([
-            {"label": label, "reward": best_reward, "frames_b64": best_frames},
-        ])
-        report_html += replay_html
-    await flyte.report.replace.aio(report_html)
-    await flyte.report.flush.aio()
+    if show_report:
+        report_html = (
+            f"<h3>{label}</h3>"
+            f"<p>Mean reward: {mean_reward:.1f} | Best: {best_reward:.1f}</p>"
+        )
+        if capture_frames and best_frames:
+            replay_html = generate_replay_html([
+                {"label": label, "reward": best_reward, "frames_b64": best_frames},
+            ])
+            report_html += replay_html
+        await flyte.report.replace.aio(report_html)
+        await flyte.report.flush.aio()
 
     result_path = "/tmp/eval_result.json"
     with open(result_path, "w") as f:
@@ -807,6 +761,7 @@ async def train_agent(
     ppo_epochs: int = 5,
     max_steps: int = 1000,
     lr: float = 3e-5,
+    eval_every: int = 20,
 ) -> str:
     """
     PPO training loop for the Unitree G1 humanoid.
@@ -815,6 +770,9 @@ async def train_agent(
     2. For each iteration: collect rollouts -> PPO update -> evaluate
     3. Build final report with training curves + episode replays
     """
+    import torch
+    import numpy as np
+
     log.info(f"Starting PPO training: {num_iterations} iterations, {episodes_per_iter} episodes each")
 
     await flyte.report.replace.aio(
@@ -823,85 +781,119 @@ async def train_agent(
     )
     await flyte.report.flush.aio()
 
-    # ── Evaluate random baseline (no frames — we'll replay at the end) ──
-    baseline_file = await evaluate(
-        checkpoint=None, label="Random Policy",
-        num_episodes=5, max_steps=max_steps, capture_frames=False,
-    )
-    baseline_path = await baseline_file.download()
-    with open(baseline_path) as f:
-        baseline = json.load(f)
-    baseline_reward = baseline["mean_reward"]
+    # ── Setup — all state lives in memory ─────────────────────────────
+    state_dim, action_dim = _get_dims()
+    policy, value_net, device = _build_policy_and_value(state_dim, action_dim)
+    policy_optim = torch.optim.Adam(policy.parameters(), lr=lr)
+    value_optim = torch.optim.Adam(value_net.parameters(), lr=lr)
+    obs_norm = ObsNormalizer(state_dim)
+
+    # Evaluate random baseline
+    baseline_mean, baseline_best = run_eval(None, obs_norm, num_episodes=5, max_steps=max_steps)
+    baseline_reward = baseline_mean
     log.info(f"Random baseline: {baseline_reward:.1f}")
 
-    # ── Training loop ────────────────────────────────────────────────────
-    checkpoint = None
-    best_checkpoint = None
-    best_reward = float("-inf")
-    history = []
+    # ── Traced training steps (visible in Flyte UI, enable crash recovery) ──
 
-    import torch
+    # ── Training loop (all in-memory — no inter-task overhead) ────────
+    best_reward = float("-inf")
+    best_state = None
+    history = []
 
     for i in range(1, num_iterations + 1):
         log.info(f"── Iteration {i}/{num_iterations} ──")
 
         # Linear LR decay — full LR at start, 10% at end
         iter_lr = lr * max(0.1, 1.0 - 0.9 * (i - 1) / max(1, num_iterations - 1))
+        for pg in policy_optim.param_groups:
+            pg["lr"] = iter_lr
+        for pg in value_optim.param_groups:
+            pg["lr"] = iter_lr
 
-        # Collect rollouts with current policy
-        rollouts_file = await collect_rollouts(
-            checkpoint=checkpoint,
-            num_episodes=episodes_per_iter,
-            max_steps=max_steps,
-        )
-
-        # PPO update
-        checkpoint = await ppo_update(
-            rollouts_file=rollouts_file,
-            checkpoint=checkpoint,
+        # Collect → Update → Eval (all in-memory, no serialization)
+        episodes = collect_rollouts(policy, obs_norm, episodes_per_iter, max_steps)
+        loss = ppo_update(
+            episodes, policy, value_net, policy_optim, value_optim, obs_norm,
             ppo_epochs=ppo_epochs,
-            lr=iter_lr,
         )
+        eval_mean, eval_best = run_eval(policy, obs_norm, num_episodes=5, max_steps=max_steps)
 
-        # Read loss from checkpoint
-        local = await checkpoint.download()
-        ckpt = torch.load(local, map_location="cpu")
-        loss = ckpt.get("loss", 0.0)
-
-        # Evaluate — no frames during training, just reward numbers
-        eval_file = await evaluate(
-            checkpoint=checkpoint,
-            label=f"Iteration {i}",
-            num_episodes=5,
-            max_steps=max_steps,
-            capture_frames=False,
-        )
-        eval_path = await eval_file.download()
-        with open(eval_path) as f:
-            eval_result = json.load(f)
-
-        iter_reward = eval_result["mean_reward"]
         history.append({
             "iteration": i,
-            "eval_reward": iter_reward,
-            "best_reward": eval_result["best_reward"],
+            "eval_reward": eval_mean,
+            "best_reward": eval_best,
             "loss": loss,
         })
 
-        # Track best checkpoint
-        if iter_reward > best_reward:
-            best_reward = iter_reward
-            best_checkpoint = checkpoint
+        # Track best model
+        if eval_mean > best_reward:
+            best_reward = eval_mean
+            best_state = {
+                "policy": {k: v.clone() for k, v in policy.state_dict().items()},
+                "value": {k: v.clone() for k, v in value_net.state_dict().items()},
+                "obs_norm": obs_norm.state_dict(),
+                "state_dim": state_dim,
+                "action_dim": action_dim,
+            }
 
-        log.info(f"  Reward: {iter_reward:.1f} | Loss: {loss:.4f}")
+        log.info(f"  Reward: {eval_mean:.1f} | Loss: {loss:.4f}")
 
-        # Update main report after each iteration
+        # Periodic checkpoint + replay via evaluate task
+        if i % eval_every == 0 or i == num_iterations:
+            ckpt_path = f"/tmp/ppo_checkpoint_iter{i}.pt"
+            torch.save({
+                "policy": policy.state_dict(),
+                "value": value_net.state_dict(),
+                "policy_optim": policy_optim.state_dict(),
+                "value_optim": value_optim.state_dict(),
+                "obs_norm": obs_norm.state_dict(),
+                "state_dim": state_dim,
+                "action_dim": action_dim,
+            }, ckpt_path)
+            iter_checkpoint = await File.from_local(ckpt_path)
+            log.info(f"  Checkpoint saved — running replay for iteration {i}...")
+
+            replay_file = await evaluate(
+                checkpoint=iter_checkpoint,
+                label=f"Iter {i}",
+                num_episodes=3,
+                max_steps=max_steps,
+                capture_frames=True,
+            )
+            replay_path = await replay_file.download()
+            with open(replay_path) as f:
+                replay_data = json.load(f)
+            if replay_data.get("frames_b64"):
+                tab = flyte.report.get_tab(f"Iter {i}")
+                frames_json = json.dumps(replay_data["frames_b64"])
+                uid = f"iter{i}"
+                tab.log(
+                    f"<h3>Iteration {i}</h3><p>Reward: {replay_data['best_reward']:.1f}</p>"
+                    f'<div style="font-family:monospace;background:#0f0f23;color:#ccc;padding:12px;border-radius:8px;">'
+                    f'<img id="f-{uid}" src="data:image/jpeg;base64,{replay_data["frames_b64"][0]}" style="max-width:480px;display:block;border:2px solid #333;border-radius:4px;"/><br/>'
+                    f'<input type="range" id="s-{uid}" min="0" max="{len(replay_data["frames_b64"])-1}" value="0" style="width:480px;"/>'
+                    f' <span id="l-{uid}">Step 0/{len(replay_data["frames_b64"])-1}</span>'
+                    f'<script>(function(){{var F={frames_json};'
+                    f'var s=document.getElementById("s-{uid}"),i=document.getElementById("f-{uid}"),l=document.getElementById("l-{uid}");'
+                    f's.oninput=function(){{i.src="data:image/jpeg;base64,"+F[this.value];'
+                    f'l.textContent="Step "+this.value+"/{len(replay_data["frames_b64"])-1}";}};'
+                    f'}})();</script></div>'
+                )
+
+        # Update live report
         charts_html = generate_training_charts(history, baseline_reward)
         progress = generate_progress_html(history, baseline_reward, num_iterations)
         await flyte.report.replace.aio(
             f"<h2>Unitree G1 — RL Training</h2>{progress}<br/>{charts_html}"
         )
         await flyte.report.flush.aio()
+
+    # ── Save best checkpoint to disk for replay ──────────────────────
+    best_checkpoint = None
+    if best_state is not None:
+        ckpt_path = "/tmp/ppo_checkpoint.pt"
+        torch.save(best_state, ckpt_path)
+        best_checkpoint = await File.from_local(ckpt_path)
 
     # ── Replay best model and baseline with frames ─────────────────────
     log.info("Generating replay for best model and baseline...")
@@ -910,7 +902,7 @@ async def train_agent(
     # Baseline replay
     baseline_replay_file = await evaluate(
         checkpoint=None, label="Random Policy",
-        num_episodes=5, max_steps=max_steps, capture_frames=True,
+        num_episodes=5, max_steps=max_steps, capture_frames=True, show_report=False,
     )
     baseline_replay_path = await baseline_replay_file.download()
     with open(baseline_replay_path) as f:
@@ -923,7 +915,7 @@ async def train_agent(
         best_iter = max(history, key=lambda h: h["eval_reward"])
         best_replay_file = await evaluate(
             checkpoint=best_checkpoint, label=f"Best (Iter {best_iter['iteration']})",
-            num_episodes=5, max_steps=max_steps, capture_frames=True,
+            num_episodes=5, max_steps=max_steps, capture_frames=True, show_report=False,
         )
         best_replay_path = await best_replay_file.download()
         with open(best_replay_path) as f:
