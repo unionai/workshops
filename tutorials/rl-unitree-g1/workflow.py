@@ -102,7 +102,7 @@ class G1RewardWrapper:
     - Foot clearance (reward lifting swing foot during stride)
     """
 
-    def __init__(self, env):
+    def __init__(self, env, enable_gait_rewards=False):
         self.env = env
         # Expose gym.Env interface for SyncVectorEnv compatibility
         self.observation_space = env.observation_space
@@ -112,6 +112,9 @@ class G1RewardWrapper:
         self.render_mode = getattr(env, "render_mode", None)
         self.np_random = getattr(env, "np_random", None)
         self.prev_action = None
+
+        # Curriculum learning: gait rewards enabled in phase 2
+        self.enable_gait_rewards = enable_gait_rewards
 
         # Cache foot body IDs for contact detection
         model = env.unwrapped.model
@@ -132,13 +135,13 @@ class G1RewardWrapper:
         # 1. Velocity tracking — exponential kernel peaked at target speed
         x_vel = data.qvel[0]
         vel_error = (x_vel - TARGET_VELOCITY) ** 2
-        tracking_reward = 2.5 * np.exp(-vel_error / 0.25)
+        tracking_reward = 1.5 * np.exp(-vel_error / 0.25)
 
         # 2. Small alive bonus
         alive_bonus = 0.5
 
         # 3. Termination penalty — make falling very costly
-        death_penalty = -50.0 if terminated else 0.0
+        death_penalty = -75.0 if terminated else 0.0
 
         # 4. Vertical velocity penalty — don't bounce or fall
         z_vel = data.qvel[2]
@@ -160,41 +163,38 @@ class G1RewardWrapper:
         quat = data.qpos[3:7]
         # Tilt = 1 - w^2 (0 when upright, ~1 when sideways/fallen)
         tilt = 1.0 - quat[0] ** 2
-        orientation_penalty = -2.0 * tilt
+        orientation_penalty = -3.0 * tilt
 
         # 8. Control cost — moderate penalty for large torques
         ctrl_penalty = -0.01 * np.sum(action ** 2)
 
-        # 9. Foot contact alternation — reward single-stance, penalize double-stance
-        #    Uses contact force magnitude on each foot body (cfrc_ext = 6D wrench)
-        left_force = np.linalg.norm(data.cfrc_ext[self.left_foot_id, 3:6])
-        right_force = np.linalg.norm(data.cfrc_ext[self.right_foot_id, 3:6])
-        # Binary contact: force > threshold means foot is on ground
-        contact_threshold = 1.0
-        left_contact = float(left_force > contact_threshold)
-        right_contact = float(right_force > contact_threshold)
-        # Reward single stance (one foot on ground, one off) = alternating gait
-        # Penalize double stance (both feet planted = shuffling)
-        if left_contact != right_contact:
-            gait_reward = 0.5  # single stance — good, walking
-        elif left_contact and right_contact:
-            gait_reward = -0.3  # double stance — shuffling
-        else:
-            gait_reward = 0.0  # flight phase — neutral (happens during running)
+        # 9–10. Gait rewards (curriculum phase 2 only)
+        #   Phase 1: learn to walk forward without falling
+        #   Phase 2: refine gait with foot contact alternation + clearance
+        gait_reward = 0.0
+        clearance_reward = 0.0
+        if self.enable_gait_rewards:
+            # Foot contact alternation — reward single-stance, penalize double-stance
+            left_force = np.linalg.norm(data.cfrc_ext[self.left_foot_id, 3:6])
+            right_force = np.linalg.norm(data.cfrc_ext[self.right_foot_id, 3:6])
+            contact_threshold = 1.0
+            left_contact = float(left_force > contact_threshold)
+            right_contact = float(right_force > contact_threshold)
+            if left_contact != right_contact:
+                gait_reward = 0.5  # single stance — walking
+            elif left_contact and right_contact:
+                gait_reward = -0.1  # double stance — shuffling
 
-        # 10. Foot clearance — reward lifting the swing foot off the ground
-        #     Encourages actual stepping instead of sliding feet
-        left_foot_z = data.body(self.left_foot_id).xpos[2]
-        right_foot_z = data.body(self.right_foot_id).xpos[2]
-        # Reward the higher foot (swing foot) being above a threshold
-        swing_height = max(left_foot_z, right_foot_z)
-        # G1 foot at ~0.02m when on ground; reward lifting above 0.04m up to ~0.15m
-        clearance_reward = 0.4 * np.clip((swing_height - 0.03) / 0.10, 0.0, 1.0)
+            # Foot clearance — reward lifting the swing foot
+            left_foot_z = data.body(self.left_foot_id).xpos[2]
+            right_foot_z = data.body(self.right_foot_id).xpos[2]
+            swing_height = max(left_foot_z, right_foot_z)
+            clearance_reward = 0.4 * np.clip((swing_height - 0.03) / 0.10, 0.0, 1.0)
 
-        # Scale gait rewards by forward velocity — no reward for stepping in place
-        vel_scale = np.clip(x_vel / TARGET_VELOCITY, 0.0, 1.0)
-        gait_reward *= vel_scale
-        clearance_reward *= vel_scale
+            # Scale gait rewards by forward velocity — no reward for stepping in place
+            vel_scale = np.clip(x_vel / TARGET_VELOCITY, 0.0, 1.0)
+            gait_reward *= vel_scale
+            clearance_reward *= vel_scale
 
         reward = (
             tracking_reward
@@ -222,7 +222,7 @@ class G1RewardWrapper:
         return self.env.unwrapped
 
 
-def _make_env(render_mode=None):
+def _make_env(render_mode=None, enable_gait_rewards=False):
     """Create the Unitree G1 environment with custom reward shaping."""
     import gymnasium as gym
 
@@ -233,7 +233,7 @@ def _make_env(render_mode=None):
         render_mode=render_mode,
         **G1_ENV_KWARGS,
     )
-    return G1RewardWrapper(env)
+    return G1RewardWrapper(env, enable_gait_rewards=enable_gait_rewards)
 
 
 def _get_dims():
@@ -541,6 +541,7 @@ async def collect_rollouts(
     checkpoint: File | None,
     num_episodes: int = 100,
     max_steps: int = 1000,
+    enable_gait_rewards: bool = False,
 ) -> File:
     """Collect rollouts using vectorized parallel environments. Runs as a Flyte task for parallelism."""
     import torch
@@ -560,7 +561,7 @@ async def collect_rollouts(
     policy.eval()
 
     n_envs = min(NUM_PARALLEL_ENVS, num_episodes)
-    envs = gym.vector.SyncVectorEnv([lambda: _make_env() for _ in range(n_envs)])
+    envs = gym.vector.SyncVectorEnv([lambda: _make_env(enable_gait_rewards=enable_gait_rewards) for _ in range(n_envs)])
 
     all_episodes = []
     ep_transitions = [[] for _ in range(n_envs)]
@@ -916,7 +917,7 @@ async def evaluate(
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
-@train_env.task(report=True)
+@train_env.task(report=True, retries=3)
 async def train_agent(
     num_iterations: int = 15,
     episodes_per_iter: int = 20,
@@ -925,6 +926,7 @@ async def train_agent(
     lr: float = 3e-5,
     eval_every: int = 20,
     num_workers: int = 5,
+    resume_checkpoint: File | None = None,
 ) -> str:
     """
     PPO training loop for the Unitree G1 humanoid.
@@ -932,6 +934,9 @@ async def train_agent(
     1. Evaluate random baseline
     2. For each iteration: collect rollouts -> PPO update -> evaluate
     3. Build final report with training curves + episode replays
+
+    Pass resume_checkpoint to continue training from a previous run's checkpoint.
+    On retry, automatically resumes from the last saved progress.
     """
     import torch
 
@@ -957,14 +962,51 @@ async def train_agent(
     best_checkpoint_file = None
     history = []
     checkpoint_file = None  # File on S3 for passing to workers + GPU task
+    start_iter = 1
 
     import asyncio
+
+    # ── Resume from checkpoint (manual or retry) ──────────────────────
+    # Check for Flyte retry checkpoint first, then manual resume_checkpoint
+    ctx = flyte.ctx()
+    resume_from = None
+    if ctx.checkpoints and ctx.checkpoints.prev_checkpoint_path:
+        # Automatic retry — load progress from previous attempt
+        import pathlib
+        prev_path = pathlib.Path(ctx.checkpoints.prev_checkpoint_path) / "progress.json"
+        if prev_path.exists():
+            with open(prev_path) as f:
+                progress_state = json.load(f)
+            start_iter = progress_state["iteration"] + 1
+            history = progress_state["history"]
+            best_reward = progress_state["best_reward"]
+            resume_from = progress_state.get("checkpoint_uri")
+            log.info(f"Resuming from retry checkpoint: iteration {start_iter}, best reward {best_reward:.1f}")
+
+    if resume_from:
+        checkpoint_file = File.from_existing_remote(resume_from)
+        if best_reward > float("-inf"):
+            best_checkpoint_file = checkpoint_file
+    elif resume_checkpoint is not None:
+        # Manual resume — start from provided checkpoint
+        checkpoint_file = resume_checkpoint
+        best_checkpoint_file = resume_checkpoint
+        local = await checkpoint_file.download()
+        ckpt = torch.load(local, map_location="cpu")
+        if "obs_norm" in ckpt:
+            obs_norm.load_state_dict(ckpt["obs_norm"])
+        log.info("Resuming from provided checkpoint")
 
     # Episodes per worker — split evenly across parallel workers
     eps_per_worker = max(1, episodes_per_iter // num_workers)
 
-    for i in range(1, num_iterations + 1):
-        log.info(f"── Iteration {i}/{num_iterations} ({num_workers} workers × {eps_per_worker} episodes) ──")
+    # Curriculum: gait rewards activate halfway through training
+    gait_start_iter = num_iterations // 2
+
+    for i in range(start_iter, num_iterations + 1):
+        use_gait = i >= gait_start_iter
+        phase = "Phase 2 (gait)" if use_gait else "Phase 1 (locomotion)"
+        log.info(f"── Iteration {i}/{num_iterations} [{phase}] ({num_workers} workers × {eps_per_worker} episodes) ──")
 
         # Linear LR decay
         iter_lr = lr * max(0.1, 1.0 - 0.9 * (i - 1) / max(1, num_iterations - 1))
@@ -975,6 +1017,7 @@ async def train_agent(
                 checkpoint=checkpoint_file,
                 num_episodes=eps_per_worker,
                 max_steps=max_steps,
+                enable_gait_rewards=use_gait,
             )
             for _ in range(num_workers)
         ])
@@ -1015,6 +1058,19 @@ async def train_agent(
             best_checkpoint_file = checkpoint_file
 
         log.info(f"  Reward: {eval_mean:.1f} | Loss: {loss:.4f}")
+
+        # Save progress for retry resumption
+        if ctx.checkpoints and ctx.checkpoints.checkpoint_path:
+            import pathlib
+            ckpt_dir = pathlib.Path(ctx.checkpoints.checkpoint_path)
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            with open(ckpt_dir / "progress.json", "w") as f:
+                json.dump({
+                    "iteration": i,
+                    "history": history,
+                    "best_reward": best_reward,
+                    "checkpoint_uri": checkpoint_file.path if checkpoint_file else None,
+                }, f)
 
         # Periodic replay via evaluate task
         if i % eval_every == 0 or i == num_iterations:

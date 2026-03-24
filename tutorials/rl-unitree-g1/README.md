@@ -90,14 +90,31 @@ flyte run workflow.py train_agent \
 
 ## Replay any checkpoint
 
-The `evaluate` task can be run standalone on any checkpoint from a previous run:
+The `evaluate` task can be run standalone on any checkpoint from a previous run. Grab the `ppo_update` output URI from the Flyte UI and pass it in:
 
 ```bash
-flyte run --local workflow.py evaluate \
-  --checkpoint <path-to-checkpoint.pt> \
+flyte run workflow.py evaluate \
+  --checkpoint s3://your-bucket/path/to/ppo_checkpoint.pt \
   --label "My replay" \
-  --capture_frames true
+  --capture_frames
 ```
+
+This is useful for checking what the robot looks like mid-training without waiting for the full run to finish — just grab the latest `ppo_update` checkpoint from the Flyte UI.
+
+## Resume training
+
+Training can be resumed from any checkpoint. If a run crashes or you want to extend training, pass the last checkpoint:
+
+```bash
+flyte run workflow.py train_agent \
+  --num_iterations 40 \
+  --episodes_per_iter 500 \
+  --max_steps 1000 \
+  --num_workers 5 \
+  --resume_checkpoint s3://your-bucket/path/to/ppo_checkpoint.pt
+```
+
+On retries, `train_agent` automatically resumes from the last completed iteration — no manual intervention needed.
 
 ## How it works
 
