@@ -98,6 +98,8 @@ class G1RewardWrapper:
     - Angular velocity penalty (don't tumble)
     - Action rate penalty (smooth movements)
     - Orientation penalty (stay upright)
+    - Foot contact alternation (reward single-foot stance, penalize double stance)
+    - Foot clearance (reward lifting swing foot during stride)
     """
 
     def __init__(self, env):
@@ -110,6 +112,11 @@ class G1RewardWrapper:
         self.render_mode = getattr(env, "render_mode", None)
         self.np_random = getattr(env, "np_random", None)
         self.prev_action = None
+
+        # Cache foot body IDs for contact detection
+        model = env.unwrapped.model
+        self.left_foot_id = model.body("left_ankle_roll_link").id
+        self.right_foot_id = model.body("right_ankle_roll_link").id
 
     def reset(self, **kwargs):
         self.prev_action = None
@@ -125,7 +132,7 @@ class G1RewardWrapper:
         # 1. Velocity tracking — exponential kernel peaked at target speed
         x_vel = data.qvel[0]
         vel_error = (x_vel - TARGET_VELOCITY) ** 2
-        tracking_reward = 1.5 * np.exp(-vel_error / 0.25)
+        tracking_reward = 2.5 * np.exp(-vel_error / 0.25)
 
         # 2. Small alive bonus
         alive_bonus = 0.5
@@ -158,6 +165,37 @@ class G1RewardWrapper:
         # 8. Control cost — moderate penalty for large torques
         ctrl_penalty = -0.01 * np.sum(action ** 2)
 
+        # 9. Foot contact alternation — reward single-stance, penalize double-stance
+        #    Uses contact force magnitude on each foot body (cfrc_ext = 6D wrench)
+        left_force = np.linalg.norm(data.cfrc_ext[self.left_foot_id, 3:6])
+        right_force = np.linalg.norm(data.cfrc_ext[self.right_foot_id, 3:6])
+        # Binary contact: force > threshold means foot is on ground
+        contact_threshold = 1.0
+        left_contact = float(left_force > contact_threshold)
+        right_contact = float(right_force > contact_threshold)
+        # Reward single stance (one foot on ground, one off) = alternating gait
+        # Penalize double stance (both feet planted = shuffling)
+        if left_contact != right_contact:
+            gait_reward = 0.5  # single stance — good, walking
+        elif left_contact and right_contact:
+            gait_reward = -0.3  # double stance — shuffling
+        else:
+            gait_reward = 0.0  # flight phase — neutral (happens during running)
+
+        # 10. Foot clearance — reward lifting the swing foot off the ground
+        #     Encourages actual stepping instead of sliding feet
+        left_foot_z = data.body(self.left_foot_id).xpos[2]
+        right_foot_z = data.body(self.right_foot_id).xpos[2]
+        # Reward the higher foot (swing foot) being above a threshold
+        swing_height = max(left_foot_z, right_foot_z)
+        # G1 foot at ~0.02m when on ground; reward lifting above 0.04m up to ~0.15m
+        clearance_reward = 0.4 * np.clip((swing_height - 0.03) / 0.10, 0.0, 1.0)
+
+        # Scale gait rewards by forward velocity — no reward for stepping in place
+        vel_scale = np.clip(x_vel / TARGET_VELOCITY, 0.0, 1.0)
+        gait_reward *= vel_scale
+        clearance_reward *= vel_scale
+
         reward = (
             tracking_reward
             + alive_bonus
@@ -167,6 +205,8 @@ class G1RewardWrapper:
             + action_rate_penalty
             + orientation_penalty
             + ctrl_penalty
+            + gait_reward
+            + clearance_reward
         )
 
         return obs, float(reward), terminated, truncated, info

@@ -115,10 +115,14 @@ The default Gymnasium Humanoid-v5 reward (`alive_bonus + forward_velocity - ctrl
 | Angular velocity | -0.15 | Penalize roll/pitch rate — don't tumble |
 | Action rate | -0.01 | Penalize jerky actions (`(a_t - a_{t-1})^2`) — smooth walking |
 | Control cost | -0.01 | Moderate penalty for large joint torques |
+| Gait alternation | +0.5 / -0.3 | Reward single-foot stance (one foot on, one off), penalize double stance (both feet planted = shuffling) |
+| Foot clearance | +0.4 | Reward lifting the swing foot off the ground — encourages actual stepping instead of sliding feet |
 
 The key insight: **velocity tracking with an exponential kernel** creates a clear optimum at the target speed. Unlike raw forward velocity reward, there's no incentive to fall forward faster — the reward peaks at 0.8 m/s and decays for anything faster or slower.
 
-This reward structure follows the same pattern used by real humanoid locomotion projects — [legged_gym](https://github.com/leggedrobotics/legged_gym) (ETH Zurich / NVIDIA) and [MuJoCo Playground](https://playground.mujoco.org/) (Google DeepMind) both use velocity tracking with exponential kernels, orientation penalties, and stability rewards as the foundation for sim-to-real humanoid walking. Production systems add domain randomization, curriculum learning, and foot contact rewards on top, but the core reward structure is the same.
+The **gait rewards** (contact alternation + foot clearance) address a common problem where the robot learns to shuffle with tiny movements instead of taking real steps. By rewarding single-foot stance and penalizing double stance, the policy learns to alternate feet. The foot clearance term ensures the swing foot actually lifts off the ground rather than sliding. These terms follow the same pattern used by [legged_gym](https://github.com/leggedrobotics/legged_gym) (ETH Zurich / NVIDIA) for sim-to-real humanoid walking.
+
+This reward structure follows the same pattern used by real humanoid locomotion projects — [legged_gym](https://github.com/leggedrobotics/legged_gym) (ETH Zurich / NVIDIA) and [MuJoCo Playground](https://playground.mujoco.org/) (Google DeepMind) both use velocity tracking with exponential kernels, orientation penalties, and stability rewards as the foundation for sim-to-real humanoid walking. Production systems add domain randomization and curriculum learning on top, but the core reward structure is the same.
 
 ### PPO (Proximal Policy Optimization)
 
@@ -136,6 +140,23 @@ Rollout collection is the training bottleneck — the robot needs to run hundred
 2. **Within each worker** — each worker uses `gymnasium.vector.SyncVectorEnv` to run **32 MuJoCo simulations simultaneously**. Each `env.step()` advances all 32 environments at once.
 
 Combined: 5 workers × 32 envs = **160 parallel simulations per iteration**. After all workers finish, their episodes and observation normalizer statistics are merged, and PPO updates the policy in-memory.
+
+### Task environments
+
+The pipeline uses three separate Flyte `TaskEnvironment`s so each task gets only the resources it needs:
+
+| Environment | Tasks | Resources | Why |
+|-------------|-------|-----------|-----|
+| `worker_env` | `collect_rollouts`, `evaluate` | 2 CPU, 8 GiB | Lightweight — many run in parallel for rollout collection and evaluation. MuJoCo simulation is CPU-bound. |
+| `gpu_env` | `ppo_update` | 4 CPU, 24 GiB, 1 GPU | GPU for neural network gradient updates. Only allocated briefly each iteration — not held during rollout collection. |
+| `train_env` | `train_agent` | 2 CPU, 8 GiB | Orchestrator — just coordinates workers and the GPU task via `asyncio.gather`. No heavy compute. |
+
+This separation matters for cost and efficiency:
+- **Workers are cheap** — 2 CPU / 8 GiB each, so spinning up 5–10 in parallel is affordable
+- **GPU is expensive** — only allocated during `ppo_update` (a few seconds per iteration), then released while workers collect the next batch of rollouts
+- **Orchestrator is lightweight** — doesn't need GPU or much memory, just dispatches tasks and merges results
+
+All three environments share the same container image (MuJoCo + PyTorch + mujoco_menagerie). The `train_env` uses `depends_on=[worker_env, gpu_env]` so Flyte knows to build all three images together.
 
 ### Observation normalization
 
