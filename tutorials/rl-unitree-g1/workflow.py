@@ -34,22 +34,27 @@ log.setLevel(logging.INFO)
 
 # ── Environments ─────────────────────────────────────────────────────────────
 
+g1_image = flyte.Image.from_debian_base().with_apt_packages(
+    "libegl1", "libegl-mesa0", "libgl1", "libgl1-mesa-dri", "libgles2", "libglx-mesa0", "git",
+).with_pip_packages(
+    "gymnasium[mujoco]", "torch", "numpy", "Pillow", "matplotlib", "unionai-reuse",
+).with_commands([
+    "git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie.git /opt/mujoco_menagerie",
+])
+
+# Workers — lightweight, many run in parallel
+worker_env = flyte.TaskEnvironment(
+    name="unitree-g1-worker",
+    image=g1_image,
+    resources=flyte.Resources(cpu=2, memory="8Gi"),
+)
+
+# Orchestrator — needs more memory for merging rollouts + PPO update
 train_env = flyte.TaskEnvironment(
-    name="unitree-g1-rl",
-    image=flyte.Image.from_debian_base().with_apt_packages(
-        "libegl1", "libegl-mesa0", "libgl1", "libgl1-mesa-dri", "libgles2", "libglx-mesa0", "git",
-    ).with_pip_packages(
-        "gymnasium[mujoco]", "torch", "numpy", "Pillow", "matplotlib", "unionai-reuse",
-    ).with_commands([
-        "git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie.git /opt/mujoco_menagerie",
-    ]),
-    resources=flyte.Resources(cpu=8, memory="16Gi"),
-    reusable=flyte.ReusePolicy(
-        replicas=2,
-        idle_ttl=60,
-        concurrency=10,
-        scaledown_ttl=60,
-    ),
+    name="unitree-g1-train",
+    image=g1_image,
+    resources=flyte.Resources(cpu=4, memory="24Gi"),
+    depends_on=[worker_env],
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -420,6 +425,26 @@ class ObsNormalizer:
         self.var = np.array(d["var"], dtype=np.float64)
         self.count = d["count"]
 
+    def merge(self, other):
+        """Merge stats from another normalizer (for combining parallel workers)."""
+        import numpy as np
+        if other.count == 0:
+            return
+        if self.count == 0:
+            self.mean = other.mean.copy()
+            self.var = other.var.copy()
+            self.count = other.count
+            return
+        delta = other.mean - self.mean
+        total = self.count + other.count
+        new_mean = self.mean + delta * other.count / total
+        m_a = self.var * self.count
+        m_b = other.var * other.count
+        m2 = m_a + m_b + delta**2 * self.count * other.count / total
+        self.mean = new_mean
+        self.var = m2 / total
+        self.count = total
+
 
 # ── Policy network ───────────────────────────────────────────────────────────
 
@@ -459,17 +484,32 @@ def _build_policy_and_value(state_dim: int, action_dim: int):
     return Policy().to(device), Value().to(device), device
 
 
-# ── Training helpers (run in-memory inside train_agent) ──────────────────────
+# ── Rollout collection (Flyte task — fans out in parallel) ───────────────────
 
-NUM_PARALLEL_ENVS = 32  # number of environments to run simultaneously
+NUM_PARALLEL_ENVS = 32  # number of environments to run simultaneously per worker
 
 
-def collect_rollouts(policy, obs_norm, num_episodes, max_steps):
-    """Collect rollouts using vectorized parallel environments. Returns list of episodes."""
+@worker_env.task(retries=5)
+async def collect_rollouts(
+    checkpoint: File | None,
+    num_episodes: int = 100,
+    max_steps: int = 1000,
+) -> File:
+    """Collect rollouts using vectorized parallel environments. Runs as a Flyte task for parallelism."""
     import torch
     import numpy as np
     import gymnasium as gym
 
+    state_dim, action_dim = _get_dims()
+    policy, _, device = _build_policy_and_value(state_dim, action_dim)
+    obs_norm = ObsNormalizer(state_dim)
+
+    if checkpoint is not None:
+        local = await checkpoint.download()
+        ckpt = torch.load(local, map_location=device)
+        policy.load_state_dict(ckpt["policy"])
+        if "obs_norm" in ckpt:
+            obs_norm.load_state_dict(ckpt["obs_norm"])
     policy.eval()
 
     n_envs = min(NUM_PARALLEL_ENVS, num_episodes)
@@ -515,7 +555,12 @@ def collect_rollouts(policy, obs_norm, num_episodes, max_steps):
         obs = next_obs
 
     envs.close()
-    return all_episodes
+
+    # Save rollouts + normalizer state
+    path = "/tmp/rollouts.json"
+    with open(path, "w") as f:
+        json.dump({"episodes": all_episodes, "obs_norm": obs_norm.state_dict()}, f)
+    return await File.from_local(path)
 
 
 def ppo_update(episodes, policy, value_net, policy_optim, value_optim, obs_norm,
@@ -649,7 +694,7 @@ def run_eval(policy, obs_norm, num_episodes, max_steps):
     return sum(all_rewards) / len(all_rewards), max(all_rewards)
 
 
-@train_env.task(report=True)
+@worker_env.task(report=True, retries=5)
 async def evaluate(
     checkpoint: File | None,
     label: str = "Random",
@@ -762,6 +807,7 @@ async def train_agent(
     max_steps: int = 1000,
     lr: float = 3e-5,
     eval_every: int = 20,
+    num_workers: int = 5,
 ) -> str:
     """
     PPO training loop for the Unitree G1 humanoid.
@@ -793,15 +839,19 @@ async def train_agent(
     baseline_reward = baseline_mean
     log.info(f"Random baseline: {baseline_reward:.1f}")
 
-    # ── Traced training steps (visible in Flyte UI, enable crash recovery) ──
-
-    # ── Training loop (all in-memory — no inter-task overhead) ────────
+    # ── Training loop ────────────────────────────────────────────────
     best_reward = float("-inf")
-    best_state = None
+    best_checkpoint_file = None
     history = []
+    checkpoint_file = None  # File on S3 for passing to parallel workers
+
+    import asyncio
+
+    # Episodes per worker — split evenly across parallel workers
+    eps_per_worker = max(1, episodes_per_iter // num_workers)
 
     for i in range(1, num_iterations + 1):
-        log.info(f"── Iteration {i}/{num_iterations} ──")
+        log.info(f"── Iteration {i}/{num_iterations} ({num_workers} workers × {eps_per_worker} episodes) ──")
 
         # Linear LR decay — full LR at start, 10% at end
         iter_lr = lr * max(0.1, 1.0 - 0.9 * (i - 1) / max(1, num_iterations - 1))
@@ -810,13 +860,57 @@ async def train_agent(
         for pg in value_optim.param_groups:
             pg["lr"] = iter_lr
 
-        # Collect → Update → Eval (all in-memory, no serialization)
-        episodes = collect_rollouts(policy, obs_norm, episodes_per_iter, max_steps)
+        # Fan out rollout collection across parallel Flyte tasks
+        rollout_files = await asyncio.gather(*[
+            collect_rollouts(
+                checkpoint=checkpoint_file,
+                num_episodes=eps_per_worker,
+                max_steps=max_steps,
+            )
+            for _ in range(num_workers)
+        ])
+
+        # Merge episodes from all workers
+        all_episodes = []
+        merged_obs_norm = ObsNormalizer(state_dim)
+        if checkpoint_file is not None:
+            # Start from current normalizer state
+            merged_obs_norm.load_state_dict(obs_norm.state_dict())
+
+        for rollout_file in rollout_files:
+            rollout_path = await rollout_file.download()
+            with open(rollout_path) as f:
+                rollout_data = json.load(f)
+            all_episodes.extend(rollout_data["episodes"])
+            # Merge normalizer stats from each worker
+            worker_norm = ObsNormalizer(state_dim)
+            worker_norm.load_state_dict(rollout_data["obs_norm"])
+            merged_obs_norm.merge(worker_norm)
+
+        obs_norm = merged_obs_norm
+        log.info(f"  Collected {len(all_episodes)} episodes from {num_workers} workers")
+
+        # PPO update (in-memory)
         loss = ppo_update(
-            episodes, policy, value_net, policy_optim, value_optim, obs_norm,
+            all_episodes, policy, value_net, policy_optim, value_optim, obs_norm,
             ppo_epochs=ppo_epochs,
         )
+
+        # Evaluate (in-memory — fast)
         eval_mean, eval_best = run_eval(policy, obs_norm, num_episodes=5, max_steps=max_steps)
+
+        # Save checkpoint for next iteration's workers
+        ckpt_path = "/tmp/ppo_checkpoint.pt"
+        torch.save({
+            "policy": policy.state_dict(),
+            "value": value_net.state_dict(),
+            "policy_optim": policy_optim.state_dict(),
+            "value_optim": value_optim.state_dict(),
+            "obs_norm": obs_norm.state_dict(),
+            "state_dim": state_dim,
+            "action_dim": action_dim,
+        }, ckpt_path)
+        checkpoint_file = await File.from_local(ckpt_path)
 
         history.append({
             "iteration": i,
@@ -828,13 +922,7 @@ async def train_agent(
         # Track best model
         if eval_mean > best_reward:
             best_reward = eval_mean
-            best_state = {
-                "policy": {k: v.clone() for k, v in policy.state_dict().items()},
-                "value": {k: v.clone() for k, v in value_net.state_dict().items()},
-                "obs_norm": obs_norm.state_dict(),
-                "state_dim": state_dim,
-                "action_dim": action_dim,
-            }
+            best_checkpoint_file = checkpoint_file
 
         log.info(f"  Reward: {eval_mean:.1f} | Loss: {loss:.4f}")
 
@@ -888,40 +976,34 @@ async def train_agent(
         )
         await flyte.report.flush.aio()
 
-    # ── Save best checkpoint to disk for replay ──────────────────────
-    best_checkpoint = None
-    if best_state is not None:
-        ckpt_path = "/tmp/ppo_checkpoint.pt"
-        torch.save(best_state, ckpt_path)
-        best_checkpoint = await File.from_local(ckpt_path)
-
     # ── Replay best model and baseline with frames ─────────────────────
     log.info("Generating replay for best model and baseline...")
     replays = []
 
-    # Baseline replay
-    baseline_replay_file = await evaluate(
-        checkpoint=None, label="Random Policy",
-        num_episodes=5, max_steps=max_steps, capture_frames=True, show_report=False,
-    )
-    baseline_replay_path = await baseline_replay_file.download()
-    with open(baseline_replay_path) as f:
-        baseline_replay = json.load(f)
-    if baseline_replay.get("frames_b64"):
-        replays.append({"label": "Random Policy", "reward": baseline_replay["best_reward"], "frames_b64": baseline_replay["frames_b64"]})
-
-    # Best model replay — run 5 episodes, keep frames from the best one
-    if best_checkpoint is not None:
-        best_iter = max(history, key=lambda h: h["eval_reward"])
-        best_replay_file = await evaluate(
-            checkpoint=best_checkpoint, label=f"Best (Iter {best_iter['iteration']})",
-            num_episodes=5, max_steps=max_steps, capture_frames=True, show_report=False,
+    # Run baseline and best model replays in parallel
+    best_iter = max(history, key=lambda h: h["eval_reward"]) if history else None
+    replay_tasks = [
+        evaluate(checkpoint=None, label="Random Policy",
+                 num_episodes=5, max_steps=max_steps, capture_frames=True, show_report=False),
+    ]
+    if best_checkpoint_file is not None:
+        replay_tasks.append(
+            evaluate(checkpoint=best_checkpoint_file, label=f"Best (Iter {best_iter['iteration']})",
+                     num_episodes=5, max_steps=max_steps, capture_frames=True, show_report=False),
         )
-        best_replay_path = await best_replay_file.download()
-        with open(best_replay_path) as f:
-            best_replay = json.load(f)
-        if best_replay.get("frames_b64"):
-            replays.append({"label": f"Best (Iter {best_iter['iteration']})", "reward": best_replay["best_reward"], "frames_b64": best_replay["frames_b64"]})
+    replay_files = await asyncio.gather(*replay_tasks)
+
+    # Process results
+    replay_labels = ["Random Policy"]
+    if best_checkpoint_file is not None:
+        replay_labels.append(f"Best (Iter {best_iter['iteration']})")
+
+    for replay_file, label in zip(replay_files, replay_labels):
+        replay_path = await replay_file.download()
+        with open(replay_path) as f:
+            replay_data = json.load(f)
+        if replay_data.get("frames_b64"):
+            replays.append({"label": label, "reward": replay_data["best_reward"], "frames_b64": replay_data["frames_b64"]})
 
     # Add replay tabs
     for idx, ep in enumerate(replays):
