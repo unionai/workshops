@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoresearch"
+version = "0.1.0"
+description = "Autoresearch-tutorial: self-healing LM agent on Flyte (see README.md)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastparquet",
+    "flyte>=2",
+    "httpx",
+    "numpy",
+    "pyarrow",
+    "requests",
+    "rustbpe",
+    "tiktoken",
+    "torch",
+]
+
+[tool.setuptools]
+py-modules = [
+    "autoresearch_agent",
+    "autoresearch_types",
+    "prepare",
+    "report",
+    "train",
+]
