@@ -8,6 +8,12 @@ explicit recovery paths.
 
 # Setup
 
+Go to the autoresearch project directory:
+
+```bash
+cd tutorials/autoresearch
+```
+
 Install dependencies and activate the virtual environment:
 
 ```bash
