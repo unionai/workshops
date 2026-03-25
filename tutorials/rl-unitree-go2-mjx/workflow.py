@@ -116,33 +116,36 @@ def _make_go2_env():
         def step(self, state, action):
             data = self.pipeline_step(state.pipeline_state, action)
 
-            # Forward velocity — linear, zero at standstill, 5.0 at target
-            x_vel = data.qvel[0]
-            tracking_reward = 5.0 * jp.clip(x_vel / TARGET_VELOCITY, 0.0, 1.0)
-
-            # Alive bonus — small so velocity dominates
-            alive_bonus = 0.2
-
-            # Orientation penalty — stay level
-            quat = data.qpos[3:7]
-            tilt = 1.0 - quat[0] ** 2
-            orientation_penalty = -1.0 * tilt
-
-            # Vertical velocity penalty
-            z_vel = data.qvel[2]
-            z_vel_penalty = -1.0 * z_vel ** 2
-
-            # Control cost
-            ctrl_penalty = -0.005 * jp.sum(action ** 2)
-
-            reward = tracking_reward + alive_bonus + orientation_penalty + z_vel_penalty + ctrl_penalty
-
-            # Termination — body too low or too high
             z_pos = data.qpos[2]
-            done = jp.where((z_pos < 0.15) | (z_pos > 0.6), 1.0, 0.0)
 
-            # Death penalty applied when done
-            reward = jp.where(done > 0, reward - 50.0, reward)
+            # 1. Forward velocity — main driver
+            x_vel = data.qvel[0]
+            tracking_reward = 3.0 * jp.clip(x_vel / TARGET_VELOCITY, 0.0, 1.0)
+
+            # 2. Standing pose regularization — THE KEY anti-sitting reward
+            #    Penalizes joint angles that deviate from default standing pose.
+            #    Sitting requires deeply bent hind legs → big penalty.
+            joint_angles = data.qpos[7:]  # skip free joint (3 pos + 4 quat)
+            default_joints = self._default_qpos[7:]
+            pose_penalty = -1.0 * jp.sum((joint_angles - default_joints) ** 2)
+
+            # 3. Height reward — encourages standing tall
+            height_reward = 1.0 * jp.clip((z_pos - 0.20) / 0.15, 0.0, 1.0)
+
+            # 4. Upright bonus — torso z-axis pointing up
+            quat = data.qpos[3:7]
+            upright_reward = 0.5 * quat[0] ** 2
+
+            # 5. Small control cost
+            ctrl_penalty = -0.001 * jp.sum(action ** 2)
+
+            reward = tracking_reward + pose_penalty + height_reward + upright_reward + ctrl_penalty
+
+            # Termination at 0.18m (lowered back — pose penalty handles sitting)
+            done = jp.where((z_pos < 0.18) | (z_pos > 0.6), 1.0, 0.0)
+
+            # Death penalty
+            reward = jp.where(done > 0, reward - 5.0, reward)
 
             obs = self._get_obs(data)
             return state.replace(
@@ -256,7 +259,7 @@ def generate_replay_html(episodes: list[dict]) -> str:
 
 # ── GPU Training Task ────────────────────────────────────────────────────────
 
-@gpu_env.task(retries=3, cache="auto")
+@gpu_env.task(retries=3)
 async def train_on_gpu(
     num_timesteps: int = 20_000_000,
     num_envs: int = 4096,
@@ -363,14 +366,16 @@ async def render_replay(
     frame_every = 5
     max_frames = 100
 
-    xml_path = "/opt/mujoco_menagerie/unitree_go2/scene.xml"
-
+    # MUST use same model as training (scene_mjx.xml) so joints/DOFs match
     for ep_idx in range(num_episodes):
-        mj_model_render = mujoco.MjModel.from_xml_path(xml_path)
+        mj_model_render = mujoco.MjModel.from_xml_path(GO2_XML_PATH)
         mj_data = mujoco.MjData(mj_model_render)
         renderer = mujoco.Renderer(mj_model_render, width=320, height=240)
 
-        mujoco.mj_resetData(mj_model_render, mj_data)
+        # Start in standing pose (matching training reset)
+        if mj_model_render.nkey > 0:
+            mj_data.qpos[:] = mj_model_render.key_qpos[0]
+        mujoco.mj_forward(mj_model_render, mj_data)
         total_reward = 0.0
         frames = []
 
