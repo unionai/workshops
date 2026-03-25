@@ -11,6 +11,7 @@ explicit recovery paths.
 Install dependencies and activate the virtual environment:
 
 ```bash
+pip install uv
 uv sync
 source .venv/bin/activate
 ```
