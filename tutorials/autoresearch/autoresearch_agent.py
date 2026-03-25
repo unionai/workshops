@@ -27,7 +27,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import flyteplugins.hitl as hitl
 import prepare
 import train
 from autoresearch_types import AutoresearchMetrics, AutoresearchOutput, DatasetProfile, HistoryEntry
@@ -66,7 +65,7 @@ agent_env = flyte.TaskEnvironment(
     resources=flyte.Resources(cpu=1, memory="1Gi"),
     secrets=[flyte.Secret(key="internal-anthropic-api-key", as_env_var="ANTHROPIC_API_KEY")],
     image=image,
-    depends_on=[experiment_env, hitl.env],
+    depends_on=[experiment_env],
 )
 
 
