@@ -56,13 +56,13 @@ image = flyte.Image.from_debian_base(name="autoresearch-agent-image").with_pip_p
 
 experiment_env = flyte.TaskEnvironment(
     name="autoresearch-experiment",
-    resources=flyte.Resources(cpu=4, memory="8Gi"),
+    resources=flyte.Resources(cpu=1, memory="2Gi"),
     image=image,
 )
 
 agent_env = flyte.TaskEnvironment(
     "autoresearch-agent",
-    resources=flyte.Resources(cpu=1, memory="1Gi"),
+    resources=flyte.Resources(cpu=1, memory="2Gi"),
     secrets=[flyte.Secret(key="internal-anthropic-api-key", as_env_var="ANTHROPIC_API_KEY")],
     image=image,
     depends_on=[experiment_env],
