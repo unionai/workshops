@@ -77,24 +77,50 @@ TARGET_VELOCITY = 0.6  # m/s
 # ── MJX Environment ─────────────────────────────────────────────────────────
 
 def _make_go2_env():
-    """Create the Go2 MJX environment using Brax's PipelineEnv."""
+    """Create the Go2 MJX environment using Brax's PipelineEnv.
+
+    Key insight: Go2 uses position-controlled actuators (PD controllers), not
+    torque actuators. Actions must be small offsets from the default standing
+    pose, not raw motor commands. This follows the Brax Barkour tutorial pattern.
+    """
     import jax
     from jax import numpy as jp
     import mujoco
-    from mujoco import mjx
     from brax.envs.base import PipelineEnv, State
     from brax.io import mjcf
+    from brax import math as brax_math
+
+    ACTION_SCALE = 0.3  # Policy output [-1,1] → ±0.3 rad offset from default pose
+    # Per-joint limits: [abduction, hip, knee] × 4 legs
+    JOINT_LOWER_OFFSET = jp.array([0.2, 0.8, 0.8] * 4)
+    JOINT_UPPER_OFFSET = jp.array([0.2, 0.8, 0.8] * 4)
 
     class Go2Locomotion(PipelineEnv):
         """Unitree Go2 locomotion environment running on GPU via MJX."""
 
         def __init__(self, **kwargs):
             mj_model = mujoco.MjModel.from_xml_path(GO2_XML_PATH)
+
+            # Tune actuator PD gains (from Barkour tutorial — makes motors stable)
+            mj_model.actuator_gainprm[:, 0] = 35.0
+            mj_model.actuator_biasprm[:, 1] = -35.0
+
+            # Add joint damping for stability
+            mj_model.dof_damping[6:] = 0.5239
+
             sys = mjcf.load_model(mj_model)
-            kwargs["n_frames"] = 4  # physics steps per control step (like frame_skip=4)
+            kwargs["n_frames"] = 5  # 50 Hz control (matching Barkour)
             kwargs["backend"] = "mjx"
             super().__init__(sys, **kwargs)
-            self._default_qpos = jp.array(mj_model.keyframe("home").qpos if mj_model.nkey > 0 else mj_model.qpos0)
+
+            # Default standing pose (joint angles only, not base pos/quat)
+            home_qpos = mj_model.keyframe("home").qpos if mj_model.nkey > 0 else mj_model.qpos0
+            self._default_qpos = jp.array(home_qpos)
+            self._default_pose = jp.array(home_qpos[7:])  # 12 joint angles
+
+            # Joint position limits (default ± offset)
+            self._lower = self._default_pose - JOINT_LOWER_OFFSET
+            self._upper = self._default_pose + JOINT_UPPER_OFFSET
 
         def reset(self, rng):
             rng, rng_pos, rng_vel = jax.random.split(rng, 3)
@@ -108,57 +134,86 @@ def _make_go2_env():
             )
 
             data = self.pipeline_init(qpos, qvel)
-            obs = self._get_obs(data)
+            obs = self._get_obs(data, jp.zeros(self.sys.nu))
             reward, done = jp.zeros(2)
             metrics = {"reward": reward}
-            return State(pipeline_state=data, obs=obs, reward=reward, done=done, metrics=metrics)
+            info = {"last_action": jp.zeros(self.sys.nu)}
+            return State(pipeline_state=data, obs=obs, reward=reward, done=done,
+                         metrics=metrics, info=info)
 
         def step(self, state, action):
-            data = self.pipeline_step(state.pipeline_state, action)
+            # Convert policy output to motor position targets:
+            # default_pose + action * 0.3, clipped to joint limits
+            motor_targets = self._default_pose + action * ACTION_SCALE
+            motor_targets = jp.clip(motor_targets, self._lower, self._upper)
 
-            z_pos = data.qpos[2]
+            data = self.pipeline_step(state.pipeline_state, motor_targets)
 
-            # 1. Forward velocity — main driver
+            # ── Reward ──────────────────────────────────────────────────
+            # Forward velocity — dominant reward, must outweigh "just standing"
             x_vel = data.qvel[0]
-            tracking_reward = 3.0 * jp.clip(x_vel / TARGET_VELOCITY, 0.0, 1.0)
+            forward_reward = 3.0 * x_vel
 
-            # 2. Standing pose regularization — THE KEY anti-sitting reward
-            #    Penalizes joint angles that deviate from default standing pose.
-            #    Sitting requires deeply bent hind legs → big penalty.
-            joint_angles = data.qpos[7:]  # skip free joint (3 pos + 4 quat)
-            default_joints = self._default_qpos[7:]
-            pose_penalty = -1.0 * jp.sum((joint_angles - default_joints) ** 2)
+            # Small alive bonus — enough to prefer living but not enough
+            # to make standing still the optimal strategy
+            alive_bonus = 0.5
 
-            # 3. Height reward — encourages standing tall
-            height_reward = 1.0 * jp.clip((z_pos - 0.20) / 0.15, 0.0, 1.0)
-
-            # 4. Upright bonus — torso z-axis pointing up
+            # Orientation penalty — gentle, walking requires some lean
             quat = data.qpos[3:7]
-            upright_reward = 0.5 * quat[0] ** 2
+            inv_quat = jp.array([quat[0], -quat[1], -quat[2], -quat[3]])
+            gravity_body = brax_math.rotate(jp.array([0.0, 0.0, -1.0]), inv_quat)
+            orientation_penalty = -2.0 * jp.sum(jp.square(gravity_body[:2]))
 
-            # 5. Small control cost
-            ctrl_penalty = -0.001 * jp.sum(action ** 2)
+            # Control cost
+            ctrl_cost = -0.02 * jp.sum(jp.square(action))
 
-            reward = tracking_reward + pose_penalty + height_reward + upright_reward + ctrl_penalty
+            reward = forward_reward + alive_bonus + orientation_penalty + ctrl_cost
 
-            # Termination at 0.18m (lowered back — pose penalty handles sitting)
-            done = jp.where((z_pos < 0.18) | (z_pos > 0.6), 1.0, 0.0)
+            # ── Termination ─────────────────────────────────────────────
+            z_pos = data.qpos[2]
+            # Check if upside down (gravity z-component should be negative in body frame)
+            upside_down = gravity_body[2] > 0
+            too_low = z_pos < 0.18
+            too_high = z_pos > 0.6
+            vel_magnitude = jp.sum(data.qvel ** 2)
+            unstable = vel_magnitude > 100.0
 
-            # Death penalty
-            reward = jp.where(done > 0, reward - 5.0, reward)
+            done = jp.where(upside_down | too_low | too_high | unstable, 1.0, 0.0)
 
-            obs = self._get_obs(data)
+            # NaN guard
+            reward = jp.where(jp.isnan(reward), 0.0, reward)
+
+            obs = self._get_obs(data, action)
+            # Preserve all info keys added by Brax's training wrapper (steps,
+            # episode_metrics, etc.) — JAX scan requires matching pytree structure
+            info = {**state.info, "last_action": action}
             return state.replace(
                 pipeline_state=data, obs=obs, reward=reward, done=done,
                 metrics={"reward": reward},
+                info=info,
             )
 
-        def _get_obs(self, data):
-            """Observation: joint positions + velocities + body orientation."""
-            return jp.concatenate([
-                data.qpos[2:],   # z-height + quaternion + joint positions
-                data.qvel,       # all velocities
+        def _get_obs(self, data, last_action):
+            """Observation: projected gravity + joint deltas + velocities + last action."""
+            # Projected gravity (tells policy which way is up)
+            quat = data.qpos[3:7]
+            inv_quat = jp.array([quat[0], -quat[1], -quat[2], -quat[3]])
+            gravity_body = brax_math.rotate(jp.array([0.0, 0.0, -1.0]), inv_quat)
+
+            # Joint positions relative to default (not raw angles)
+            joint_deltas = data.qpos[7:] - self._default_pose
+
+            # Angular velocity (body frame)
+            ang_vel = data.qvel[3:6]
+
+            obs = jp.concatenate([
+                gravity_body,         # 3: which way is up
+                ang_vel * 0.25,       # 3: body rotation rate (scaled)
+                joint_deltas,         # 12: joint offsets from standing
+                data.qvel[6:],        # 12: joint velocities
+                last_action,          # 12: what we did last step
             ])
+            return jp.clip(obs, -100.0, 100.0)
 
     return Go2Locomotion()
 
@@ -287,23 +342,24 @@ async def train_on_gpu(
     env = _make_go2_env()
     log.info(f"Environment created: obs_size={env.observation_size}, action_size={env.action_size}")
 
+    # PPO hyperparameters from Brax Barkour tutorial (working quadruped on MJX)
     make_inference_fn, params, metrics = ppo_module.train(
         environment=env,
         progress_fn=progress_fn,
         num_timesteps=num_timesteps,
         num_evals=num_evals,
-        reward_scaling=0.1,
+        reward_scaling=1.0,
         episode_length=episode_length,
-        normalize_observations=False,
+        normalize_observations=True,
         action_repeat=1,
-        unroll_length=10,
-        num_minibatches=24,
-        num_updates_per_batch=8,
+        unroll_length=20,
+        num_minibatches=32,
+        num_updates_per_batch=4,
         discounting=0.97,
         learning_rate=3e-4,
-        entropy_cost=1e-3,
+        entropy_cost=1e-2,
         num_envs=num_envs,
-        batch_size=512,
+        batch_size=256,
         seed=0,
     )
 
@@ -330,32 +386,47 @@ async def render_replay(
     num_episodes: int = 3,
     max_steps: int = 1000,
 ) -> File:
-    """Render replay on CPU MuJoCo only — no MJX/Brax (too slow without GPU).
-
-    Reconstructs observations (qpos[2:] + qvel) from CPU MuJoCo data to match
-    what the Brax env produces, then feeds them to the trained policy.
+    """Render replay on CPU MuJoCo — reconstructs observations to match Brax env,
+    applies action scaling (default_pose + action * 0.3), and renders frames.
     """
     import numpy as np
     import pickle
     import jax
+    from jax import numpy as jnp
     from PIL import Image
 
     local = await checkpoint.download()
     with open(local, "rb") as f:
         ckpt = pickle.load(f)
 
-    # Build inference function from Brax params
     from brax.training.agents.ppo import networks as ppo_networks
     import mujoco
 
-    # Get obs/action sizes from the MuJoCo model directly
     mj_model = mujoco.MjModel.from_xml_path(GO2_XML_PATH)
-    obs_size = (mj_model.nq - 2) + mj_model.nv  # qpos[2:] + qvel
-    action_size = mj_model.nu
+    action_size = mj_model.nu  # 12
 
+    # Obs: gravity(3) + ang_vel(3) + joint_deltas(12) + joint_vel(12) + last_action(12) = 42
+    obs_size = 3 + 3 + 12 + 12 + 12
+
+    # Default standing pose (joint angles only)
+    default_pose = mj_model.keyframe("home").qpos[7:] if mj_model.nkey > 0 else mj_model.qpos0[7:]
+    default_pose = np.array(default_pose, dtype=np.float32)
+
+    # Joint limits
+    lower = default_pose - np.array([0.2, 0.8, 0.8] * 4, dtype=np.float32)
+    upper = default_pose + np.array([0.2, 0.8, 0.8] * 4, dtype=np.float32)
+
+    # Apply same actuator tuning as training env
+    mj_model.actuator_gainprm[:, 0] = 35.0
+    mj_model.actuator_biasprm[:, 1] = -35.0
+    mj_model.dof_damping[6:] = 0.5239
+
+    # Rebuild network with normalizer (matches normalize_observations=True in training).
+    # params = (normalizer_params, policy_params, value_params)
+    from brax.training.acme import running_statistics
     ppo_network = ppo_networks.make_ppo_networks(
         obs_size, action_size,
-        preprocess_observations_fn=lambda obs, params: obs,
+        preprocess_observations_fn=running_statistics.normalize,
     )
     make_inference_fn = ppo_networks.make_inference_fn(ppo_network)
     inference_fn = make_inference_fn(ckpt["params"])
@@ -366,18 +437,28 @@ async def render_replay(
     frame_every = 5
     max_frames = 100
 
-    # MUST use same model as training (scene_mjx.xml) so joints/DOFs match
+    def quat_rotate_inv(q, v):
+        """Rotate vector v by inverse of quaternion q (w,x,y,z format)."""
+        w, x, y, z = q
+        # Inverse quaternion rotation
+        t = 2.0 * np.cross(np.array([-x, -y, -z]), v)
+        return v + w * t + np.cross(np.array([-x, -y, -z]), t)
+
     for ep_idx in range(num_episodes):
         mj_model_render = mujoco.MjModel.from_xml_path(GO2_XML_PATH)
+        mj_model_render.actuator_gainprm[:, 0] = 35.0
+        mj_model_render.actuator_biasprm[:, 1] = -35.0
+        mj_model_render.dof_damping[6:] = 0.5239
+
         mj_data = mujoco.MjData(mj_model_render)
         renderer = mujoco.Renderer(mj_model_render, width=320, height=240)
 
-        # Start in standing pose (matching training reset)
         if mj_model_render.nkey > 0:
             mj_data.qpos[:] = mj_model_render.key_qpos[0]
         mujoco.mj_forward(mj_model_render, mj_data)
         total_reward = 0.0
         frames = []
+        last_action = np.zeros(action_size, dtype=np.float32)
 
         rng = jax.random.PRNGKey(ep_idx + 1000)
 
@@ -391,28 +472,41 @@ async def render_replay(
                 Image.fromarray(frame).save(buf, format="JPEG", quality=70)
                 frames.append(base64.b64encode(buf.getvalue()).decode())
 
-            # Build observation from CPU MuJoCo (matches Brax env's _get_obs)
-            obs = np.concatenate([mj_data.qpos[2:], mj_data.qvel]).astype(np.float32)
-            obs_jax = jax.numpy.array(obs)
+            # Build observation matching Brax env's _get_obs
+            quat = mj_data.qpos[3:7]
+            gravity_body = quat_rotate_inv(quat, np.array([0.0, 0.0, -1.0]))
+            ang_vel = mj_data.qvel[3:6].astype(np.float32)
+            joint_deltas = (mj_data.qpos[7:] - default_pose).astype(np.float32)
+            joint_vel = mj_data.qvel[6:].astype(np.float32)
 
-            # Get action from trained policy
+            obs = np.concatenate([
+                gravity_body.astype(np.float32),
+                ang_vel * 0.25,
+                joint_deltas,
+                joint_vel,
+                last_action,
+            ])
+            obs = np.clip(obs, -100.0, 100.0)
+            obs_jax = jnp.array(obs)
+
             rng, act_rng = jax.random.split(rng)
             action, _ = inference_fn(obs_jax, act_rng)
-            action_np = np.array(action)
+            action_np = np.array(action, dtype=np.float32)
+            last_action = action_np
 
-            # Step CPU MuJoCo with frame_skip=4 (matching n_frames in Brax env)
-            for _ in range(4):
-                mj_data.ctrl[:] = action_np
+            # Apply action scaling: default_pose + action * 0.3, clipped
+            motor_targets = default_pose + action_np * 0.3
+            motor_targets = np.clip(motor_targets, lower, upper)
+
+            # Step CPU MuJoCo with n_frames=5 (matching training)
+            for _ in range(5):
+                mj_data.ctrl[:] = motor_targets
                 mujoco.mj_step(mj_model_render, mj_data)
 
-            # Compute reward (same as Brax env)
             x_vel = mj_data.qvel[0]
-            vel_error = (x_vel - TARGET_VELOCITY) ** 2
-            tracking_reward = 2.0 * np.exp(-vel_error / 0.25)
             z_pos = mj_data.qpos[2]
-            done = z_pos < 0.15 or z_pos > 0.6
-            reward = tracking_reward + 1.0 + (-50.0 if done else 0.0)
-            total_reward += reward
+            total_reward += 3.0 * x_vel + 0.5
+            done = z_pos < 0.18 or z_pos > 0.6
 
             if done:
                 break

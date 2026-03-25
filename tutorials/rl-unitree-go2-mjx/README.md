@@ -111,6 +111,13 @@ tutorials/rl-unitree-go2-mjx/
 └── README.md
 ```
 
+## Next iteration ideas
+
+- **Parallel reward sweeps** — fan out 5-10 different reward configurations as parallel Flyte GPU tasks, evaluate all of them, and pick the winner. Instead of testing one reward at a time, test them all at once. Each `train_on_gpu` call gets its own GPU, results are compared in the orchestrator. This is a natural Flyte pattern (map task or dynamic fanout) and would dramatically speed up reward engineering. This is standard practice at companies like Boston Dynamics and DeepMind — reward engineering is the #1 bottleneck in RL and automating it is huge.
+- **Automated reward search** — extend sweeps with Bayesian optimization (Optuna), evolutionary strategies, or LLM-based reward design (like NVIDIA's Eureka — uses an LLM to write reward functions, evaluates in parallel on GPU, iterates automatically).
+- **Population-based training** — multiple agents train simultaneously on separate GPUs, periodically sharing best weights. Used by OpenAI/DeepMind for hard RL problems.
+- **Vision-based policy** — add a camera observation and train with CNN policy, requiring multi-GPU for larger model + simulation.
+
 ## Tutorial progression
 
 1. **[rl-unitree-go2](../rl-unitree-go2/)** — CPU MuJoCo, distributed workers, learn the fundamentals

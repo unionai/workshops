@@ -73,7 +73,7 @@ HIDDEN_DIM = 128  # Smaller network — quadrupeds have simpler dynamics
 
 # Go2 env config — passed to Ant-v5 with the Go2 XML
 GO2_ENV_KWARGS = {
-    "healthy_z_range": (0.15, 0.6),       # Go2 body at ~0.3m standing; prevent dragging or flipping
+    "healthy_z_range": (0.22, 0.6),       # Go2 body at ~0.3m standing; 0.22 min forces standing (sitting ≈ 0.18m = death)
     "healthy_reward": 0.0,                  # disable built-in — custom wrapper handles it
     "forward_reward_weight": 0.0,           # disable built-in — custom wrapper handles it
     "ctrl_cost_weight": 0.0,                # disable built-in — custom wrapper handles it
@@ -121,29 +121,33 @@ class Go2RewardWrapper:
 
         data = self.env.unwrapped.data
 
-        # 1. Velocity tracking — exponential kernel peaked at target speed
+        z_pos = data.qpos[2]
+
+        # Height factor: 0 when crouching (z=0.20), 1 when standing (z=0.30)
+        # Gates movement rewards — no reward for scooting while sitting
+        height_factor = np.clip((z_pos - 0.20) / 0.10, 0.0, 1.0)
+
+        # 1. Forward velocity — GATED by height so sitting+scooting = 0
         x_vel = data.qvel[0]
-        vel_error = (x_vel - TARGET_VELOCITY) ** 2
-        tracking_reward = 2.0 * np.exp(-vel_error / 0.25)
+        tracking_reward = 5.0 * np.clip(x_vel / TARGET_VELOCITY, 0.0, 1.0) * height_factor
 
-        # 2. Alive bonus — reward for not falling
-        alive_bonus = 1.0
+        # 2. Standing reward — must be upright to earn anything
+        height_reward = 2.0 * height_factor
 
-        # 3. Termination penalty
-        death_penalty = -50.0 if terminated else 0.0
+        # 3. Upright bonus — torso z-axis should point up (w≈1 when upright)
+        quat = data.qpos[3:7]
+        upright_reward = 1.0 * quat[0] ** 2
 
-        # 4. Vertical velocity penalty — don't bounce
+        # 4. Termination penalty — meaningful so robot avoids falling
+        death_penalty = -20.0 if terminated else 0.0
+
+        # 5. Vertical velocity penalty — reduced so walking bounce is ok
         z_vel = data.qvel[2]
-        z_vel_penalty = -1.0 * z_vel ** 2
+        z_vel_penalty = -0.2 * z_vel ** 2
 
-        # 5. Angular velocity penalty — don't roll or tumble
+        # 6. Angular velocity penalty — don't roll or tumble
         ang_vel_xy = data.qvel[3:5]
         ang_vel_penalty = -0.1 * np.sum(ang_vel_xy ** 2)
-
-        # 6. Orientation penalty — stay level (penalize body tilt)
-        quat = data.qpos[3:7]
-        tilt = 1.0 - quat[0] ** 2
-        orientation_penalty = -1.0 * tilt
 
         # 7. Action rate penalty — smooth movements
         if self.prev_action is not None:
@@ -152,16 +156,16 @@ class Go2RewardWrapper:
             action_rate_penalty = 0.0
         self.prev_action = action.copy()
 
-        # 8. Control cost — penalize large torques
-        ctrl_penalty = -0.005 * np.sum(action ** 2)
+        # 8. Control cost — light penalty
+        ctrl_penalty = -0.002 * np.sum(action ** 2)
 
         reward = (
             tracking_reward
-            + alive_bonus
+            + height_reward
+            + upright_reward
             + death_penalty
             + z_vel_penalty
             + ang_vel_penalty
-            + orientation_penalty
             + action_rate_penalty
             + ctrl_penalty
         )
