@@ -43,6 +43,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 | [Manager Multi-Agent System](tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb) | Manager-worker agent delegation |
 | [Sequential Multi-Agent System](tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb) | Sequential agent pipeline |
 | [LangGraph Tutorial](tutorials/langgraph/) | In-depth LangGraph integration with Flyte |
+| [Autoresearch](tutorials/autoresearch/) | Autoresearch-style self-healing agent on Flyte |
 
 ## MCP
 
