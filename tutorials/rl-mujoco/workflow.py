@@ -1,9 +1,9 @@
 """
-MuJoCo RL training with PPO — Unitree G1 humanoid locomotion.
+MuJoCo RL training with PPO — HalfCheetah locomotion.
 
-Trains a policy network on the Unitree G1 humanoid robot using Proximal Policy
-Optimization (PPO) with Generalized Advantage Estimation (GAE). Uses the G1 model
-from mujoco_menagerie loaded into Gymnasium's Humanoid-v5 environment.
+Trains a policy network on HalfCheetah-v4 using Proximal Policy Optimization (PPO)
+with Generalized Advantage Estimation (GAE). Rollout collection fans out across
+parallel CPU workers; PPO updates run on GPU.
 
 Usage:
     # Local (quick demo)
@@ -32,22 +32,39 @@ log.setLevel(logging.INFO)
 
 # ── Environments ─────────────────────────────────────────────────────────────
 
+rl_image = flyte.Image.from_debian_base().with_apt_packages(
+    "libegl1", "libgl1", "libgles2",
+).with_pip_packages(
+    "gymnasium[mujoco]", "torch", "numpy", "Pillow", "matplotlib",
+)
+
+# Workers — lightweight, many run in parallel for rollout collection + evaluation
+worker_env = flyte.TaskEnvironment(
+    name="mujoco-rl-worker",
+    image=rl_image,
+    resources=flyte.Resources(cpu=2, memory="8Gi"),
+)
+
+# GPU — PPO update only (allocated briefly each iteration, not held during rollouts)
+gpu_env = flyte.TaskEnvironment(
+    name="mujoco-rl-gpu",
+    image=rl_image,
+    resources=flyte.Resources(cpu=4, memory="16Gi", gpu=1),
+)
+
+# Orchestrator — lightweight, just coordinates workers and GPU task
 train_env = flyte.TaskEnvironment(
-    name="mujoco-rl",
-    image=flyte.Image.from_debian_base().with_apt_packages(
-        "libegl1", "libgl1", "libgles2",
-    ).with_pip_packages(
-        "gymnasium[mujoco]", "torch", "numpy", "Pillow", "matplotlib",
-        "mujoco_menagerie",
-    ),
-    resources=flyte.Resources(cpu=4, memory="8Gi"),
+    name="mujoco-rl-train",
+    image=rl_image,
+    resources=flyte.Resources(cpu=2, memory="8Gi"),
+    depends_on=[worker_env, gpu_env],
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-ENV_ID = "HalfCheetah-v4"
-STATE_DIM = 17   # HalfCheetah observation space
-ACTION_DIM = 6   # HalfCheetah action space
+ENV_ID = "Ant-v4"
+STATE_DIM = 27   # Ant observation space
+ACTION_DIM = 8   # Ant action space
 HIDDEN_DIM = 128
 
 
@@ -241,7 +258,7 @@ def _build_policy_and_value():
     import torch
     import torch.nn as nn
 
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     class Policy(nn.Module):
         def __init__(self):
@@ -274,7 +291,7 @@ def _build_policy_and_value():
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
 
-@train_env.task
+@worker_env.task(retries=3)
 async def collect_rollouts(
     checkpoint: File | None,
     num_episodes: int = 10,
@@ -285,8 +302,6 @@ async def collect_rollouts(
     import torch
     import gymnasium as gym
 
-    # Always build a policy — untrained weights give exploratory actions
-    # with correct log probs (critical for PPO's importance sampling ratio)
     policy, _, device = _build_policy_and_value()
     if checkpoint is not None:
         local = await checkpoint.download()
@@ -328,13 +343,13 @@ async def collect_rollouts(
 
     path = "/tmp/rollouts.json"
     with open(path, "w") as f:
-        json.dump(all_episodes, f)
+        json.dump({"episodes": all_episodes}, f)
     return await File.from_local(path)
 
 
-@train_env.task
+@gpu_env.task(retries=3)
 async def ppo_update(
-    rollouts_file: File,
+    rollout_files: list[File],
     checkpoint: File | None,
     ppo_epochs: int = 10,
     clip_eps: float = 0.2,
@@ -342,13 +357,18 @@ async def ppo_update(
     gamma: float = 0.99,
     lam: float = 0.95,
 ) -> File:
-    """Run PPO update on collected rollouts. Returns updated checkpoint."""
+    """Merge rollouts from parallel workers and run PPO update on GPU."""
     import torch
     import numpy as np
 
-    rollouts_path = await rollouts_file.download()
-    with open(rollouts_path) as f:
-        episodes = json.load(f)
+    episodes = []
+    for rollout_file in rollout_files:
+        rollouts_path = await rollout_file.download()
+        with open(rollouts_path) as f:
+            rollout_data = json.load(f)
+        episodes.extend(rollout_data["episodes"])
+
+    log.info(f"PPO update: {len(episodes)} episodes on {torch.device('cuda' if torch.cuda.is_available() else 'cpu')}")
     policy, value_net, device = _build_policy_and_value()
     policy_optim = torch.optim.Adam(policy.parameters(), lr=lr)
     value_optim = torch.optim.Adam(value_net.parameters(), lr=lr)
@@ -373,7 +393,7 @@ async def ppo_update(
 
         # Compute values for all observed states
         with torch.no_grad():
-            values = value_net(obs).numpy()
+            values = value_net(obs.to(device)).cpu().numpy()
 
         # GAE — reverse sweep through the episode
         T = len(rewards)
@@ -403,11 +423,11 @@ async def ppo_update(
         all_advantages.append(torch.tensor(advantages, dtype=torch.float32))
         all_returns.append(torch.tensor(returns, dtype=torch.float32))
 
-    obs_batch = torch.cat(all_obs)
-    actions_batch = torch.cat(all_actions)
-    old_log_probs_batch = torch.cat(all_old_log_probs)
-    advantages_batch = torch.cat(all_advantages)
-    returns_batch = torch.cat(all_returns)
+    obs_batch = torch.cat(all_obs).to(device)
+    actions_batch = torch.cat(all_actions).to(device)
+    old_log_probs_batch = torch.cat(all_old_log_probs).to(device)
+    advantages_batch = torch.cat(all_advantages).to(device)
+    returns_batch = torch.cat(all_returns).to(device)
 
     # Normalize advantages
     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
@@ -459,11 +479,11 @@ async def ppo_update(
     num_updates = ppo_epochs * max(1, len(obs_batch) // batch_size)
     avg_loss = total_loss / num_updates
 
-    # Save checkpoint
+    # Save checkpoint (move to CPU for portability between GPU/CPU workers)
     path = "/tmp/ppo_checkpoint.pt"
     torch.save({
-        "policy": policy.state_dict(),
-        "value": value_net.state_dict(),
+        "policy": {k: v.cpu() for k, v in policy.state_dict().items()},
+        "value": {k: v.cpu() for k, v in value_net.state_dict().items()},
         "policy_optim": policy_optim.state_dict(),
         "value_optim": value_optim.state_dict(),
         "loss": avg_loss,
@@ -471,7 +491,7 @@ async def ppo_update(
     return await File.from_local(path)
 
 
-@train_env.task(report=True)
+@worker_env.task(report=True, retries=3)
 async def evaluate(
     checkpoint: File | None,
     label: str = "Random",
@@ -560,20 +580,23 @@ async def evaluate(
 
 @train_env.task(report=True)
 async def train_agent(
-    num_iterations: int = 15,
-    episodes_per_iter: int = 20,
-    ppo_epochs: int = 15,
+    num_iterations: int = 30,
+    episodes_per_iter: int = 100,
+    ppo_epochs: int = 10,
     max_steps: int = 1000,
     lr: float = 3e-4,
+    num_workers: int = 5,
 ) -> str:
     """
-    PPO training loop with evaluation and interactive reports.
+    PPO training loop with parallel rollout collection.
 
     1. Evaluate random baseline
-    2. For each iteration: collect rollouts → PPO update → evaluate
+    2. For each iteration: fan out rollouts across workers → PPO update on GPU → evaluate
     3. Build final report with training curves + episode replays
     """
-    log.info(f"Starting PPO training: {num_iterations} iterations, {episodes_per_iter} episodes each")
+    import asyncio
+
+    log.info(f"Starting PPO training: {num_iterations} iterations, {num_workers} workers × {episodes_per_iter // num_workers} episodes")
 
     await flyte.report.replace.aio(
         "<h2>MuJoCo RL Training</h2>"
@@ -620,19 +643,25 @@ async def train_agent(
 
     import torch
 
+    eps_per_worker = max(1, episodes_per_iter // num_workers)
+
     for i in range(1, num_iterations + 1):
-        log.info(f"── Iteration {i}/{num_iterations} ──")
+        log.info(f"── Iteration {i}/{num_iterations} ({num_workers} workers × {eps_per_worker} episodes) ──")
 
-        # Collect rollouts with current policy
-        rollouts_file = await collect_rollouts(
-            checkpoint=checkpoint,
-            num_episodes=episodes_per_iter,
-            max_steps=max_steps,
-        )
+        # Fan out rollout collection across parallel CPU workers
+        rollout_files = await asyncio.gather(*[
+            collect_rollouts(
+                checkpoint=checkpoint,
+                num_episodes=eps_per_worker,
+                max_steps=max_steps,
+            )
+            for _ in range(num_workers)
+        ])
+        log.info(f"  Collected {eps_per_worker * num_workers} episodes from {num_workers} workers")
 
-        # PPO update
+        # PPO update on GPU
         checkpoint = await ppo_update(
-            rollouts_file=rollouts_file,
+            rollout_files=list(rollout_files),
             checkpoint=checkpoint,
             ppo_epochs=ppo_epochs,
             lr=lr,
@@ -712,6 +741,7 @@ async def train_agent(
         '<table style="border-collapse:collapse;width:100%;">'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Environment</td><td style="padding:6px;border-bottom:1px solid #333;color:#00b894;">{ENV_ID}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Iterations</td><td style="padding:6px;border-bottom:1px solid #333;">{num_iterations}</td></tr>'
+        f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Workers</td><td style="padding:6px;border-bottom:1px solid #333;">{num_workers}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Episodes/iter</td><td style="padding:6px;border-bottom:1px solid #333;">{episodes_per_iter}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Random baseline</td><td style="padding:6px;border-bottom:1px solid #333;color:#e17055;">{baseline_reward:.1f}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Best trained reward</td><td style="padding:6px;border-bottom:1px solid #333;color:#00b894;">{best["eval_reward"]:.1f}</td></tr>'

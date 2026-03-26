@@ -7,7 +7,7 @@ from mujoco_menagerie loaded into Gymnasium's Humanoid-v5 environment.
 
 Usage:
     # Local (quick demo)
-    flyte run --local --tui workflow.py train_agent --num_iterations 5 --episodes_per_iter 10
+    flyte run --local --tui workflow.py train_agent --num_iterations 5 --steps_per_iter 1000
 
     # Remote (full training — default params)
     flyte run workflow.py train_agent
@@ -70,10 +70,10 @@ HIDDEN_DIM = 256
 
 # G1 env config — passed to Humanoid-v5 with the G1 XML
 G1_ENV_KWARGS = {
-    "healthy_z_range": (0.6, 1.4),      # G1 pelvis at ~0.79m; tight range prevents "almost fallen = healthy"
-    "healthy_reward": 0.0,               # disable built-in alive bonus — custom wrapper handles it
-    "forward_reward_weight": 0.0,        # disable built-in forward reward — custom wrapper handles it
-    "ctrl_cost_weight": 0.0,             # disable built-in ctrl cost — custom wrapper handles it
+    "healthy_z_range": (0.6, 1.4),      # G1 pelvis at ~0.79m
+    "healthy_reward": 0.0,               # disable built-in — custom wrapper handles it
+    "forward_reward_weight": 0.0,        # disable built-in — custom wrapper handles it
+    "ctrl_cost_weight": 0.0,             # disable built-in — custom wrapper handles it
     "contact_cost_weight": 0.0,          # disable built-in contact cost
     "reset_noise_scale": 0.005,          # very small noise so it starts near standing
     "terminate_when_unhealthy": True,
@@ -85,145 +85,161 @@ G1_ENV_KWARGS = {
 # Target walking speed in m/s
 TARGET_VELOCITY = 0.8
 
+# Lazy import — gymnasium only available in container
+try:
+    import gymnasium
+    _GymnasiumWrapper = gymnasium.Wrapper
+except ImportError:
+    _GymnasiumWrapper = object
 
-class G1RewardWrapper:
-    """Custom reward wrapper for Unitree G1 walking.
 
-    Replaces the default Gymnasium reward with terms from MuJoCo Playground
-    and legged_gym that produce real walking:
-    - Velocity tracking (exponential kernel at target speed)
-    - Alive bonus (small)
-    - Termination penalty (large)
-    - Vertical velocity penalty (don't fall)
-    - Angular velocity penalty (don't tumble)
-    - Action rate penalty (smooth movements)
-    - Orientation penalty (stay upright)
-    - Foot contact alternation (reward single-foot stance, penalize double stance)
-    - Foot clearance (reward lifting swing foot during stride)
+class G1ActionScaler(_GymnasiumWrapper):
+    """Wraps the G1 env with proper action scaling and custom observation/reward.
+
+    The G1 uses <position> actuators (PD controllers) — unlike the Go2's <motor>,
+    these already have biastype="affine" so no manual fix is needed. But the policy
+    still needs to output [-1, 1] actions scaled as offsets from the standing pose,
+    not raw joint angles.
+
+    Custom observation (93 dims): projected gravity(3), angular velocity(3),
+    joint deltas from default(29), joint velocities(29), last action(29).
     """
 
-    def __init__(self, env, enable_gait_rewards=False):
-        self.env = env
-        # Expose gym.Env interface for SyncVectorEnv compatibility
-        self.observation_space = env.observation_space
-        self.action_space = env.action_space
-        self.spec = getattr(env, "spec", None)
-        self.metadata = getattr(env, "metadata", {})
-        self.render_mode = getattr(env, "render_mode", None)
-        self.np_random = getattr(env, "np_random", None)
-        self.prev_action = None
+    ACTION_SCALE = 0.3  # Policy output [-1,1] → ±0.3 rad offset from default pose
+    ACTION_REPEAT = 4   # Hold each action for 4 env steps — lets PD controller move joints
+    OBS_DIM = 93        # 3 + 3 + 29 + 29 + 29
 
-        # Curriculum learning: gait rewards enabled in phase 2
-        self.enable_gait_rewards = enable_gait_rewards
-
-        # Cache foot body IDs for contact detection
-        model = env.unwrapped.model
-        self.left_foot_id = model.body("left_ankle_roll_link").id
-        self.right_foot_id = model.body("right_ankle_roll_link").id
-
-    def reset(self, **kwargs):
-        self.prev_action = None
-        return self.env.reset(**kwargs)
-
-    def step(self, action):
+    def __init__(self, env):
         import numpy as np
-        obs, _base_reward, terminated, truncated, info = self.env.step(action)
+        import gymnasium.spaces as spaces
+        super().__init__(env)
 
-        # Access MuJoCo state for custom rewards
-        data = self.env.unwrapped.data
+        # Custom observation space
+        self.observation_space = spaces.Box(
+            low=-100.0, high=100.0, shape=(self.OBS_DIM,), dtype=np.float32
+        )
+        # Normalize action space to [-1, 1]
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(env.action_space.shape[0],), dtype=np.float32
+        )
 
-        # 1. Velocity tracking — exponential kernel peaked at target speed
+        mj_model = env.unwrapped.model
+        self._action_dim = env.action_space.shape[0]
+
+        # Get default standing pose from keyframe
+        if mj_model.nkey > 0:
+            self._default_pose = mj_model.key_qpos[0][7:].copy()
+        else:
+            self._default_pose = mj_model.qpos0[7:].copy()
+
+        # Joint limits: default ± offset
+        offset = np.full(self._action_dim, 0.5)  # generous range for humanoid
+        self._lower = self._default_pose - offset
+        self._upper = self._default_pose + offset
+        self._last_action = np.zeros(self._action_dim, dtype=np.float32)
+
+        # Foot body IDs for gait rewards
+        self._left_foot_id = mj_model.body("left_ankle_roll_link").id
+        self._right_foot_id = mj_model.body("right_ankle_roll_link").id
+
+        self._dt = mj_model.opt.timestep * G1_ENV_KWARGS.get("frame_skip", 4)
+
+    def _get_obs(self, data):
+        """Build custom observation matching Go2/MJX pattern."""
+        import numpy as np
+
+        # Projected gravity: rotate [0,0,-1] by inverse body quaternion
+        quat = data.qpos[3:7]
+        w, x, y, z = quat[0], -quat[1], -quat[2], -quat[3]
+        gx = 2.0 * (x * z + w * y) * (-1.0)
+        gy = 2.0 * (y * z - w * x) * (-1.0)
+        gz = (1.0 - 2.0 * (x * x + y * y)) * (-1.0)
+        gravity_body = np.array([gx, gy, gz], dtype=np.float32)
+
+        # Angular velocity (scaled)
+        ang_vel = data.qvel[3:6].astype(np.float32) * 0.25
+
+        # Joint deltas from default pose
+        joint_deltas = (data.qpos[7:7 + self._action_dim] - self._default_pose).astype(np.float32)
+
+        # Joint velocities
+        joint_vel = data.qvel[6:6 + self._action_dim].astype(np.float32)
+
+        obs = np.concatenate([gravity_body, ang_vel, joint_deltas, joint_vel, self._last_action])
+        return np.clip(obs, -100.0, 100.0)
+
+    def _compute_reward(self, action, data):
+        """Custom reward for humanoid locomotion."""
+        import numpy as np
+
         x_vel = data.qvel[0]
-        vel_error = (x_vel - TARGET_VELOCITY) ** 2
-        tracking_reward = 1.5 * np.exp(-vel_error / 0.25)
+        forward_reward = 3.0 * x_vel
 
-        # 2. Small alive bonus
-        alive_bonus = 0.5
+        alive_bonus = 0.1  # small — don't reward standing still
 
-        # 3. Termination penalty — make falling very costly
-        death_penalty = -75.0 if terminated else 0.0
+        # Orientation penalty — projected gravity
+        quat = data.qpos[3:7]
+        w, x, y, z = quat[0], -quat[1], -quat[2], -quat[3]
+        gx = 2.0 * (x * z + w * y) * (-1.0)
+        gy = 2.0 * (y * z - w * x) * (-1.0)
+        orientation_penalty = -3.0 * (gx ** 2 + gy ** 2)
 
-        # 4. Vertical velocity penalty — don't bounce or fall
-        z_vel = data.qvel[2]
-        z_vel_penalty = -2.0 * z_vel ** 2
+        # Control cost
+        ctrl_cost = -0.01 * np.sum(action ** 2)
 
-        # 5. Angular velocity penalty — don't tumble (roll/pitch)
+        # Vertical velocity penalty — don't bounce
+        z_vel_penalty = -2.0 * data.qvel[2] ** 2
+
+        # Angular velocity penalty — don't tumble
         ang_vel_xy = data.qvel[3:5]
         ang_vel_penalty = -0.15 * np.sum(ang_vel_xy ** 2)
 
-        # 6. Action rate penalty — smooth actions = smooth walking
-        if self.prev_action is not None:
-            action_rate_penalty = -0.01 * np.sum((action - self.prev_action) ** 2)
-        else:
-            action_rate_penalty = 0.0
-        self.prev_action = action.copy()
+        # Action rate penalty — smooth movements
+        action_rate_cost = -0.05 * np.sum((action - self._last_action) ** 2)
 
-        # 7. Orientation penalty — penalize torso tilt from upright
-        #    qpos[3:7] is torso quaternion (w, x, y, z); upright means w~1, x~0, y~0
-        quat = data.qpos[3:7]
-        # Tilt = 1 - w^2 (0 when upright, ~1 when sideways/fallen)
-        tilt = 1.0 - quat[0] ** 2
-        orientation_penalty = -3.0 * tilt
+        return (forward_reward + alive_bonus + orientation_penalty
+                + ctrl_cost + z_vel_penalty + ang_vel_penalty + action_rate_cost)
 
-        # 8. Control cost — moderate penalty for large torques
-        ctrl_penalty = -0.01 * np.sum(action ** 2)
+    def reset(self, **kwargs):
+        import numpy as np
+        _obs, info = self.env.reset(**kwargs)
+        self._last_action = np.zeros(self._action_dim, dtype=np.float32)
 
-        # 9–10. Gait rewards (curriculum phase 2 only)
-        #   Phase 1: learn to walk forward without falling
-        #   Phase 2: refine gait with foot contact alternation + clearance
-        gait_reward = 0.0
-        clearance_reward = 0.0
-        if self.enable_gait_rewards:
-            # Foot contact alternation — reward single-stance, penalize double-stance
-            left_force = np.linalg.norm(data.cfrc_ext[self.left_foot_id, 3:6])
-            right_force = np.linalg.norm(data.cfrc_ext[self.right_foot_id, 3:6])
-            contact_threshold = 1.0
-            left_contact = float(left_force > contact_threshold)
-            right_contact = float(right_force > contact_threshold)
-            if left_contact != right_contact:
-                gait_reward = 0.5  # single stance — walking
-            elif left_contact and right_contact:
-                gait_reward = -0.1  # double stance — shuffling
+        # Small forward velocity push — helps exploration with PD control
+        import mujoco as _mj
+        data = self.env.unwrapped.data
+        data.qvel[0] = np.random.uniform(0.2, 1.0)
+        _mj.mj_forward(self.env.unwrapped.model, data)
 
-            # Foot clearance — reward lifting the swing foot
-            left_foot_z = data.body(self.left_foot_id).xpos[2]
-            right_foot_z = data.body(self.right_foot_id).xpos[2]
-            swing_height = max(left_foot_z, right_foot_z)
-            clearance_reward = 0.4 * np.clip((swing_height - 0.03) / 0.10, 0.0, 1.0)
+        return self._get_obs(data), info
 
-            # Scale gait rewards by forward velocity — no reward for stepping in place
-            vel_scale = np.clip(x_vel / TARGET_VELOCITY, 0.0, 1.0)
-            gait_reward *= vel_scale
-            clearance_reward *= vel_scale
+    def step(self, action):
+        import numpy as np
 
-        reward = (
-            tracking_reward
-            + alive_bonus
-            + death_penalty
-            + z_vel_penalty
-            + ang_vel_penalty
-            + action_rate_penalty
-            + orientation_penalty
-            + ctrl_penalty
-            + gait_reward
-            + clearance_reward
-        )
+        # Clip, smooth with EMA, scale to joint targets
+        action = np.clip(action, -1.0, 1.0)
+        action = 0.8 * action + 0.2 * self._last_action
+        motor_targets = self._default_pose + action * self.ACTION_SCALE
+        motor_targets = np.clip(motor_targets, self._lower, self._upper)
 
-        return obs, float(reward), terminated, truncated, info
+        # Action repeat — hold action for multiple env steps
+        total_reward = 0.0
+        terminated = truncated = False
+        for _ in range(self.ACTION_REPEAT):
+            _obs, _base_reward, terminated, truncated, info = self.env.step(motor_targets)
+            data = self.env.unwrapped.data
+            total_reward += self._compute_reward(action, data)
+            if terminated or truncated:
+                break
 
-    def render(self):
-        return self.env.render()
+        self._last_action = action.astype(np.float32)
+        obs = self._get_obs(data)
 
-    def close(self):
-        return self.env.close()
-
-    @property
-    def unwrapped(self):
-        return self.env.unwrapped
+        return obs, float(total_reward), terminated, truncated, info
 
 
-def _make_env(render_mode=None, enable_gait_rewards=False):
-    """Create the Unitree G1 environment with custom reward shaping."""
+def _make_env(render_mode=None):
+    """Create the Unitree G1 environment with action scaling and custom reward."""
     import gymnasium as gym
 
     xml_path = "/opt/mujoco_menagerie/unitree_g1/scene.xml"
@@ -233,7 +249,20 @@ def _make_env(render_mode=None, enable_gait_rewards=False):
         render_mode=render_mode,
         **G1_ENV_KWARGS,
     )
-    return G1RewardWrapper(env, enable_gait_rewards=enable_gait_rewards)
+
+    # G1 uses <position> actuators — already PD control (biastype="affine").
+    # No need to fix biastype like Go2's <motor> actuators.
+    # The XML kp=500, dampratio=1 gives strong, well-damped servos.
+
+    # Override init_qpos with "stand" keyframe (same fix as Go2)
+    mj_model = env.unwrapped.model
+    if mj_model.nkey > 0:
+        home_qpos = mj_model.key_qpos[0].copy()
+    else:
+        home_qpos = mj_model.qpos0.copy()
+    env.unwrapped.init_qpos = home_qpos
+
+    return G1ActionScaler(env)
 
 
 def _get_dims():
@@ -506,11 +535,11 @@ def _build_policy_and_value(state_dim: int, action_dim: int):
         def __init__(self):
             super().__init__()
             self.net = nn.Sequential(
-                nn.Linear(state_dim, HIDDEN_DIM), nn.Tanh(),
-                nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.Tanh(),
+                nn.Linear(state_dim, HIDDEN_DIM), nn.SiLU(),
+                nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.SiLU(),
             )
             self.mean = nn.Linear(HIDDEN_DIM, action_dim)
-            self.log_std = nn.Parameter(torch.full((action_dim,), -2.0))
+            self.log_std = nn.Parameter(torch.full((action_dim,), -0.5))  # std=0.6 — enough exploration
 
         def forward(self, x):
             h = self.net(x)
@@ -520,8 +549,8 @@ def _build_policy_and_value(state_dim: int, action_dim: int):
         def __init__(self):
             super().__init__()
             self.net = nn.Sequential(
-                nn.Linear(state_dim, HIDDEN_DIM), nn.Tanh(),
-                nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.Tanh(),
+                nn.Linear(state_dim, HIDDEN_DIM), nn.SiLU(),
+                nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.SiLU(),
                 nn.Linear(HIDDEN_DIM, 1),
             )
 
@@ -539,11 +568,14 @@ NUM_PARALLEL_ENVS = 32  # number of environments to run simultaneously per worke
 @worker_env.task(retries=5)
 async def collect_rollouts(
     checkpoint: File | None,
-    num_episodes: int = 100,
-    max_steps: int = 1000,
-    enable_gait_rewards: bool = False,
+    num_steps: int = 8000,
 ) -> File:
-    """Collect rollouts using vectorized parallel environments. Runs as a Flyte task for parallelism."""
+    """Collect rollouts using step-based collection (like Brax PPO).
+
+    Collects a fixed number of STEPS, not episodes. When an episode ends,
+    the env auto-resets and collection continues. This guarantees consistent
+    data volume regardless of episode length.
+    """
     import torch
     import numpy as np
     import gymnasium as gym
@@ -560,16 +592,16 @@ async def collect_rollouts(
             obs_norm.load_state_dict(ckpt["obs_norm"])
     policy.eval()
 
-    n_envs = min(NUM_PARALLEL_ENVS, num_episodes)
-    envs = gym.vector.SyncVectorEnv([lambda: _make_env(enable_gait_rewards=enable_gait_rewards) for _ in range(n_envs)])
+    n_envs = NUM_PARALLEL_ENVS
+    envs = gym.vector.SyncVectorEnv([lambda: _make_env() for _ in range(n_envs)])
 
     all_episodes = []
     ep_transitions = [[] for _ in range(n_envs)]
 
     obs, _ = envs.reset()
-    episodes_completed = 0
+    steps_collected = 0
 
-    while episodes_completed < num_episodes:
+    while steps_collected < num_steps:
         obs_normed = obs_norm.normalize(obs).astype(np.float32)
         with torch.no_grad():
             obs_t = torch.from_numpy(obs_normed)
@@ -592,19 +624,22 @@ async def collect_rollouts(
                 "terminated": bool(terminateds[i]),
                 "truncated": bool(truncateds[i]),
             })
+            steps_collected += 1
 
             if terminateds[i] or truncateds[i]:
                 all_episodes.append(ep_transitions[i])
                 ep_transitions[i] = []
-                episodes_completed += 1
-                if episodes_completed >= num_episodes:
-                    break
 
         obs = next_obs
 
+    # Flush any in-progress episodes (mark as truncated)
+    for i in range(n_envs):
+        if ep_transitions[i]:
+            ep_transitions[i][-1]["truncated"] = True
+            all_episodes.append(ep_transitions[i])
+
     envs.close()
 
-    # Save rollouts + normalizer state
     path = "/tmp/rollouts.json"
     with open(path, "w") as f:
         json.dump({"episodes": all_episodes, "obs_norm": obs_norm.state_dict()}, f)
@@ -615,11 +650,11 @@ async def collect_rollouts(
 async def ppo_update(
     rollout_files: list[File],
     checkpoint: File | None,
-    ppo_epochs: int = 5,
+    ppo_epochs: int = 10,
     clip_eps: float = 0.2,
-    lr: float = 3e-5,
-    gamma: float = 0.95,
-    lam: float = 0.9,
+    lr: float = 3e-4,
+    gamma: float = 0.97,
+    lam: float = 0.95,
 ) -> File:
     """Merge rollouts from parallel workers and run PPO update on GPU. Returns updated checkpoint."""
     import torch
@@ -670,6 +705,12 @@ async def ppo_update(
             base_norm.merge(obs_norm)
             obs_norm = base_norm
 
+    # Reward normalization — critical for CPU PPO.
+    # Without this, the alive bonus and control penalties dominate the reward signal,
+    # drowning out the forward velocity gradient. Brax PPO does this internally.
+    all_raw_rewards = [t["reward"] for ep in all_episodes for t in ep]
+    reward_std = np.std(all_raw_rewards) + 1e-8
+
     # Compute GAE on CPU, then move batches to GPU for training
     all_obs, all_actions, all_old_log_probs, all_advantages, all_returns = [], [], [], [], []
 
@@ -677,7 +718,7 @@ async def ppo_update(
         raw_obs = np.array([t["obs"] for t in ep], dtype=np.float32)
         obs = torch.tensor(obs_norm.normalize(raw_obs).astype(np.float32))
         actions = torch.tensor([t["action"] for t in ep], dtype=torch.float32)
-        rewards = [t["reward"] for t in ep]
+        rewards = [t["reward"] / reward_std for t in ep]  # normalized rewards for GAE
         old_log_probs = torch.tensor([t["log_prob"] for t in ep], dtype=torch.float32)
 
         with torch.no_grad():
@@ -718,8 +759,8 @@ async def ppo_update(
     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
 
     total_loss = 0.0
-    entropy_coef = 0.002
-    batch_size = min(512, len(obs_batch))
+    entropy_coef = 0.01  # moderate exploration
+    batch_size = min(256, len(obs_batch))  # smaller batches = more gradient updates per epoch
 
     for _ in range(ppo_epochs):
         indices = torch.randperm(len(obs_batch))
@@ -783,11 +824,13 @@ def run_eval(policy, obs_norm, num_episodes, max_steps):
     if policy is not None:
         policy.eval()
     all_rewards = []
+    all_lengths = []
 
     for ep_idx in range(num_episodes):
         env = _make_env()
         obs, _ = env.reset(seed=ep_idx + 1000)
         total_reward = 0.0
+        steps = 0
 
         for _ in range(max_steps):
             if policy is not None:
@@ -802,12 +845,16 @@ def run_eval(policy, obs_norm, num_episodes, max_steps):
 
             obs, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
+            steps += 1
             if terminated or truncated:
                 break
 
         env.close()
         all_rewards.append(total_reward)
+        all_lengths.append(steps)
 
+    avg_len = sum(all_lengths) / len(all_lengths)
+    log.info(f"  Eval: avg_episode_length={avg_len:.0f} steps")
     return sum(all_rewards) / len(all_rewards), max(all_rewards)
 
 
@@ -919,28 +966,32 @@ async def evaluate(
 
 @train_env.task(report=True, retries=3)
 async def train_agent(
-    num_iterations: int = 15,
-    episodes_per_iter: int = 20,
-    ppo_epochs: int = 5,
+    num_iterations: int = 60,
+    steps_per_iter: int = 80000,
+    ppo_epochs: int = 10,
     max_steps: int = 1000,
-    lr: float = 3e-5,
-    eval_every: int = 20,
-    num_workers: int = 5,
+    lr: float = 3e-4,
+    eval_every: int = 10,
+    num_workers: int = 10,
     resume_checkpoint: File | None = None,
 ) -> str:
     """
     PPO training loop for the Unitree G1 humanoid.
 
     1. Evaluate random baseline
-    2. For each iteration: collect rollouts -> PPO update -> evaluate
+    2. For each iteration: collect rollouts (step-based) -> PPO update -> evaluate
     3. Build final report with training curves + episode replays
+
+    Step-based collection: each worker collects a fixed number of transitions
+    (not episodes). This guarantees consistent data volume regardless of episode length.
 
     Pass resume_checkpoint to continue training from a previous run's checkpoint.
     On retry, automatically resumes from the last saved progress.
     """
     import torch
 
-    log.info(f"Starting PPO training: {num_iterations} iterations, {episodes_per_iter} episodes each")
+    steps_per_worker = steps_per_iter // num_workers
+    log.info(f"Starting PPO training: {num_iterations} iterations, {steps_per_iter} steps each ({num_workers} workers × {steps_per_worker} steps)")
 
     await flyte.report.replace.aio(
         "<h2>Unitree G1 — RL Training</h2>"
@@ -997,31 +1048,21 @@ async def train_agent(
             obs_norm.load_state_dict(ckpt["obs_norm"])
         log.info("Resuming from provided checkpoint")
 
-    # Episodes per worker — split evenly across parallel workers
-    eps_per_worker = max(1, episodes_per_iter // num_workers)
-
-    # Curriculum: gait rewards activate halfway through training
-    gait_start_iter = num_iterations // 2
-
     for i in range(start_iter, num_iterations + 1):
-        use_gait = i >= gait_start_iter
-        phase = "Phase 2 (gait)" if use_gait else "Phase 1 (locomotion)"
-        log.info(f"── Iteration {i}/{num_iterations} [{phase}] ({num_workers} workers × {eps_per_worker} episodes) ──")
+        log.info(f"── Iteration {i}/{num_iterations} ({num_workers} workers × {steps_per_worker} steps) ──")
 
         # Linear LR decay
         iter_lr = lr * max(0.1, 1.0 - 0.9 * (i - 1) / max(1, num_iterations - 1))
 
-        # Fan out rollout collection across parallel CPU workers
+        # Fan out step-based rollout collection across parallel CPU workers
         rollout_files = await asyncio.gather(*[
             collect_rollouts(
                 checkpoint=checkpoint_file,
-                num_episodes=eps_per_worker,
-                max_steps=max_steps,
-                enable_gait_rewards=use_gait,
+                num_steps=steps_per_worker,
             )
             for _ in range(num_workers)
         ])
-        log.info(f"  Collected {eps_per_worker * num_workers} episodes from {num_workers} workers")
+        log.info(f"  Collected ~{steps_per_iter} steps from {num_workers} workers")
 
         # PPO update on GPU task — merges rollouts, updates policy, returns checkpoint
         checkpoint_file = await ppo_update(
@@ -1171,7 +1212,7 @@ async def train_agent(
         '<table style="border-collapse:collapse;width:100%;">'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Robot</td><td style="padding:6px;border-bottom:1px solid #333;color:#00b894;">Unitree G1 Humanoid</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Iterations</td><td style="padding:6px;border-bottom:1px solid #333;">{num_iterations}</td></tr>'
-        f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Episodes/iter</td><td style="padding:6px;border-bottom:1px solid #333;">{episodes_per_iter}</td></tr>'
+        f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Steps/iter</td><td style="padding:6px;border-bottom:1px solid #333;">{steps_per_iter}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Random baseline</td><td style="padding:6px;border-bottom:1px solid #333;color:#e17055;">{baseline_reward:.1f}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Best trained reward</td><td style="padding:6px;border-bottom:1px solid #333;color:#00b894;">{best["eval_reward"]:.1f}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Improvement</td><td style="padding:6px;border-bottom:1px solid #333;color:#fdcb6e;">{improvement:+.1f}</td></tr>'

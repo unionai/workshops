@@ -224,14 +224,18 @@ class Go2ActionScaler(_GymnasiumWrapper):
         self._feet_air_time[foot_contact] = 0.0
         self._last_contact = foot_contact
 
+        # Action rate penalty — penalizes jerky movements between consecutive steps
+        action_rate_cost = -0.05 * np.sum((action - self._last_action) ** 2)
+
         return (forward_reward + alive_bonus + orientation_penalty
-                + ctrl_cost + 1.0 * air_time_reward)
+                + ctrl_cost + 1.0 * air_time_reward + action_rate_cost)
 
     def step(self, action):
         import numpy as np
 
-        # Clip to [-1, 1] then scale: small offset from default standing pose
+        # Clip to [-1, 1], smooth with EMA, then scale to joint targets
         action = np.clip(action, -1.0, 1.0)
+        action = 0.8 * action + 0.2 * self._last_action  # low-pass filter reduces jitter
         motor_targets = self._default_pose + action * self.ACTION_SCALE
         motor_targets = np.clip(motor_targets, self._lower, self._upper)
 

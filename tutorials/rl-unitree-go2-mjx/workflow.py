@@ -108,6 +108,12 @@ def _make_go2_env():
             # Add joint damping for stability
             mj_model.dof_damping[6:] = 0.5239
 
+            # Get foot site indices for air time reward
+            self._foot_site_ids = jp.array([
+                mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, name)
+                for name in ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+            ])
+
             sys = mjcf.load_model(mj_model)
             kwargs["n_frames"] = 5  # 50 Hz control (matching Barkour)
             kwargs["backend"] = "mjx"
@@ -137,7 +143,11 @@ def _make_go2_env():
             obs = self._get_obs(data, jp.zeros(self.sys.nu))
             reward, done = jp.zeros(2)
             metrics = {"reward": reward}
-            info = {"last_action": jp.zeros(self.sys.nu)}
+            info = {
+                "last_action": jp.zeros(self.sys.nu),
+                "feet_air_time": jp.zeros(4),
+                "last_contact": jp.ones(4, dtype=jp.bool_),
+            }
             return State(pipeline_state=data, obs=obs, reward=reward, done=done,
                          metrics=metrics, info=info)
 
@@ -167,7 +177,26 @@ def _make_go2_env():
             # Control cost
             ctrl_cost = -0.02 * jp.sum(jp.square(action))
 
-            reward = forward_reward + alive_bonus + orientation_penalty + ctrl_cost
+            # ── Feet air time reward ────────────────────────────────────
+            # Encourages proper trotting gait — feet should alternate between
+            # air and ground. Rewards feet that land after ~0.15s in the air.
+            foot_pos = data.site_xpos[self._foot_site_ids]  # (4, 3)
+            foot_contact = foot_pos[:, 2] < 0.025  # on ground if z < 2.5cm
+
+            # Track air time: increment while in air, reset on ground contact
+            air_time = state.info["feet_air_time"] + self.dt
+            air_time = jp.where(foot_contact, 0.0, air_time)
+
+            # Reward feet that just landed after being in air
+            first_contact = foot_contact & ~state.info["last_contact"]
+            air_time_reward = jp.sum(
+                (state.info["feet_air_time"] - 0.15) * first_contact
+            )
+
+            reward = (
+                forward_reward + alive_bonus + orientation_penalty
+                + ctrl_cost + 1.0 * air_time_reward
+            )
 
             # ── Termination ─────────────────────────────────────────────
             z_pos = data.qpos[2]
@@ -186,7 +215,12 @@ def _make_go2_env():
             obs = self._get_obs(data, action)
             # Preserve all info keys added by Brax's training wrapper (steps,
             # episode_metrics, etc.) — JAX scan requires matching pytree structure
-            info = {**state.info, "last_action": action}
+            info = {
+                **state.info,
+                "last_action": action,
+                "feet_air_time": air_time,
+                "last_contact": foot_contact,
+            }
             return state.replace(
                 pipeline_state=data, obs=obs, reward=reward, done=done,
                 metrics={"reward": reward},
