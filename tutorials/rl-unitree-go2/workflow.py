@@ -10,7 +10,7 @@ Quadrupeds are much easier to train than humanoids — 4 legs provide inherent s
 
 Usage:
     # Local (quick demo)
-    flyte run --local workflow.py train_agent --num_iterations 5 --episodes_per_iter 10
+    flyte run --local workflow.py train_agent --num_iterations 5 --steps_per_iter 1000
 
     # Remote (full training — default params)
     flyte run workflow.py train_agent
@@ -69,122 +69,194 @@ train_env = flyte.TaskEnvironment(
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-HIDDEN_DIM = 128  # Smaller network — quadrupeds have simpler dynamics
+HIDDEN_DIM = 256  # Larger network for 42-dim custom observation
 
 # Go2 env config — passed to Ant-v5 with the Go2 XML
 GO2_ENV_KWARGS = {
-    "healthy_z_range": (0.22, 0.6),       # Go2 body at ~0.3m standing; 0.22 min forces standing (sitting ≈ 0.18m = death)
+    "healthy_z_range": (0.18, 0.6),        # Match MJX termination bounds
     "healthy_reward": 0.0,                  # disable built-in — custom wrapper handles it
     "forward_reward_weight": 0.0,           # disable built-in — custom wrapper handles it
-    "ctrl_cost_weight": 0.0,                # disable built-in — custom wrapper handles it
+    "ctrl_cost_weight": 0.0,               # disable built-in — custom wrapper handles it
     "contact_cost_weight": 0.0,             # disable built-in contact cost
     "reset_noise_scale": 0.01,              # small noise so it starts near standing
     "terminate_when_unhealthy": True,
     "exclude_current_positions_from_observation": True,
     "include_cfrc_ext_in_observation": True,
-    "frame_skip": 4,
+    "frame_skip": 5,                        # Match MJX n_frames=5
 }
 
 # Target walking speed in m/s (Go2 walks ~0.5-1.0 m/s)
 TARGET_VELOCITY = 0.6
 
+# Lazy import — gymnasium only available in container
+try:
+    import gymnasium
+    _GymnasiumWrapper = gymnasium.Wrapper
+except ImportError:
+    _GymnasiumWrapper = object
 
-class Go2RewardWrapper:
-    """Custom reward wrapper for Unitree Go2 locomotion.
 
-    Quadrupeds need much simpler rewards than humanoids — 4 legs provide
-    inherent stability so we can focus on forward movement:
-    - Velocity tracking (exponential kernel at target speed)
-    - Alive bonus
-    - Termination penalty
-    - Orientation penalty (stay level)
-    - Control cost (smooth actions)
+class Go2ActionScaler(_GymnasiumWrapper):
+    """Wraps the Go2 env with proper action scaling and custom observation.
+
+    Go2 uses position-control motors (PD controllers), not torque. Policy outputs
+    [-1, 1] are scaled to small offsets from the default standing pose:
+        motor_targets = default_pose + action * action_scale
+
+    Custom observation matches the MJX version: projected gravity, angular velocity,
+    joint deltas from default pose, joint velocities, and last action (42 dims).
+
+    Action space is normalized to [-1, 1] — the policy outputs in this range and
+    the wrapper handles the scaling to joint positions.
     """
 
+    ACTION_SCALE = 0.3  # Policy output [-1,1] → ±0.3 rad offset from default pose
+    ACTION_REPEAT = 4   # Hold each action for 4 env steps (0.04s) — gives PD controller
+                        # time to actually move legs, producing real forward motion.
+                        # Without this, per-step random noise just makes the robot jiggle.
+    OBS_DIM = 42  # 3 + 3 + 12 + 12 + 12
+
     def __init__(self, env):
-        self.env = env
-        self.observation_space = env.observation_space
-        self.action_space = env.action_space
-        self.spec = getattr(env, "spec", None)
-        self.metadata = getattr(env, "metadata", {})
-        self.render_mode = getattr(env, "render_mode", None)
-        self.np_random = getattr(env, "np_random", None)
-        self.prev_action = None
+        import numpy as np
+        import gymnasium.spaces as spaces
+        super().__init__(env)
+
+        # Custom 42-dim observation space matching MJX version
+        self.observation_space = spaces.Box(
+            low=-100.0, high=100.0, shape=(self.OBS_DIM,), dtype=np.float32
+        )
+        # Normalize action space to [-1, 1] — matches what Brax PPO expects
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(env.action_space.shape[0],), dtype=np.float32
+        )
+
+        # Get default standing pose from model
+        mj_model = env.unwrapped.model
+        if mj_model.nkey > 0:
+            self._default_pose = mj_model.key_qpos[0][7:].copy()
+        else:
+            self._default_pose = mj_model.qpos0[7:].copy()
+
+        # Joint limits: default ± offset (abduction, hip, knee per leg)
+        offset = np.array([0.2, 0.8, 0.8] * 4)
+        self._lower = self._default_pose - offset
+        self._upper = self._default_pose + offset
+        self._last_action = np.zeros(env.action_space.shape[0], dtype=np.float32)
+
+        # Foot site indices for air time reward
+        import mujoco
+        self._foot_site_ids = np.array([
+            mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, name)
+            for name in ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+        ])
+        self._feet_air_time = np.zeros(4, dtype=np.float32)
+        self._last_contact = np.ones(4, dtype=bool)
+        self._dt = mj_model.opt.timestep * GO2_ENV_KWARGS.get("frame_skip", 5)
+
+    def _get_obs(self, data):
+        """Build custom observation matching the MJX version."""
+        import numpy as np
+
+        # Projected gravity: rotate [0,0,-1] by inverse body quaternion
+        quat = data.qpos[3:7]
+        w, x, y, z = quat[0], -quat[1], -quat[2], -quat[3]
+        gx = 2.0 * (x * z + w * y) * (-1.0)
+        gy = 2.0 * (y * z - w * x) * (-1.0)
+        gz = (1.0 - 2.0 * (x * x + y * y)) * (-1.0)
+        gravity_body = np.array([gx, gy, gz], dtype=np.float32)
+
+        # Angular velocity (scaled)
+        ang_vel = data.qvel[3:6].astype(np.float32) * 0.25
+
+        # Joint deltas from default pose
+        joint_deltas = (data.qpos[7:] - self._default_pose).astype(np.float32)
+
+        # Joint velocities
+        joint_vel = data.qvel[6:].astype(np.float32)
+
+        obs = np.concatenate([gravity_body, ang_vel, joint_deltas, joint_vel, self._last_action])
+        return np.clip(obs, -100.0, 100.0)
 
     def reset(self, **kwargs):
-        self.prev_action = None
-        return self.env.reset(**kwargs)
+        import numpy as np
+        _obs, info = self.env.reset(**kwargs)
+        self._last_action = np.zeros(self.env.action_space.shape[0], dtype=np.float32)
+        self._feet_air_time = np.zeros(4, dtype=np.float32)
+        self._last_contact = np.ones(4, dtype=bool)
+
+        # Give the robot a small random forward velocity at reset.
+        # Without this, random exploration produces zero net forward movement
+        # (uncorrelated per-step noise cancels out), so the policy never
+        # discovers that walking earns reward. The initial push lets the robot
+        # experience forward velocity and learn to maintain it.
+        import mujoco as _mj
+        data = self.env.unwrapped.data
+        data.qvel[0] = np.random.uniform(0.2, 1.0)  # moderate forward push
+        _mj.mj_forward(self.env.unwrapped.model, data)
+
+        return self._get_obs(data), info
+
+    def _compute_reward(self, action, data):
+        """Compute custom reward from physics state."""
+        import numpy as np
+
+        x_vel = data.qvel[0]
+        forward_reward = 3.0 * x_vel
+
+        alive_bonus = 0.1  # small — stabilizes training without dominating velocity signal
+
+        quat = data.qpos[3:7]
+        w, x, y, z = quat[0], -quat[1], -quat[2], -quat[3]
+        gx = 2.0 * (x * z + w * y) * (-1.0)
+        gy = 2.0 * (y * z - w * x) * (-1.0)
+        orientation_penalty = -2.0 * (gx ** 2 + gy ** 2)
+
+        ctrl_cost = -0.02 * np.sum(action ** 2)
+
+        # Feet air time reward
+        foot_pos = data.site_xpos[self._foot_site_ids]
+        foot_contact = foot_pos[:, 2] < 0.025
+        self._feet_air_time += self._dt
+        first_contact = foot_contact & ~self._last_contact
+        air_time_reward = np.sum(
+            (self._feet_air_time - 0.15) * first_contact
+        )
+        self._feet_air_time[foot_contact] = 0.0
+        self._last_contact = foot_contact
+
+        return (forward_reward + alive_bonus + orientation_penalty
+                + ctrl_cost + 1.0 * air_time_reward)
 
     def step(self, action):
         import numpy as np
-        obs, _base_reward, terminated, truncated, info = self.env.step(action)
 
-        data = self.env.unwrapped.data
+        # Clip to [-1, 1] then scale: small offset from default standing pose
+        action = np.clip(action, -1.0, 1.0)
+        motor_targets = self._default_pose + action * self.ACTION_SCALE
+        motor_targets = np.clip(motor_targets, self._lower, self._upper)
 
-        z_pos = data.qpos[2]
+        # Action repeat: hold the same action for multiple env steps.
+        # PD position control is smooth — per-step random noise just makes the
+        # robot jiggle in place. Repeating actions gives the PD controller time
+        # to actually move legs to their targets, producing sustained movements
+        # that generate forward velocity during exploration.
+        total_reward = 0.0
+        terminated = truncated = False
+        for _ in range(self.ACTION_REPEAT):
+            _obs, _base_reward, terminated, truncated, info = self.env.step(motor_targets)
+            data = self.env.unwrapped.data
+            total_reward += self._compute_reward(action, data)
+            if terminated or truncated:
+                break
 
-        # Height factor: 0 when crouching (z=0.20), 1 when standing (z=0.30)
-        # Gates movement rewards — no reward for scooting while sitting
-        height_factor = np.clip((z_pos - 0.20) / 0.10, 0.0, 1.0)
+        self._last_action = action.astype(np.float32)
+        obs = self._get_obs(data)
 
-        # 1. Forward velocity — GATED by height so sitting+scooting = 0
-        x_vel = data.qvel[0]
-        tracking_reward = 5.0 * np.clip(x_vel / TARGET_VELOCITY, 0.0, 1.0) * height_factor
-
-        # 2. Standing reward — must be upright to earn anything
-        height_reward = 2.0 * height_factor
-
-        # 3. Upright bonus — torso z-axis should point up (w≈1 when upright)
-        quat = data.qpos[3:7]
-        upright_reward = 1.0 * quat[0] ** 2
-
-        # 4. Termination penalty — meaningful so robot avoids falling
-        death_penalty = -20.0 if terminated else 0.0
-
-        # 5. Vertical velocity penalty — reduced so walking bounce is ok
-        z_vel = data.qvel[2]
-        z_vel_penalty = -0.2 * z_vel ** 2
-
-        # 6. Angular velocity penalty — don't roll or tumble
-        ang_vel_xy = data.qvel[3:5]
-        ang_vel_penalty = -0.1 * np.sum(ang_vel_xy ** 2)
-
-        # 7. Action rate penalty — smooth movements
-        if self.prev_action is not None:
-            action_rate_penalty = -0.005 * np.sum((action - self.prev_action) ** 2)
-        else:
-            action_rate_penalty = 0.0
-        self.prev_action = action.copy()
-
-        # 8. Control cost — light penalty
-        ctrl_penalty = -0.002 * np.sum(action ** 2)
-
-        reward = (
-            tracking_reward
-            + height_reward
-            + upright_reward
-            + death_penalty
-            + z_vel_penalty
-            + ang_vel_penalty
-            + action_rate_penalty
-            + ctrl_penalty
-        )
-
-        return obs, float(reward), terminated, truncated, info
-
-    def render(self):
-        return self.env.render()
-
-    def close(self):
-        return self.env.close()
-
-    @property
-    def unwrapped(self):
-        return self.env.unwrapped
+        return obs, float(total_reward), terminated, truncated, info
 
 
 def _make_env(render_mode=None):
-    """Create the Unitree Go2 environment with custom reward shaping."""
+    """Create the Unitree Go2 environment with action scaling and custom reward."""
     import gymnasium as gym
 
     xml_path = "/opt/mujoco_menagerie/unitree_go2/scene.xml"
@@ -194,14 +266,40 @@ def _make_env(render_mode=None):
         render_mode=render_mode,
         **GO2_ENV_KWARGS,
     )
-    return Go2RewardWrapper(env)
+
+    # Convert torque motors to position-controlled PD servos.
+    # CRITICAL: go2.xml uses <motor> actuators (biastype="none"), so setting biasprm
+    # alone does NOTHING — MuJoCo ignores bias terms when biastype is "none".
+    # go2_mjx.xml already uses <general biastype="affine">, which is why MJX works.
+    # We must explicitly set biastype to affine for PD control to work on CPU.
+    import mujoco as _mj
+    mj_model = env.unwrapped.model
+    mj_model.actuator_biastype[:] = _mj.mjtBias.mjBIAS_AFFINE  # Enable PD control
+    mj_model.actuator_gainprm[:, 0] = 35.0       # P-gain
+    mj_model.actuator_biasprm[:, 0] = 0.0        # no constant bias
+    mj_model.actuator_biasprm[:, 1] = -35.0      # position feedback: -Kp * joint_pos
+    mj_model.actuator_biasprm[:, 2] = -0.5       # velocity feedback: -Kd * joint_vel
+    mj_model.dof_damping[6:] = 0.5239
+
+    # CRITICAL: Override init_qpos with the "home" keyframe (standing pose).
+    # Gymnasium's Ant-v5 resets to model.qpos0 which has all joints at 0
+    # (legs extended). The Go2 standing pose (thigh=0.9, calf=-1.8) is only
+    # defined in the keyframe. Without this, the robot starts splayed out
+    # and falls immediately every episode.
+    if mj_model.nkey > 0:
+        home_qpos = mj_model.key_qpos[0].copy()
+    else:
+        home_qpos = mj_model.qpos0.copy()
+    env.unwrapped.init_qpos = home_qpos
+
+    return Go2ActionScaler(env)
 
 
 def _get_dims():
     """Get observation and action dimensions from the Go2 environment."""
     env = _make_env()
-    state_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
+    state_dim = env.observation_space.shape[0]  # 42 (custom obs)
+    action_dim = env.action_space.shape[0]      # 12 (Go2 joints)
     env.close()
     return state_dim, action_dim
 
@@ -454,11 +552,11 @@ def _build_policy_and_value(state_dim: int, action_dim: int):
         def __init__(self):
             super().__init__()
             self.net = nn.Sequential(
-                nn.Linear(state_dim, HIDDEN_DIM), nn.Tanh(),
-                nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.Tanh(),
+                nn.Linear(state_dim, HIDDEN_DIM), nn.SiLU(),
+                nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.SiLU(),
             )
             self.mean = nn.Linear(HIDDEN_DIM, action_dim)
-            self.log_std = nn.Parameter(torch.full((action_dim,), -1.0))
+            self.log_std = nn.Parameter(torch.full((action_dim,), -0.5))  # std=0.6 — enough exploration to stumble into forward motion
 
         def forward(self, x):
             h = self.net(x)
@@ -468,8 +566,8 @@ def _build_policy_and_value(state_dim: int, action_dim: int):
         def __init__(self):
             super().__init__()
             self.net = nn.Sequential(
-                nn.Linear(state_dim, HIDDEN_DIM), nn.Tanh(),
-                nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.Tanh(),
+                nn.Linear(state_dim, HIDDEN_DIM), nn.SiLU(),
+                nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.SiLU(),
                 nn.Linear(HIDDEN_DIM, 1),
             )
 
@@ -487,10 +585,14 @@ NUM_PARALLEL_ENVS = 32
 @worker_env.task(retries=5)
 async def collect_rollouts(
     checkpoint: File | None,
-    num_episodes: int = 100,
-    max_steps: int = 1000,
+    num_steps: int = 8000,
 ) -> File:
-    """Collect rollouts using vectorized parallel environments."""
+    """Collect rollouts using step-based collection (like Brax PPO).
+
+    Collects a fixed number of STEPS, not episodes. When an episode ends,
+    the env auto-resets and collection continues. This guarantees consistent
+    data volume regardless of episode length.
+    """
     import torch
     import numpy as np
     import gymnasium as gym
@@ -507,16 +609,16 @@ async def collect_rollouts(
             obs_norm.load_state_dict(ckpt["obs_norm"])
     policy.eval()
 
-    n_envs = min(NUM_PARALLEL_ENVS, num_episodes)
+    n_envs = NUM_PARALLEL_ENVS
     envs = gym.vector.SyncVectorEnv([lambda: _make_env() for _ in range(n_envs)])
 
     all_episodes = []
     ep_transitions = [[] for _ in range(n_envs)]
 
     obs, _ = envs.reset()
-    episodes_completed = 0
+    steps_collected = 0
 
-    while episodes_completed < num_episodes:
+    while steps_collected < num_steps:
         obs_normed = obs_norm.normalize(obs).astype(np.float32)
         with torch.no_grad():
             obs_t = torch.from_numpy(obs_normed)
@@ -539,15 +641,19 @@ async def collect_rollouts(
                 "terminated": bool(terminateds[i]),
                 "truncated": bool(truncateds[i]),
             })
+            steps_collected += 1
 
             if terminateds[i] or truncateds[i]:
                 all_episodes.append(ep_transitions[i])
                 ep_transitions[i] = []
-                episodes_completed += 1
-                if episodes_completed >= num_episodes:
-                    break
 
         obs = next_obs
+
+    # Flush any in-progress episodes (mark as truncated)
+    for i in range(n_envs):
+        if ep_transitions[i]:
+            ep_transitions[i][-1]["truncated"] = True
+            all_episodes.append(ep_transitions[i])
 
     envs.close()
 
@@ -564,7 +670,7 @@ async def ppo_update(
     ppo_epochs: int = 5,
     clip_eps: float = 0.2,
     lr: float = 3e-4,
-    gamma: float = 0.99,
+    gamma: float = 0.97,
     lam: float = 0.95,
 ) -> File:
     """Merge rollouts from parallel workers and run PPO update on GPU."""
@@ -612,6 +718,12 @@ async def ppo_update(
             base_norm.merge(obs_norm)
             obs_norm = base_norm
 
+    # Reward normalization — critical for CPU PPO.
+    # Without this, the alive bonus and control penalties dominate the reward signal,
+    # drowning out the forward velocity gradient. Brax PPO does this internally.
+    all_raw_rewards = [t["reward"] for ep in all_episodes for t in ep]
+    reward_std = np.std(all_raw_rewards) + 1e-8
+
     # Compute GAE
     all_obs, all_actions, all_old_log_probs, all_advantages, all_returns = [], [], [], [], []
 
@@ -619,7 +731,7 @@ async def ppo_update(
         raw_obs = np.array([t["obs"] for t in ep], dtype=np.float32)
         obs = torch.tensor(obs_norm.normalize(raw_obs).astype(np.float32))
         actions = torch.tensor([t["action"] for t in ep], dtype=torch.float32)
-        rewards = [t["reward"] for t in ep]
+        rewards = [t["reward"] / reward_std for t in ep]  # normalized rewards for GAE
         old_log_probs = torch.tensor([t["log_prob"] for t in ep], dtype=torch.float32)
 
         with torch.no_grad():
@@ -660,8 +772,8 @@ async def ppo_update(
     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
 
     total_loss = 0.0
-    entropy_coef = 0.005  # slightly more exploration for quadruped
-    batch_size = min(512, len(obs_batch))
+    entropy_coef = 0.01  # moderate exploration
+    batch_size = min(256, len(obs_batch))  # smaller batches = more gradient updates per epoch
 
     for _ in range(ppo_epochs):
         indices = torch.randperm(len(obs_batch))
@@ -725,10 +837,12 @@ def run_eval(policy, obs_norm, num_episodes, max_steps):
         policy.eval()
     all_rewards = []
 
+    all_lengths = []
     for ep_idx in range(num_episodes):
         env = _make_env()
         obs, _ = env.reset(seed=ep_idx + 1000)
         total_reward = 0.0
+        steps = 0
 
         for _ in range(max_steps):
             if policy is not None:
@@ -743,12 +857,16 @@ def run_eval(policy, obs_norm, num_episodes, max_steps):
 
             obs, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
+            steps += 1
             if terminated or truncated:
                 break
 
         env.close()
         all_rewards.append(total_reward)
+        all_lengths.append(steps)
 
+    avg_len = sum(all_lengths) / len(all_lengths)
+    log.info(f"  Eval: avg_episode_length={avg_len:.0f} steps")
     return sum(all_rewards) / len(all_rewards), max(all_rewards)
 
 
@@ -859,25 +977,32 @@ async def evaluate(
 
 @train_env.task(report=True, retries=3)
 async def train_agent(
-    num_iterations: int = 30,
-    episodes_per_iter: int = 500,
-    ppo_epochs: int = 5,
+    num_iterations: int = 60,
+    steps_per_iter: int = 80000,
+    ppo_epochs: int = 10,
     max_steps: int = 1000,
     lr: float = 3e-4,
     eval_every: int = 10,
-    num_workers: int = 5,
+    num_workers: int = 10,
     resume_checkpoint: File | None = None,
 ) -> str:
     """
     PPO training loop for the Unitree Go2 quadruped.
 
     1. Evaluate random baseline
-    2. For each iteration: collect rollouts -> PPO update -> evaluate
+    2. For each iteration: collect rollouts (step-based) -> PPO update -> evaluate
     3. Build final report with training curves + episode replays
+
+    Step-based collection: each worker collects a fixed number of transitions
+    (not episodes). This matches Brax PPO's approach — with short episodes (~12
+    steps), episode-based collection produces too little data per iteration.
+    Default: 80,000 steps/iter across 10 workers = 8,000 steps/worker,
+    matching MJX's 4096 envs × 20 unroll = 81,920 transitions/iter.
     """
     import torch
 
-    log.info(f"Starting PPO training: {num_iterations} iterations, {episodes_per_iter} episodes each")
+    steps_per_worker = steps_per_iter // num_workers
+    log.info(f"Starting PPO training: {num_iterations} iterations, {steps_per_iter} steps each ({num_workers} workers × {steps_per_worker} steps)")
 
     await flyte.report.replace.aio(
         "<h2>Unitree Go2 — RL Training</h2>"
@@ -930,24 +1055,21 @@ async def train_agent(
             obs_norm.load_state_dict(ckpt["obs_norm"])
         log.info("Resuming from provided checkpoint")
 
-    eps_per_worker = max(1, episodes_per_iter // num_workers)
-
     for i in range(start_iter, num_iterations + 1):
-        log.info(f"── Iteration {i}/{num_iterations} ({num_workers} workers × {eps_per_worker} episodes) ──")
+        log.info(f"── Iteration {i}/{num_iterations} ({num_workers} workers × {steps_per_worker} steps) ──")
 
         # Linear LR decay
         iter_lr = lr * max(0.1, 1.0 - 0.9 * (i - 1) / max(1, num_iterations - 1))
 
-        # Fan out rollout collection across parallel CPU workers
+        # Fan out step-based rollout collection across parallel CPU workers
         rollout_files = await asyncio.gather(*[
             collect_rollouts(
                 checkpoint=checkpoint_file,
-                num_episodes=eps_per_worker,
-                max_steps=max_steps,
+                num_steps=steps_per_worker,
             )
             for _ in range(num_workers)
         ])
-        log.info(f"  Collected {eps_per_worker * num_workers} episodes from {num_workers} workers")
+        log.info(f"  Collected ~{steps_per_iter} steps from {num_workers} workers")
 
         # PPO update on GPU
         checkpoint_file = await ppo_update(
@@ -1092,7 +1214,7 @@ async def train_agent(
         '<table style="border-collapse:collapse;width:100%;">'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Robot</td><td style="padding:6px;border-bottom:1px solid #333;color:#00b894;">Unitree Go2 Quadruped</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Iterations</td><td style="padding:6px;border-bottom:1px solid #333;">{num_iterations}</td></tr>'
-        f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Episodes/iter</td><td style="padding:6px;border-bottom:1px solid #333;">{episodes_per_iter}</td></tr>'
+        f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Steps/iter</td><td style="padding:6px;border-bottom:1px solid #333;">{steps_per_iter:,}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Random baseline</td><td style="padding:6px;border-bottom:1px solid #333;color:#e17055;">{baseline_reward:.1f}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Best trained reward</td><td style="padding:6px;border-bottom:1px solid #333;color:#00b894;">{best["eval_reward"]:.1f}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Improvement</td><td style="padding:6px;border-bottom:1px solid #333;color:#fdcb6e;">{improvement:+.1f}</td></tr>'
