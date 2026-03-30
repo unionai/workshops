@@ -1,8 +1,9 @@
 """
-MuJoCo RL training with PPO — real policy learning with interactive reports.
+MuJoCo RL training with PPO — HalfCheetah locomotion.
 
 Trains a policy network on HalfCheetah-v4 using Proximal Policy Optimization (PPO)
-with Generalized Advantage Estimation (GAE). The policy actually improves over time.
+with Generalized Advantage Estimation (GAE). Rollout collection fans out across
+parallel CPU workers; PPO updates run on GPU.
 
 Usage:
     # Local (quick demo)
@@ -31,22 +32,40 @@ log.setLevel(logging.INFO)
 
 # ── Environments ─────────────────────────────────────────────────────────────
 
+rl_image = flyte.Image.from_debian_base().with_apt_packages(
+    "libegl1", "libgl1", "libgles2",
+).with_pip_packages(
+    "gymnasium[mujoco]", "torch", "numpy", "Pillow", "matplotlib",
+)
+
+# Workers — lightweight, many run in parallel for rollout collection + evaluation
+worker_env = flyte.TaskEnvironment(
+    name="mujoco-rl-worker",
+    image=rl_image,
+    resources=flyte.Resources(cpu=2, memory="8Gi"),
+)
+
+# GPU — PPO update only (allocated briefly each iteration, not held during rollouts)
+gpu_env = flyte.TaskEnvironment(
+    name="mujoco-rl-gpu",
+    image=rl_image,
+    resources=flyte.Resources(cpu=4, memory="16Gi", gpu=1),
+)
+
+# Orchestrator — lightweight, just coordinates workers and GPU task
 train_env = flyte.TaskEnvironment(
-    name="mujoco-rl",
-    image=flyte.Image.from_debian_base().with_apt_packages(
-        "libegl1", "libgl1", "libgles2",
-    ).with_pip_packages(
-        "gymnasium[mujoco]", "torch", "numpy", "Pillow", "matplotlib",
-    ),
-    resources=flyte.Resources(cpu=4, memory="8Gi"),
+    name="mujoco-rl-train",
+    image=rl_image,
+    resources=flyte.Resources(cpu=2, memory="8Gi"),
+    depends_on=[worker_env, gpu_env],
 )
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-ENV_ID = "HalfCheetah-v4"
-STATE_DIM = 17   # HalfCheetah observation space
-ACTION_DIM = 6   # HalfCheetah action space
-HIDDEN_DIM = 64
+ENV_ID = "Ant-v4"
+STATE_DIM = 27   # Ant observation space
+ACTION_DIM = 8   # Ant action space
+HIDDEN_DIM = 128
 
 
 # ── Report helpers ───────────────────────────────────────────────────────────
@@ -239,7 +258,7 @@ def _build_policy_and_value():
     import torch
     import torch.nn as nn
 
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     class Policy(nn.Module):
         def __init__(self):
@@ -272,7 +291,7 @@ def _build_policy_and_value():
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
 
-@train_env.task
+@worker_env.task(retries=3)
 async def collect_rollouts(
     checkpoint: File | None,
     num_episodes: int = 10,
@@ -283,8 +302,6 @@ async def collect_rollouts(
     import torch
     import gymnasium as gym
 
-    # Always build a policy — untrained weights give exploratory actions
-    # with correct log probs (critical for PPO's importance sampling ratio)
     policy, _, device = _build_policy_and_value()
     if checkpoint is not None:
         local = await checkpoint.download()
@@ -314,7 +331,8 @@ async def collect_rollouts(
                 "action": action.tolist(),
                 "reward": float(reward),
                 "log_prob": float(log_prob),
-                "done": bool(terminated or truncated),
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
             })
             obs = next_obs
             if terminated or truncated:
@@ -325,13 +343,13 @@ async def collect_rollouts(
 
     path = "/tmp/rollouts.json"
     with open(path, "w") as f:
-        json.dump(all_episodes, f)
+        json.dump({"episodes": all_episodes}, f)
     return await File.from_local(path)
 
 
-@train_env.task
+@gpu_env.task(retries=3)
 async def ppo_update(
-    rollouts_file: File,
+    rollout_files: list[File],
     checkpoint: File | None,
     ppo_epochs: int = 10,
     clip_eps: float = 0.2,
@@ -339,13 +357,18 @@ async def ppo_update(
     gamma: float = 0.99,
     lam: float = 0.95,
 ) -> File:
-    """Run PPO update on collected rollouts. Returns updated checkpoint."""
+    """Merge rollouts from parallel workers and run PPO update on GPU."""
     import torch
     import numpy as np
 
-    rollouts_path = await rollouts_file.download()
-    with open(rollouts_path) as f:
-        episodes = json.load(f)
+    episodes = []
+    for rollout_file in rollout_files:
+        rollouts_path = await rollout_file.download()
+        with open(rollouts_path) as f:
+            rollout_data = json.load(f)
+        episodes.extend(rollout_data["episodes"])
+
+    log.info(f"PPO update: {len(episodes)} episodes on {torch.device('cuda' if torch.cuda.is_available() else 'cpu')}")
     policy, value_net, device = _build_policy_and_value()
     policy_optim = torch.optim.Adam(policy.parameters(), lr=lr)
     value_optim = torch.optim.Adam(value_net.parameters(), lr=lr)
@@ -368,19 +391,28 @@ async def ppo_update(
         rewards = [t["reward"] for t in ep]
         old_log_probs = torch.tensor([t["log_prob"] for t in ep], dtype=torch.float32)
 
-        # Compute values
+        # Compute values for all observed states
         with torch.no_grad():
-            values = value_net(obs).numpy()
+            values = value_net(obs.to(device)).cpu().numpy()
 
-        # GAE
-        advantages = np.zeros(len(rewards))
+        # GAE — reverse sweep through the episode
+        T = len(rewards)
+        advantages = np.zeros(T)
         gae = 0.0
-        for t in reversed(range(len(rewards))):
-            next_val = values[t + 1] if t + 1 < len(values) else 0.0
+        for t in reversed(range(T)):
+            is_last = (t == T - 1)
+            if is_last:
+                # Last step: bootstrap only if truncated (time limit, not failure)
+                if ep[t].get("truncated", False):
+                    next_val = values[t]  # approximate: use current value as bootstrap
+                else:
+                    next_val = 0.0  # terminated or natural end — no bootstrap
+                gae = 0.0  # no future advantage beyond episode end
+            else:
+                next_val = values[t + 1]
+
             delta = rewards[t] + gamma * next_val - values[t]
             gae = delta + gamma * lam * gae
-            if ep[t]["done"] and t < len(rewards) - 1:
-                gae = 0.0
             advantages[t] = gae
 
         returns = advantages + values
@@ -391,52 +423,67 @@ async def ppo_update(
         all_advantages.append(torch.tensor(advantages, dtype=torch.float32))
         all_returns.append(torch.tensor(returns, dtype=torch.float32))
 
-    obs_batch = torch.cat(all_obs)
-    actions_batch = torch.cat(all_actions)
-    old_log_probs_batch = torch.cat(all_old_log_probs)
-    advantages_batch = torch.cat(all_advantages)
-    returns_batch = torch.cat(all_returns)
+    obs_batch = torch.cat(all_obs).to(device)
+    actions_batch = torch.cat(all_actions).to(device)
+    old_log_probs_batch = torch.cat(all_old_log_probs).to(device)
+    advantages_batch = torch.cat(all_advantages).to(device)
+    returns_batch = torch.cat(all_returns).to(device)
 
     # Normalize advantages
     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
 
     total_loss = 0.0
+    entropy_coef = 0.01
+    batch_size = min(256, len(obs_batch))
 
-    # PPO epochs
-    for epoch in range(ppo_epochs):
-        # Policy loss
-        mean, log_std = policy(obs_batch)
-        std = log_std.exp()
-        dist = torch.distributions.Normal(mean, std)
-        new_log_probs = dist.log_prob(actions_batch).sum(-1)
+    # PPO epochs with minibatch updates
+    for _ in range(ppo_epochs):
+        # Shuffle data each epoch
+        indices = torch.randperm(len(obs_batch))
+        for start in range(0, len(obs_batch), batch_size):
+            idx = indices[start:start + batch_size]
+            mb_obs = obs_batch[idx]
+            mb_actions = actions_batch[idx]
+            mb_old_lp = old_log_probs_batch[idx]
+            mb_adv = advantages_batch[idx]
+            mb_ret = returns_batch[idx]
 
-        ratio = (new_log_probs - old_log_probs_batch).exp()
-        clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
-        policy_loss = -torch.min(ratio * advantages_batch, clipped * advantages_batch).mean()
+            # Policy loss with entropy bonus
+            mean, log_std = policy(mb_obs)
+            std = log_std.exp()
+            dist = torch.distributions.Normal(mean, std)
+            new_log_probs = dist.log_prob(mb_actions).sum(-1)
+            entropy = dist.entropy().sum(-1).mean()
 
-        policy_optim.zero_grad()
-        policy_loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
-        policy_optim.step()
+            ratio = (new_log_probs - mb_old_lp).exp()
+            clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+            policy_loss = -torch.min(ratio * mb_adv, clipped * mb_adv).mean()
+            policy_loss = policy_loss - entropy_coef * entropy
 
-        # Value loss
-        values_pred = value_net(obs_batch)
-        value_loss = (values_pred - returns_batch).pow(2).mean()
+            policy_optim.zero_grad()
+            policy_loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+            policy_optim.step()
 
-        value_optim.zero_grad()
-        value_loss.backward()
-        torch.nn.utils.clip_grad_norm_(value_net.parameters(), 0.5)
-        value_optim.step()
+            # Value loss
+            values_pred = value_net(mb_obs)
+            value_loss = (values_pred - mb_ret).pow(2).mean()
 
-        total_loss += policy_loss.item()
+            value_optim.zero_grad()
+            value_loss.backward()
+            torch.nn.utils.clip_grad_norm_(value_net.parameters(), 0.5)
+            value_optim.step()
 
-    avg_loss = total_loss / ppo_epochs
+            total_loss += policy_loss.item()
 
-    # Save checkpoint
+    num_updates = ppo_epochs * max(1, len(obs_batch) // batch_size)
+    avg_loss = total_loss / num_updates
+
+    # Save checkpoint (move to CPU for portability between GPU/CPU workers)
     path = "/tmp/ppo_checkpoint.pt"
     torch.save({
-        "policy": policy.state_dict(),
-        "value": value_net.state_dict(),
+        "policy": {k: v.cpu() for k, v in policy.state_dict().items()},
+        "value": {k: v.cpu() for k, v in value_net.state_dict().items()},
         "policy_optim": policy_optim.state_dict(),
         "value_optim": value_optim.state_dict(),
         "loss": avg_loss,
@@ -444,7 +491,7 @@ async def ppo_update(
     return await File.from_local(path)
 
 
-@train_env.task(report=True)
+@worker_env.task(report=True, retries=3)
 async def evaluate(
     checkpoint: File | None,
     label: str = "Random",
@@ -533,20 +580,23 @@ async def evaluate(
 
 @train_env.task(report=True)
 async def train_agent(
-    num_iterations: int = 15,
-    episodes_per_iter: int = 20,
-    ppo_epochs: int = 15,
+    num_iterations: int = 30,
+    episodes_per_iter: int = 100,
+    ppo_epochs: int = 10,
     max_steps: int = 1000,
     lr: float = 3e-4,
+    num_workers: int = 5,
 ) -> str:
     """
-    PPO training loop with evaluation and interactive reports.
+    PPO training loop with parallel rollout collection.
 
     1. Evaluate random baseline
-    2. For each iteration: collect rollouts → PPO update → evaluate
+    2. For each iteration: fan out rollouts across workers → PPO update on GPU → evaluate
     3. Build final report with training curves + episode replays
     """
-    log.info(f"Starting PPO training: {num_iterations} iterations, {episodes_per_iter} episodes each")
+    import asyncio
+
+    log.info(f"Starting PPO training: {num_iterations} iterations, {num_workers} workers × {episodes_per_iter // num_workers} episodes")
 
     await flyte.report.replace.aio(
         "<h2>MuJoCo RL Training</h2>"
@@ -593,35 +643,25 @@ async def train_agent(
 
     import torch
 
+    eps_per_worker = max(1, episodes_per_iter // num_workers)
+
     for i in range(1, num_iterations + 1):
-        log.info(f"── Iteration {i}/{num_iterations} ──")
+        log.info(f"── Iteration {i}/{num_iterations} ({num_workers} workers × {eps_per_worker} episodes) ──")
 
-        # Show live progress during collection phase
-        progress = generate_progress_html(history, baseline_reward, num_iterations,
-                                          f"Iteration {i}/{num_iterations} — collecting rollouts...")
-        await flyte.report.replace.aio(
-            f"<h2>MuJoCo RL Training</h2>{progress}"
-        )
-        await flyte.report.flush.aio()
+        # Fan out rollout collection across parallel CPU workers
+        rollout_files = await asyncio.gather(*[
+            collect_rollouts(
+                checkpoint=checkpoint,
+                num_episodes=eps_per_worker,
+                max_steps=max_steps,
+            )
+            for _ in range(num_workers)
+        ])
+        log.info(f"  Collected {eps_per_worker * num_workers} episodes from {num_workers} workers")
 
-        # Collect rollouts with current policy
-        rollouts_file = await collect_rollouts(
-            checkpoint=checkpoint,
-            num_episodes=episodes_per_iter,
-            max_steps=max_steps,
-        )
-
-        # Show live progress during PPO update phase
-        progress = generate_progress_html(history, baseline_reward, num_iterations,
-                                          f"Iteration {i}/{num_iterations} — PPO update...")
-        await flyte.report.replace.aio(
-            f"<h2>MuJoCo RL Training</h2>{progress}"
-        )
-        await flyte.report.flush.aio()
-
-        # PPO update
+        # PPO update on GPU
         checkpoint = await ppo_update(
-            rollouts_file=rollouts_file,
+            rollout_files=list(rollout_files),
             checkpoint=checkpoint,
             ppo_epochs=ppo_epochs,
             lr=lr,
@@ -701,6 +741,7 @@ async def train_agent(
         '<table style="border-collapse:collapse;width:100%;">'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Environment</td><td style="padding:6px;border-bottom:1px solid #333;color:#00b894;">{ENV_ID}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Iterations</td><td style="padding:6px;border-bottom:1px solid #333;">{num_iterations}</td></tr>'
+        f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Workers</td><td style="padding:6px;border-bottom:1px solid #333;">{num_workers}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Episodes/iter</td><td style="padding:6px;border-bottom:1px solid #333;">{episodes_per_iter}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Random baseline</td><td style="padding:6px;border-bottom:1px solid #333;color:#e17055;">{baseline_reward:.1f}</td></tr>'
         f'<tr><td style="padding:6px;border-bottom:1px solid #333;">Best trained reward</td><td style="padding:6px;border-bottom:1px solid #333;color:#00b894;">{best["eval_reward"]:.1f}</td></tr>'

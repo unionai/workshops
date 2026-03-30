@@ -1,0 +1,8 @@
+mujoco-mjx
+jax[cuda12]
+brax
+flyte[tui]>=2.0
+unionai-reuse
+numpy
+matplotlib
+Pillow

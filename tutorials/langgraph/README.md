@@ -145,6 +145,54 @@ The app includes sliders for sub-topics and searches per topic, plus example que
 
 ---
 
+## Research Agent Pipeline
+
+A research pipeline that integrates LangGraph and Flyte as co-orchestrators. LangGraph controls the pipeline logic — planning, dynamic fan-out via `Send`, quality gates, and iterative deepening. Flyte provides the compute — each researcher runs as a separate task.
+
+### What we're building
+
+```
+research_pipeline (LangGraph pipeline graph)
+  ├── plan → split query into sub-topics
+  ├── research (Send fan-out → Flyte tasks)
+  │     ├── research_topic("topic A")  ┐
+  │     ├── research_topic("topic B")  ├── parallel Flyte tasks
+  │     └── research_topic("topic C")  ┘
+  ├── synthesize → combine into report
+  ├── quality_check → score + identify gaps
+  │     ├── gaps found → research again (new Flyte tasks)
+  │     └── good enough → finalize
+  └── finalize → final report
+```
+
+### How it works
+
+**`agent_research_pipeline/graph.py`** — Two LangGraph graphs: a ReAct research subgraph (agent ↔ tools loop) and a pipeline graph (plan → Send fan-out → synthesize → quality check → loop). The pipeline graph accepts a Flyte task as a parameter — this is how LangGraph dispatches to Flyte compute.
+
+**`agent_research_pipeline/workflow.py`** — Flyte tasks that the pipeline dispatches to. `research_topic` runs the ReAct agent on one sub-topic. `research_pipeline` builds the LangGraph pipeline and invokes it.
+
+### Run it
+
+```bash
+# Local with TUI
+flyte run --local --tui agent_research_pipeline/workflow.py research_pipeline \
+  --query "Compare quantum computing approaches: superconducting vs trapped ion"
+
+# Remote
+flyte run agent_research_pipeline/workflow.py research_pipeline \
+  --query "Compare quantum computing approaches" \
+  --num-topics 5 --max-searches 3 --max-iterations 3
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--query` | required | Research question |
+| `--num-topics` | 3 | Number of sub-topics to research in parallel |
+| `--max-searches` | 2 | Max web searches per sub-topic |
+| `--max-iterations` | 2 | Max quality gate iterations |
+
+---
+
 ## More Examples
 
 ### ReAct Agent
@@ -224,6 +272,12 @@ tutorials/langgraph/
 │   ├── graph.py           # LangGraph agent — search loop with tool calling
 │   ├── workflow.py        # Flyte tasks — plan, fan-out research, synthesize
 │   └── app.py             # Gradio UI — serve the workflow as a web app
+├── agent_research_pipeline/
+│   ├── config.py          # Flyte environment, secrets, resources
+│   ├── graph.py           # LangGraph graphs — pipeline + ReAct subgraph
+│   ├── workflow.py        # Flyte tasks — research_topic + pipeline orchestrator
+│   └── tools/
+│       └── search.py      # Tavily web search tool
 ├── agent_react/
 │   ├── __init__.py
 │   ├── graph.py           # ReAct graph with math + string tools
@@ -234,4 +288,4 @@ tutorials/langgraph/
     └── workflow.py        # Single task + iteration history report
 ```
 
-Tools in `tools/` are shared across all examples. Each example folder has its own `graph.py` (LangGraph agent) and `workflow.py` (Flyte tasks).
+Tools in `tools/` are shared across most examples. `agent_research_pipeline/` is fully self-contained with its own config, tools, and dependencies. Each example folder has its own `graph.py` (LangGraph agent) and `workflow.py` (Flyte tasks).

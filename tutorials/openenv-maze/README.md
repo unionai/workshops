@@ -46,7 +46,7 @@ flyte deploy deploy_server.py env
 
 Run the pipeline against the deployed server:
 ```bash
-flyte run maze_rl.py pipeline --env_url <APP_URL> --training_steps 10
+flyte run maze_rl.py pipeline --env_url https://bitter-block-f4f23.apps.demo.hosted.unionai.cloud -no-use_bfloat16 --no-gradient_checkpointing --rollouts_per_step 4 --training_steps 15
 ```
 
 ## Report Output
