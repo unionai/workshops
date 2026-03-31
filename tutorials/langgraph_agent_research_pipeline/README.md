@@ -23,7 +23,7 @@ Each `research_topic` task runs a LangGraph ReAct agent that searches the web vi
 ## Setup
 
 ```bash
-cd tutorials/langgraph/agent_research_pipeline
+cd tutorials/langgraph_agent_research_pipeline
 
 uv venv .venv --python 3.11
 source .venv/bin/activate
