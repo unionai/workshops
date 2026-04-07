@@ -18,12 +18,12 @@ research_pipeline (LangGraph pipeline graph, inside a Flyte task)
   └── finalize → final report
 ```
 
-Each `research_topic` task runs a LangGraph ReAct agent that searches the web via [Tavily](https://tavily.com/) and loops until it has enough information.
+Each `research_topic` task runs a LangGraph ReAct agent that searches the web via [Tavily](https://tavily.com/) — an AI-optimized search API — and loops until it has enough information.
 
 ## Setup
 
 ```bash
-cd tutorials/langgraph_agent_research_pipeline
+cd tutorials/langgraph_agent_research
 
 uv venv .venv --python 3.11
 source .venv/bin/activate

@@ -104,18 +104,16 @@ async def research_pipeline(
 
     png_bytes = pipeline.get_graph().draw_mermaid_png()
     img_b64 = base64.b64encode(png_bytes).decode()
-    graph_tab.log(
-        f"<h2>Research Pipeline</h2>"
-        f'<img src="data:image/png;base64,{img_b64}" alt="Research pipeline" />'
-    )
+    graph_tab.log(f"""\
+<h2>Research Pipeline</h2>\
+<img src="data:image/png;base64,{img_b64}" alt="Research pipeline" />""")
 
     subgraph = build_research_subgraph(OPENAI_API_KEY, TAVILY_API_KEY, max_searches, model=MODEL)
     sub_png = subgraph.get_graph().draw_mermaid_png()
     sub_b64 = base64.b64encode(sub_png).decode()
-    graph_tab.log(
-        f"<h2>Research Agent (ReAct)</h2>"
-        f'<img src="data:image/png;base64,{sub_b64}" alt="ReAct research agent" />'
-    )
+    graph_tab.log(f"""\
+<h2>Research Agent (ReAct)</h2>\
+<img src="data:image/png;base64,{sub_b64}" alt="ReAct research agent" />""")
     await flyte.report.flush.aio()
 
     # Run the pipeline — LangGraph controls the flow, Flyte runs the compute
@@ -141,15 +139,11 @@ async def research_pipeline(
     score = result.get("score", "N/A")
     iteration = result.get("iteration", 1) - 1  # -1 because it increments after last check
 
-    await flyte.report.replace.aio(
-        f"<h2>Research Report</h2>"
-        f"<p><b>Query:</b> {query}</p>"
-        f"<p><b>Quality:</b> {score}/10 after {iteration} iteration(s)</p>"
-        f"<hr/>{md_to_html(final_report)}"
-    )
-    for r in sub_reports:
-        tab = flyte.report.get_tab(r["topic"][:30])
-        tab.log(f"<h2>{r['topic']}</h2>{md_to_html(r['report'])}")
+    await flyte.report.replace.aio(f"""\
+<h2>Research Report</h2>\
+<p><b>Query:</b> {query}</p>\
+<p><b>Quality:</b> {score}/10 after {iteration} iteration(s)</p>\
+<hr/>{md_to_html(final_report)}""")
     await flyte.report.flush.aio()
 
     log.info(f"Research pipeline complete. Score: {score}/10, Iterations: {iteration}")

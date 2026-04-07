@@ -55,11 +55,10 @@ def build_research_subgraph(
     tools = [web_search]
     llm = ChatOpenAI(model=model, api_key=openai_api_key).bind_tools(tools)
 
-    system_prompt = (
-        f"You are a research agent. Your job is to thoroughly research a topic by searching the web. "
-        f"Use the web_search tool up to {max_searches} times to gather information from different angles. "
-        f"After gathering enough information, write a clear research summary with key findings and sources."
-    )
+    system_prompt = f"""\
+You are a research agent. Your job is to thoroughly research a topic by searching the web. \
+Use the web_search tool up to {max_searches} times to gather information from different angles. \
+After gathering enough information, write a clear research summary with key findings and sources."""
 
     @flyte.trace
     async def agent(state: MessagesState) -> MessagesState:
@@ -135,11 +134,11 @@ def build_pipeline_graph(
         query = state["query"]
         num_topics = state.get("num_topics", 3)
 
-        response = llm.invoke(
-            f"Break this research question into exactly {num_topics} focused sub-topics. "
-            f"Return ONLY a JSON array of strings, nothing else.\n\n"
-            f"Question: {query}"
-        )
+        response = llm.invoke(f"""\
+Break this research question into exactly {num_topics} focused sub-topics. \
+Return ONLY a JSON array of strings, nothing else.
+
+Question: {query}""")
         try:
             topics = json.loads(response.content)
         except json.JSONDecodeError:
@@ -189,14 +188,18 @@ def build_pipeline_graph(
             f"## {r['topic']}\n\n{r['report']}" for r in results
         )
 
-        response = llm.invoke(
-            f"You have research reports on sub-topics of this question:\n\n"
-            f"{query}\n\n"
-            f"Sub-topic reports:\n\n{sections}\n\n"
-            f"Write a comprehensive report that synthesizes all findings. "
-            f"Organize by theme, highlight connections between sub-topics, "
-            f"and end with key takeaways."
-        )
+        response = llm.invoke(f"""\
+You have research reports on sub-topics of this question:
+
+{query}
+
+Sub-topic reports:
+
+{sections}
+
+Write a comprehensive report that synthesizes all findings. \
+Organize by theme, highlight connections between sub-topics, \
+and end with key takeaways.""")
         log.info(f"[Synthesize] Combined {len(results)} reports (iteration {iteration})")
         return {"synthesis": response.content}
 
@@ -209,14 +212,16 @@ def build_pipeline_graph(
         iteration = state.get("iteration", 1)
         max_iterations = state.get("max_iterations", 2)
 
-        response = llm.invoke(
-            f"Evaluate this research report for the question: {query}\n\n"
-            f"Report:\n{synthesis}\n\n"
-            f"Rate the report quality from 1-10 and identify any gaps or missing perspectives. "
-            f"Return JSON: {{\"score\": <int>, \"gaps\": [<string>, ...]}}\n"
-            f"If the report is comprehensive (score >= 8) or there are no significant gaps, "
-            f"return an empty gaps list."
-        )
+        response = llm.invoke(f"""\
+Evaluate this research report for the question: {query}
+
+Report:
+{synthesis}
+
+Rate the report quality from 1-10 and identify any gaps or missing perspectives. \
+Return JSON: {{"score": <int>, "gaps": [<string>, ...]}}
+If the report is comprehensive (score >= 8) or there are no significant gaps, \
+return an empty gaps list.""")
 
         try:
             evaluation = json.loads(response.content)
