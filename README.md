@@ -42,7 +42,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 | [Debate Multi-Agent System](tutorials/multi-agent-workflows/tutorial_debate_agent.ipynb) | Multi-agent debate pattern |
 | [Manager Multi-Agent System](tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb) | Manager-worker agent delegation |
 | [Sequential Multi-Agent System](tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb) | Sequential agent pipeline |
-| [LangGraph Tutorial](tutorials/langgraph/) | In-depth LangGraph integration with Flyte |
+| [LangGraph Research Pipeline](tutorials/langgraph_agent_research_pipeline/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks |
 | [Autoresearch](tutorials/autoresearch/) | Autoresearch-style self-healing agent on Flyte |
 
 ## MCP

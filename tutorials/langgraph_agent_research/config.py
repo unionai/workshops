@@ -6,10 +6,7 @@ load_dotenv()
 
 base_env = flyte.TaskEnvironment(
     name="research-pipeline-env",
-    image=flyte.Image.from_debian_base().with_pip_packages(
-        "langgraph>=1.0.7", "langchain-openai", "tavily-python",
-        "markdown", "python-dotenv", "unionai-reuse",
-    ),
+    image=flyte.Image.from_debian_base().with_requirements("requirements.txt"),
     secrets=[
         flyte.Secret(key="SAGE_OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
         flyte.Secret(key="TAVILY_API_KEY", as_env_var="TAVILY_API_KEY"),
