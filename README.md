@@ -9,6 +9,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 
 | Example | Description |
 |---------|-------------|
+| [LangGraph Research Pipeline](tutorials/langgraph_agent_research/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks |
 | [LangGraph ReAct Agent](tutorials/starter-examples/langgraph-react-agent/) | Build a ReAct agent with LangGraph + OpenAI on Flyte |
 | [Stable Diffusion](tutorials/starter-examples/stable-diffusion/) | Generate images from text prompts with SDXL Turbo on GPU |
 | [DuckDB ETL](tutorials/starter-examples/duckdb-etl/) | Extract and transform data with DuckDB SQL |
@@ -35,14 +36,13 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 
 | Tutorial | Description |
 |----------|-------------|
+| [LangGraph Research Pipeline](tutorials/langgraph_agent_research/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks via Tavily web search |
 | [LangGraph ReAct Agent](tutorials/starter-examples/langgraph-react-agent/) | Single-file ReAct agent with LangGraph |
 | [Planner Multi-Agent System](tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb) | Scalable planner multi-agent system |
 | [ReAct Multi-Agent System](tutorials/multi-agent-workflows/tutorial_react_agent.ipynb) | Adaptive ReAct multi-agent system |
-| [Reflection Multi-Agent System](tutorials/multi-agent-workflows/tutorial_reflection_agent.ipynb) | Self-improving reflection agents |
 | [Debate Multi-Agent System](tutorials/multi-agent-workflows/tutorial_debate_agent.ipynb) | Multi-agent debate pattern |
 | [Manager Multi-Agent System](tutorials/multi-agent-workflows/tutorial_manager_agent.ipynb) | Manager-worker agent delegation |
 | [Sequential Multi-Agent System](tutorials/multi-agent-workflows/tutorial_sequential_agent.ipynb) | Sequential agent pipeline |
-| [LangGraph Research Pipeline](tutorials/langgraph_agent_research_pipeline/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks |
 | [Autoresearch](tutorials/autoresearch/) | Autoresearch-style self-healing agent on Flyte |
 
 ## MCP
@@ -76,7 +76,7 @@ git clone https://github.com/unionai/workshops
 cd workshops
 
 # Navigate to any tutorial
-cd tutorials/starter-examples/langgraph-react-agent
+cd tutorials/langgraph_agent_research
 
 # Create virtual environment and install dependencies
 uv venv .venv --python 3.11
@@ -101,19 +101,17 @@ Don't have a cluster? Request access at [flyte.org](https://flyte.org/).
 
 **Remote:**
 ```bash
-uv run flyte run langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
+uv run flyte run workflow.py research_pipeline --query "Compare quantum computing approaches"
 ```
 
 **Local:**
 ```bash
-uv run flyte run --local langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
+uv run flyte run --local workflow.py research_pipeline --query "Compare quantum computing approaches"
 ```
 
 **Local with TUI:**
 ```bash
-uv pip install textual
-
-uv run flyte run --local --tui langgraph_react_agent.py agent --request "What is 12 * 7 plus 3?"
+uv run flyte run --local --tui workflow.py research_pipeline --query "Compare quantum computing approaches"
 ```
 
 **Start TUI dashboard:**
