@@ -59,31 +59,31 @@ flyte run --local --tui workflow.py pipeline --method full
 
 ```bash
 flyte run --local --tui workflow.py pipeline \
-  --max-train-samples 100 --max-eval-samples 20 --epochs 1
+  --max_train_samples 100 --max_eval_samples 20 --epochs 1
 ```
 
 ### Remote (GPU cluster)
 
 ```bash
 flyte run workflow.py pipeline \
-  --method lora --model-name "Qwen/Qwen2.5-0.5B" --epochs 3
+  --method lora --model_name "Qwen/Qwen2.5-0.5B" --epochs 3
 ```
 
 ## Pipeline Parameters
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model-name` | `HuggingFaceTB/SmolLM2-135M` | HuggingFace model to fine-tune |
-| `--dataset-name` | `b-mc2/sql-create-context` | HuggingFace dataset |
+| `--model_name` | `HuggingFaceTB/SmolLM2-135M` | HuggingFace model to fine-tune |
+| `--dataset_name` | `b-mc2/sql-create-context` | HuggingFace dataset |
 | `--method` | `lora` | Fine-tuning method: `full`, `lora`, or `qlora` |
 | `--epochs` | `3` | Training epochs |
 | `--lr` | `2e-4` | Learning rate |
-| `--batch-size` | `4` | Per-device batch size |
-| `--max-train-samples` | `5000` | Max training examples |
-| `--max-eval-samples` | `500` | Max evaluation examples |
-| `--num-eval-examples` | `50` | Examples for before/after comparison |
-| `--lora-r` | `16` | LoRA rank (for lora/qlora) |
-| `--lora-alpha` | `32` | LoRA alpha (for lora/qlora) |
+| `--batch_size` | `4` | Per-device batch size |
+| `--max_train_samples` | `5000` | Max training examples |
+| `--max_eval_samples` | `500` | Max evaluation examples |
+| `--num_eval_examples` | `50` | Examples for before/after comparison |
+| `--lora_r` | `16` | LoRA rank (for lora/qlora) |
+| `--lora_alpha` | `32` | LoRA alpha (for lora/qlora) |
 
 ## Evaluation
 
@@ -135,8 +135,8 @@ Everything is HuggingFace-based, so swapping is just changing a string:
 
 ```bash
 # Different model
-flyte run --local --tui workflow.py pipeline --model-name "Qwen/Qwen2.5-0.5B"
+flyte run --local --tui workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B"
 
 # Different dataset (must have similar structure or update format_example in workflow.py)
-flyte run --local --tui workflow.py pipeline --dataset-name "your-org/your-dataset"
+flyte run --local --tui workflow.py pipeline --dataset_name "your-org/your-dataset"
 ```

@@ -139,14 +139,14 @@ async def train(
                 bnb_4bit_compute_dtype=dtype,
                 bnb_4bit_use_double_quant=True,
             ),
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map="auto",
         )
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             token=HF_TOKEN,
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map="auto",
         )
 
@@ -204,9 +204,7 @@ async def train(
         bf16=use_bf16,
         fp16=not use_bf16 and torch.cuda.is_available(),
         gradient_accumulation_steps=4,
-        warmup_ratio=0.1,
-        max_seq_length=512,
-        dataset_text_field="text",
+        warmup_steps=10,
         report_to="none",
     )
 
@@ -309,7 +307,7 @@ async def evaluate(
     await flyte.report.flush.aio()
 
     base_model = AutoModelForCausalLM.from_pretrained(
-        model_name, token=HF_TOKEN, torch_dtype=dtype, device_map="auto",
+        model_name, token=HF_TOKEN, dtype=dtype, device_map="auto",
     )
 
     base_results = []
@@ -331,7 +329,7 @@ async def evaluate(
 
     ft_path = await finetuned_dir.download()
     ft_model = AutoModelForCausalLM.from_pretrained(
-        ft_path, torch_dtype=dtype, device_map="auto",
+        ft_path, dtype=dtype, device_map="auto",
     )
 
     ft_results = []
