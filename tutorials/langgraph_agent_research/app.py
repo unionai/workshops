@@ -32,6 +32,7 @@ serving_env = flyte.app.AppEnvironment(
     ],
     requires_auth=False,
     port=7860,
+    include=["requirements.txt"],
 )
 
 

@@ -52,7 +52,7 @@ flyte run --local workflow.py research_pipeline \
 # Remote (on a Flyte cluster)
 flyte run workflow.py research_pipeline \
   --query "Compare quantum computing approaches" \
-  --num-topics 5 --max-searches 3 --max-iterations 3
+  --num_topics 5 --max_searches 3 --max_iterations 3
 ```
 
 | Flag | Default | Description |
@@ -62,13 +62,42 @@ flyte run workflow.py research_pipeline \
 | `--max-searches` | 2 | Max web searches per sub-topic |
 | `--max-iterations` | 2 | Max quality gate iterations |
 
+## Gradio App
+
+A Gradio UI that kicks off the research pipeline as a Flyte task. Three run modes:
+
+```bash
+# Fully local (no cluster needed)
+RUN_MODE=local python app.py
+
+# Local app, remote pipeline execution
+python app.py
+
+# Deploy the whole app to a Flyte cluster
+flyte deploy app.py serving_env
+```
+
+In remote mode, the UI immediately shows a clickable link to watch the pipeline execute on the Flyte platform. Set `RUN_MODE=local` for fully offline development.
+
+### Deploy
+
+```bash
+# Create secrets for the cluster
+flyte create secret SAGE_OPENAI_API_KEY <your-key>
+flyte create secret TAVILY_API_KEY <your-key>
+
+# Deploy
+flyte deploy app.py serving_env
+```
+
 ## Project Structure
 
 ```
-agent_research_pipeline/
+langgraph_agent_research/
 ├── config.py           # Flyte environment, secrets, resources
 ├── graph.py            # LangGraph graphs — pipeline + ReAct subgraph
 ├── workflow.py         # Flyte tasks — research_topic + research_pipeline orchestrator
+├── app.py              # Gradio UI — kicks off the pipeline as a Flyte task
 ├── requirements.txt
 └── tools/
     └── search.py       # Tavily web search tool
