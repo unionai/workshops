@@ -1,4 +1,4 @@
-# LLM Fine-Tuning Pipeline
+# LLM Fine-Tuning: Text-to-SQL
 
 Fine-tune a language model on text-to-SQL with full fine-tuning, LoRA, or QLoRA — all in one Flyte pipeline. Then deploy the result as an OpenAI-compatible API via vLLM.
 
@@ -13,7 +13,7 @@ Fine-tune a language model on text-to-SQL with full fine-tuning, LoRA, or QLoRA 
 ## Setup
 
 ```bash
-cd tutorials/llm-fine-tuning
+cd tutorials/llm-fine-tuning-sql
 
 uv venv .venv --python 3.11
 source .venv/bin/activate

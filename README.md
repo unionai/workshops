@@ -58,6 +58,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 | [Fraud Detection with Feast](tutorials/fraud-detection-feast/) | Fraud scoring pipeline with Feast feature store, XGBoost, and real-time serving |
 | [Stable Diffusion](tutorials/starter-examples/stable-diffusion/) | Image generation with SDXL Turbo |
 | [Image Classifier](tutorials/starter-examples/image-classifier/) | Fine-tune ResNet18 on Beans dataset |
+| [LLM Fine-Tuning: SQL](tutorials/llm-fine-tuning-sql/) | Fine-tune an LLM on text-to-SQL with LoRA, QLoRA, or full fine-tuning — then deploy via vLLM |
 
 ## Data
 
