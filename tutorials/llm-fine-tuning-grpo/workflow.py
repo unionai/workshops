@@ -198,9 +198,79 @@ async def train(
         task_type="CAUSAL_LM",
     )
 
-    # -- Reward function --
+    # -- Metrics tracking --
+    metrics_history = {
+        "batch": [],
+        "avg_reward": [],
+        "exact_match_pct": [],
+        "batch_reward": [],
+        "batch_exact_pct": [],
+    }
     reward_stats = {"calls": 0, "total_reward": 0, "exact_matches": 0, "total": 0}
 
+    def build_charts() -> str:
+        """Generate training charts as base64 PNG."""
+        import base64
+        import io
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+        # Reward chart
+        axes[0].plot(metrics_history["batch"], metrics_history["avg_reward"], "b-", linewidth=1.5, label="Running avg")
+        axes[0].plot(metrics_history["batch"], metrics_history["batch_reward"], "b.", alpha=0.3, markersize=4, label="Per batch")
+        axes[0].set_xlabel("Batch")
+        axes[0].set_ylabel("Avg Reward")
+        axes[0].set_title("Reward")
+        axes[0].set_ylim(0, 1.05)
+        axes[0].legend(fontsize=8)
+        axes[0].grid(True, alpha=0.3)
+
+        # Accuracy chart
+        axes[1].plot(metrics_history["batch"], metrics_history["exact_match_pct"], "g-", linewidth=1.5, label="Running avg")
+        axes[1].plot(metrics_history["batch"], metrics_history["batch_exact_pct"], "g.", alpha=0.3, markersize=4, label="Per batch")
+        axes[1].set_xlabel("Batch")
+        axes[1].set_ylabel("Exact Match %")
+        axes[1].set_title("Accuracy")
+        axes[1].set_ylim(0, 105)
+        axes[1].legend(fontsize=8)
+        axes[1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=100)
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode()
+
+    def update_report():
+        """Update the Flyte report with current charts and stats."""
+        avg_reward = reward_stats["total_reward"] / max(reward_stats["total"], 1)
+        exact_pct = reward_stats["exact_matches"] / max(reward_stats["total"], 1) * 100
+
+        chart_html = ""
+        if len(metrics_history["batch"]) >= 2:
+            chart_b64 = build_charts()
+            chart_html = f'<img src="data:image/png;base64,{chart_b64}" alt="Training charts" style="width:100%;max-width:800px;" />'
+
+        flyte.report.replace(
+            f"<h2>GRPO Training — {model_name}</h2>"
+            f"<p><b>Task:</b> Count letters in words | "
+            f"<b>Generations per prompt:</b> {num_generations}</p>"
+            f"<table>"
+            f"<tr><th>Metric</th><th>Value</th></tr>"
+            f"<tr><td>Batches</td><td>{reward_stats['calls']}</td></tr>"
+            f"<tr><td>Avg Reward</td><td>{avg_reward:.3f}</td></tr>"
+            f"<tr><td>Exact Match</td><td>{exact_pct:.1f}%</td></tr>"
+            f"<tr><td>Total Samples</td><td>{reward_stats['total']}</td></tr>"
+            f"</table>"
+            f"{chart_html}"
+        )
+        flyte.report.flush()
+
+    # -- Reward function --
     def counting_reward(completions: list[str], count: list[int], **kwargs) -> list[float]:
         """
         Reward based on how close the model's answer is to the correct letter count.
@@ -210,6 +280,7 @@ async def train(
         - Anything else: 0.0
         """
         rewards = []
+        batch_exact = 0
         for completion, expected in zip(completions, count):
             predicted = extract_number(completion)
             if predicted is None:
@@ -217,6 +288,7 @@ async def train(
             elif predicted == expected:
                 rewards.append(1.0)
                 reward_stats["exact_matches"] += 1
+                batch_exact += 1
             elif abs(predicted - expected) == 1:
                 rewards.append(0.5)
             elif abs(predicted - expected) == 2:
@@ -228,14 +300,25 @@ async def train(
         reward_stats["calls"] += 1
         reward_stats["total_reward"] += sum(rewards)
 
-        if reward_stats["calls"] % 5 == 1:
-            avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
-            acc = reward_stats["exact_matches"] / max(reward_stats["total"], 1) * 100
+        # Track per-batch metrics
+        batch_avg = sum(rewards) / len(rewards)
+        batch_exact_pct = batch_exact / len(completions) * 100
+        running_avg = reward_stats["total_reward"] / reward_stats["total"]
+        running_exact = reward_stats["exact_matches"] / reward_stats["total"] * 100
+
+        metrics_history["batch"].append(reward_stats["calls"])
+        metrics_history["avg_reward"].append(running_avg)
+        metrics_history["exact_match_pct"].append(running_exact)
+        metrics_history["batch_reward"].append(batch_avg)
+        metrics_history["batch_exact_pct"].append(batch_exact_pct)
+
+        if reward_stats["calls"] % 5 == 0:
             log.info(
                 f"[Reward] batch {reward_stats['calls']}: "
-                f"avg_reward={avg:.3f}, exact_match={acc:.1f}%, "
-                f"sample='{completions[0][:60]}'"
+                f"avg_reward={running_avg:.3f}, exact_match={running_exact:.1f}%, "
+                f"batch_reward={batch_avg:.3f}"
             )
+            update_report()
 
         return rewards
 
@@ -265,20 +348,15 @@ async def train(
     )
 
     log.info(f"Starting GRPO training (num_generations={num_generations})...")
-
-    await flyte.report.replace.aio(
-        f"<h2>GRPO Training — {model_name}</h2>"
-        f"<p><b>Task:</b> Count letters in words</p>"
-        f"<p><b>Generations per prompt:</b> {num_generations}</p>"
-        f"<p>Training...</p>"
-    )
-    await flyte.report.flush.aio()
+    update_report()
 
     trainer.train()
 
+    # Final report with charts
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
     final_acc = reward_stats["exact_matches"] / max(reward_stats["total"], 1) * 100
     log.info(f"GRPO training complete. Final avg reward: {final_avg:.3f}, exact match: {final_acc:.1f}%")
+    update_report()
 
     # -- Merge LoRA and save --
     save_dir = os.path.join(tempfile.mkdtemp(), "grpo_model")
@@ -288,10 +366,17 @@ async def train(
     tokenizer.save_pretrained(save_dir)
     log.info(f"Model saved to {save_dir}")
 
+    # Final report with charts
+    chart_html = ""
+    if len(metrics_history["batch"]) >= 2:
+        chart_b64 = build_charts()
+        chart_html = f'<img src="data:image/png;base64,{chart_b64}" alt="Training charts" style="width:100%;max-width:800px;" />'
+
     await flyte.report.replace.aio(
         f"<h2>GRPO Training Complete — {model_name}</h2>"
         f"<p><b>Epochs:</b> {epochs} | <b>LR:</b> {lr}</p>"
-        f"<p><b>Avg reward:</b> {final_avg:.3f} | <b>Exact match:</b> {final_acc:.1f}%</p>"
+        f"<p><b>Final avg reward:</b> {final_avg:.3f} | <b>Exact match:</b> {final_acc:.1f}%</p>"
+        f"{chart_html}"
     )
     await flyte.report.flush.aio()
 
