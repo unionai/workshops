@@ -61,6 +61,8 @@ flyte run workflow.py research_pipeline \
 
 For remote runs, create secrets on the cluster:
 
+flyte start devbox
+
 ```bash
 flyte create secret ANTHROPIC_API_KEY --project flytesnacks --domain development
 flyte create secret TAVILY_API_KEY --project flytesnacks --domain development
