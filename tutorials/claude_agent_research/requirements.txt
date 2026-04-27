@@ -1,0 +1,6 @@
+anthropic
+tavily-python
+flyte[tui]>=2.0
+markdown
+python-dotenv
+matplotlib
