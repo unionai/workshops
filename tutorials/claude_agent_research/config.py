@@ -11,5 +11,5 @@ base_env = flyte.TaskEnvironment(
         flyte.Secret(key="ANTHROPIC_API_KEY", as_env_var="ANTHROPIC_API_KEY"),
         flyte.Secret(key="TAVILY_API_KEY", as_env_var="TAVILY_API_KEY"),
     ],
-    resources=flyte.Resources(cpu=2, memory="2Gi"),
+    resources=flyte.Resources(cpu=1, memory="1Gi"),
 )

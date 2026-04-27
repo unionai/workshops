@@ -1,13 +1,14 @@
 """
-Claude research agent — tool-use loop with web search.
+Claude research agent — ReAct loop with web search.
 
-Uses the Anthropic Python SDK to build a ReAct-style agent:
+Uses Claude's native tool-use API to implement a ReAct (Reason → Act → Observe)
+agent loop. No agent framework needed — Claude's tool-use protocol is ReAct:
   1. Send prompt to Claude
-  2. If Claude returns tool_use blocks, execute the tools
-  3. Send tool results back to Claude
-  4. Repeat until Claude responds with text (no more tool calls)
+  2. Claude returns tool_use blocks → execute the tools
+  3. Send tool results back as tool_result → Claude incorporates them
+  4. Repeat until Claude responds with text (stop_reason == "end_turn")
 
-This replaces LangGraph's ReAct subgraph with a clean async loop.
+See: https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/overview
 """
 
 import json
@@ -52,10 +53,8 @@ TOOLS = [SEARCH_TOOL]
 @flyte.trace
 def execute_search(query: str) -> str:
     """Run a Tavily web search and format results."""
-    tavily_api_key = os.getenv("TAVILY_API_KEY")
-    tavily = TavilyClient(api_key=tavily_api_key)
-
     log.info(f"  🔍 Searching: {query}")
+    tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
     results = tavily.search(query=query, max_results=3)
 
     formatted = ""
@@ -75,7 +74,6 @@ def execute_tool(name: str, input_data: dict) -> str:
 # Agent loop
 # ---------------------------------------------------------------------------
 
-@flyte.trace
 async def run_research_agent(
     topic: str,
     max_searches: int = 3,
@@ -83,8 +81,11 @@ async def run_research_agent(
 ) -> str:
     """Run a Claude research agent with web search on a single topic.
 
-    The agent loop:
-      prompt → Claude → (tool calls?) → execute → Claude → ... → final text
+    The ReAct loop:
+      Reason → Claude decides what to search
+      Act    → execute_search via Tavily
+      Observe → results sent back to Claude
+      Repeat → until Claude writes the final summary
     """
     client = anthropic.AsyncAnthropic()
 
@@ -96,24 +97,27 @@ async def run_research_agent(
     )
 
     messages = [{"role": "user", "content": f"Research this topic: {topic}"}]
+    search_count = 0
 
     for iteration in range(max_searches + 2):  # +2 for safety margin
         log.info(f"  🤖 Agent iteration {iteration + 1}")
+
+        # Remove tools once search limit is hit — forces Claude to summarize
+        available_tools = TOOLS if search_count < max_searches else []
 
         response = await client.messages.create(
             model=model,
             max_tokens=4096,
             system=system_prompt,
-            tools=TOOLS,
+            tools=available_tools,
             messages=messages,
         )
 
         # If Claude is done (no tool calls), extract the final text
         if response.stop_reason == "end_turn":
             text_blocks = [b.text for b in response.content if b.type == "text"]
-            final_text = "\n".join(text_blocks)
             log.info(f"  ✅ Agent done after {iteration + 1} iteration(s)")
-            return final_text
+            return "\n".join(text_blocks)
 
         # Process tool calls
         messages.append({"role": "assistant", "content": response.content})
@@ -121,6 +125,7 @@ async def run_research_agent(
         tool_results = []
         for block in response.content:
             if block.type == "tool_use":
+                search_count += 1
                 result = execute_tool(block.name, block.input)
                 tool_results.append({
                     "type": "tool_result",
@@ -155,8 +160,9 @@ async def call_claude(
     return response.content[0].text
 
 
-@flyte.trace
-async def plan_topics(query: str, num_topics: int = 3, model: str = "claude-sonnet-4-6") -> list[str]:
+async def plan_topics(
+    query: str, num_topics: int = 3, model: str = "claude-sonnet-4-6",
+) -> list[str]:
     """Use Claude to break a research query into focused sub-topics."""
     response = await call_claude(
         prompt=(
@@ -167,7 +173,6 @@ async def plan_topics(query: str, num_topics: int = 3, model: str = "claude-sonn
         model=model,
     )
     try:
-        # Handle markdown code blocks
         text = response.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -177,7 +182,6 @@ async def plan_topics(query: str, num_topics: int = 3, model: str = "claude-sonn
         return [query]
 
 
-@flyte.trace
 async def synthesize_reports(
     query: str,
     results: list[dict],
@@ -199,7 +203,6 @@ async def synthesize_reports(
     )
 
 
-@flyte.trace
 async def evaluate_quality(
     query: str,
     synthesis: str,

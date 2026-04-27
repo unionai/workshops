@@ -1,6 +1,6 @@
 # Claude Agent Research Pipeline
 
-A research agent pipeline using **Claude's tool-use API** and **Flyte** for distributed compute. Same architecture as the [LangGraph version](../agent_research/), but replaces LangGraph + OpenAI with Claude's native tool-use loop.
+A research agent pipeline using **Claude's tool-use API** and **Flyte** for orchestration. Same architecture as the [LangGraph version](../langgraph_agent_research/), but replaces LangGraph + OpenAI with Claude's native tool-use loop.
 
 ## Architecture
 
@@ -9,12 +9,12 @@ research_pipeline (Flyte orchestrator task)
   ├── plan → Claude breaks query into sub-topics
   ├── research (parallel Flyte tasks)
   │     ├── research_topic("topic A")  ┐
-  │     ├── research_topic("topic B")  ├── each runs a Claude agent with web search
+  │     ├── research_topic("topic B")  ├── each runs a Claude ReAct agent
   │     └── research_topic("topic C")  ┘
-  ├── synthesize → Claude combines all reports
-  ├── quality_check → Claude scores + identifies gaps
+  ├── synthesize (Flyte task) → Claude combines all reports
+  ├── quality_check (Flyte task) → Claude scores + identifies gaps
   │     ├── gaps found → research gaps → synthesize → quality_check again
-  │     └── good enough → finalize
+  │     └── score >= 8 or no gaps → finalize
   └── final report
 ```
 
@@ -59,8 +59,12 @@ flyte run workflow.py research_pipeline \
   --num_topics 3 --max_searches 3 --max_iterations 2
 ```
 
+For remote runs, create secrets on the cluster:
+
+```bash
 flyte create secret ANTHROPIC_API_KEY --project flytesnacks --domain development
 flyte create secret TAVILY_API_KEY --project flytesnacks --domain development
+```
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -73,19 +77,31 @@ flyte create secret TAVILY_API_KEY --project flytesnacks --domain development
 
 ```
 claude_agent_research/
-├── config.py       # Flyte environment, secrets, resources
-├── agent.py        # Claude agent — tool-use loop, planning, synthesis, quality eval
-├── workflow.py     # Flyte tasks — research_topic + research_pipeline orchestrator
+├── config.py        # Flyte environment, secrets, resources
+├── agent.py         # Claude agent — ReAct loop, planning, synthesis, quality eval
+├── workflow.py      # Flyte tasks + pipeline orchestrator
 └── requirements.txt
 ```
 
 ## How It Works
 
-- **`agent.py`** contains the Claude agent logic:
-  - `run_research_agent()` — tool-use loop: prompt → Claude → tool calls → execute → repeat
+- **`agent.py`** — Claude agent logic (no Flyte dependencies except `@flyte.trace` on search):
+  - `run_research_agent()` — ReAct loop: prompt → Claude → tool calls → execute → repeat
   - `plan_topics()` — Claude breaks query into sub-topics
   - `synthesize_reports()` — Claude combines research into unified report
   - `evaluate_quality()` — Claude scores report and identifies gaps
-- **`workflow.py`** defines two Flyte tasks:
-  - `research_topic` — runs the Claude agent on one topic (the compute unit)
+- **`workflow.py`** — Flyte tasks (each visible in the UI while running):
+  - `research_topic` — runs the Claude ReAct agent on one topic
+  - `synthesize` — combines research reports into a unified synthesis
+  - `quality_check` — scores the report and identifies gaps
   - `research_pipeline` — orchestrates plan → fan-out → synthesize → quality loop
+
+## Switching Models
+
+Each Flyte task can use a different Claude model. The `MODEL` variable in `workflow.py` controls which model all tasks use — currently set to `claude-haiku-4-5` for speed. You can assign different models per step, e.g. Haiku for fast research loops and Sonnet for higher-quality synthesis:
+
+```python
+# workflow.py
+RESEARCH_MODEL = "claude-haiku-4-5"     # fast, good enough for search loops
+SYNTHESIS_MODEL = "claude-sonnet-4-6"   # higher quality for final reports
+```

@@ -1,31 +1,35 @@
 """
-Research pipeline — Claude agent with tool use, Flyte provides compute.
+Research pipeline — Claude agent with tool use, orchestrated by Flyte.
 
-Same architecture as the LangGraph version, but replaces LangGraph + OpenAI with
-Claude's native tool-use loop:
-
-  plan (Claude) → research (fan-out to Flyte tasks, each running a Claude agent)
-                    → synthesize (Claude) → quality check (Claude) → loop or finalize
+  plan (Claude) → research (parallel Flyte tasks, each a Claude ReAct agent)
+               → synthesize (Flyte task) → quality check (Flyte task)
+               → loop or finalize
 
 Usage:
     # Local
-    flyte run --local --tui workflow.py research_pipeline --query "Compare quantum computing approaches"
+    flyte run --local --tui workflow.py research_pipeline \
+        --query "Compare quantum computing approaches"
 
     # Remote
-    flyte run workflow.py research_pipeline --query "Compare quantum computing approaches"
+    flyte run workflow.py research_pipeline \
+        --query "Compare quantum computing approaches"
 """
 
 import asyncio
 import json
 import logging
-import os
 
 import markdown
 
 import flyte
 import flyte.report
 from config import base_env
-from agent import run_research_agent, plan_topics, synthesize_reports, evaluate_quality
+from agent import (
+    run_research_agent,
+    plan_topics,
+    synthesize_reports,
+    evaluate_quality,
+)
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -33,8 +37,7 @@ log.setLevel(logging.INFO)
 logging.getLogger("agent").setLevel(logging.INFO)
 
 env = base_env
-MODEL = "claude-sonnet-4-6"
-
+MODEL = "claude-haiku-4-5"
 
 def md_to_html(text: str) -> str:
     """Convert markdown to HTML for Flyte reports."""
@@ -42,28 +45,78 @@ def md_to_html(text: str) -> str:
 
 
 # ------------------------------------------------------------------
-# Flyte task: research a single topic using Claude agent with tools
+# Flyte tasks — each step is visible in the UI while running
 # ------------------------------------------------------------------
 
 @env.task(report=True)
 async def research_topic(topic: str, max_searches: int = 3) -> str:
     """Run the Claude research agent on a single sub-topic."""
-    log.info(f"📄 [Research Task] Starting: {topic}")
+    log.info(f"📄 Researching: {topic}")
 
-    await flyte.report.replace.aio(f"<h2>Researching: {topic}</h2><p>Running Claude agent...</p>")
+    await flyte.report.replace.aio(
+        f"<h2>Researching: {topic}</h2><p>Running Claude agent...</p>"
+    )
     await flyte.report.flush.aio()
 
     report = await run_research_agent(topic, max_searches=max_searches, model=MODEL)
-    log.info(f"✅ [Research Task] Done: {topic}")
+    log.info(f"✅ Done: {topic}")
 
-    await flyte.report.replace.aio(f"<h2>{topic}</h2>{md_to_html(report)}")
+    await flyte.report.replace.aio(
+        f"<h2>{topic}</h2>{md_to_html(report)}"
+    )
     await flyte.report.flush.aio()
 
     return json.dumps({"topic": topic, "report": report})
 
 
+@env.task(report=True)
+async def synthesize(query: str, results_json: str) -> str:
+    """Combine sub-topic research reports into a unified synthesis."""
+    results = json.loads(results_json)
+    log.info(f"📝 Synthesizing {len(results)} report(s)...")
+
+    await flyte.report.replace.aio(
+        f"<h2>Synthesizing</h2><p>Combining {len(results)} reports...</p>"
+    )
+    await flyte.report.flush.aio()
+
+    synthesis = await synthesize_reports(query, results, model=MODEL)
+    log.info(f"📝 Synthesis complete: {len(synthesis)} chars")
+
+    await flyte.report.replace.aio(
+        f"<h2>Synthesis</h2>{md_to_html(synthesis)}"
+    )
+    await flyte.report.flush.aio()
+
+    return synthesis
+
+
+@env.task(report=True)
+async def quality_check(query: str, synthesis: str) -> str:
+    """Evaluate report quality and identify gaps."""
+    log.info("🔎 Evaluating quality...")
+
+    await flyte.report.replace.aio(
+        "<h2>Quality Check</h2><p>Evaluating report...</p>"
+    )
+    await flyte.report.flush.aio()
+
+    score, gaps = await evaluate_quality(query, synthesis, model=MODEL)
+    log.info(f"📊 Score: {score}/10, Gaps: {len(gaps)}")
+
+    gap_html = "".join(f"<li>{g}</li>" for g in gaps) if gaps else "<li>None</li>"
+    await flyte.report.replace.aio(
+        f"<h2>Quality Check</h2>"
+        f"<p><b>Score:</b> {score}/10</p>"
+        f"<p><b>Gaps:</b></p><ul>{gap_html}</ul>"
+    )
+    await flyte.report.flush.aio()
+
+    return json.dumps({"score": score, "gaps": gaps})
+
+
 # ------------------------------------------------------------------
-# Orchestrator: plans, fans out research, synthesizes, evaluates
+# Orchestrator
 # ------------------------------------------------------------------
 
 @env.task(report=True)
@@ -75,16 +128,16 @@ async def research_pipeline(
 ) -> str:
     """
     Research pipeline:
-    1. Claude plans sub-topics
-    2. Fan out to Flyte tasks — each runs a Claude agent with web search
-    3. Claude synthesizes results
-    4. Claude evaluates quality — if gaps, loop back to step 2
-    5. Repeat until quality is good or max iterations reached
+    1. Plan sub-topics (Claude)
+    2. Fan out research to parallel Flyte tasks (each runs a Claude ReAct agent)
+    3. Synthesize results (Flyte task)
+    4. Quality check (Flyte task) — if gaps found, loop back to step 2
+    5. Finalize when quality >= 8 or max iterations reached
     """
     log.info(f"🚀 Starting research pipeline: {query}")
 
     await flyte.report.replace.aio(
-        f"<h2>🔬 Research Pipeline</h2>"
+        f"<h2>Research Pipeline</h2>"
         f"<p><b>Query:</b> {query}</p>"
         f"<p>Planning sub-topics...</p>"
     )
@@ -105,16 +158,19 @@ async def research_pipeline(
         log.info(f"{'='*60}")
 
         await flyte.report.replace.aio(
-            f"<h2>🔬 Research Pipeline</h2>"
+            f"<h2>Research Pipeline</h2>"
             f"<p><b>Query:</b> {query}</p>"
-            f"<p>Iteration {iteration}/{max_iterations} — researching {len(topics)} topic(s)...</p>"
+            f"<p>Iteration {iteration}/{max_iterations} "
+            f"— researching {len(topics)} topic(s)...</p>"
         )
         await flyte.report.flush.aio()
 
-        # -- Step 2: Fan out research to Flyte tasks --
+        # -- Step 2: Fan out research to parallel Flyte tasks --
         log.info(f"🔍 Researching {len(topics)} topic(s) in parallel...")
         research_coros = [
-            research_topic.override(short_name=f"research-{i}")(topic, max_searches)
+            research_topic.override(short_name=f"research-{i}")(
+                topic, max_searches
+            )
             for i, topic in enumerate(topics)
         ]
         results_json = await asyncio.gather(*research_coros)
@@ -125,28 +181,34 @@ async def research_pipeline(
             log.info(f"  📄 {r['topic']}: {len(r['report'])} chars")
 
         # -- Step 3: Synthesize --
-        log.info(f"📝 Synthesizing {len(all_results)} report(s)...")
-        synthesis = await synthesize_reports(query, all_results, model=MODEL)
+        synthesis = await synthesize.override(
+            short_name=f"synthesize-{iteration}"
+        )(query, json.dumps(all_results))
 
         # -- Step 4: Quality check --
-        log.info(f"🔎 Evaluating quality...")
-        score, gaps = await evaluate_quality(query, synthesis, model=MODEL)
+        eval_json = await quality_check.override(
+            short_name=f"quality-{iteration}"
+        )(query, synthesis)
+        evaluation = json.loads(eval_json)
+        score, gaps = evaluation["score"], evaluation["gaps"]
         log.info(f"📊 Score: {score}/10, Gaps: {len(gaps)}")
 
-        if not gaps or iteration >= max_iterations:
-            if gaps:
+        if not gaps or score >= 8 or iteration >= max_iterations:
+            if iteration >= max_iterations and gaps:
                 log.info(f"⏹️  Max iterations reached, finishing with score {score}/10")
             else:
                 log.info(f"✅ Quality sufficient ({score}/10), finalizing")
             break
 
-        # -- Loop: research the gaps --
-        log.info(f"🔄 Gaps found, researching further: {gaps}")
-        topics = gaps
+        # -- Loop: research the gaps (cap at num_topics to avoid explosion) --
+        topics = gaps[:num_topics]
+        log.info(
+            f"🔄 Gaps found, researching {len(topics)} of {len(gaps)}: {topics}"
+        )
 
     # -- Final report --
     await flyte.report.replace.aio(
-        f"<h2>📊 Research Report</h2>"
+        f"<h2>Research Report</h2>"
         f"<p><b>Query:</b> {query}</p>"
         f"<p><b>Quality:</b> {score}/10 after {iteration} iteration(s)</p>"
         f"<hr/>{md_to_html(synthesis)}"
@@ -161,21 +223,3 @@ async def research_pipeline(
         "score": score,
         "iterations": iteration,
     })
-
-
-# ------------------------------------------------------------------
-# Entrypoint
-# ------------------------------------------------------------------
-
-if __name__ == "__main__":
-    flyte.init_from_config()
-    run = flyte.run(
-        research_pipeline,
-        query="Compare quantum computing approaches: superconducting vs trapped ion",
-        num_topics=3,
-        max_searches=3,
-        max_iterations=2,
-    )
-    print(f"View at: {run.url}")
-    run.wait()
-    print(f"Result: {run.outputs()}")
