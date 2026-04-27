@@ -19,6 +19,8 @@ import anthropic
 import flyte
 from tavily import TavilyClient
 
+from models import TopicReport, QualityResult
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -90,10 +92,10 @@ async def run_research_agent(
     client = anthropic.AsyncAnthropic()
 
     system_prompt = (
-        f"You are a research agent. Your job is to thoroughly research a topic "
-        f"by searching the web. Use the web_search tool up to {max_searches} times "
-        f"to gather information from different angles. After gathering enough "
-        f"information, write a clear research summary with key findings and sources."
+        f"You are a research agent. Research topics by calling the web_search tool — "
+        f"do NOT describe what you would search, just call the tool directly. "
+        f"Make up to {max_searches} searches from different angles. "
+        f"After searching, write a detailed research summary with key findings and sources."
     )
 
     messages = [{"role": "user", "content": f"Research this topic: {topic}"}]
@@ -184,12 +186,12 @@ async def plan_topics(
 
 async def synthesize_reports(
     query: str,
-    results: list[dict],
+    results: list[TopicReport],
     model: str = "claude-sonnet-4-6",
 ) -> str:
     """Combine sub-topic research reports into a unified synthesis."""
     sections = "\n\n---\n\n".join(
-        f"## {r['topic']}\n\n{r['report']}" for r in results
+        f"## {r.topic}\n\n{r.report}" for r in results
     )
     return await call_claude(
         prompt=(
@@ -207,8 +209,8 @@ async def evaluate_quality(
     query: str,
     synthesis: str,
     model: str = "claude-sonnet-4-6",
-) -> tuple[int, list[str]]:
-    """Evaluate report quality and identify gaps. Returns (score, gaps)."""
+) -> QualityResult:
+    """Evaluate report quality and identify gaps."""
     response = await call_claude(
         prompt=(
             f"Evaluate this research report for the question: {query}\n\n"
@@ -225,6 +227,9 @@ async def evaluate_quality(
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         evaluation = json.loads(text)
-        return evaluation.get("score", 8), evaluation.get("gaps", [])
+        return QualityResult(
+            score=evaluation.get("score", 8),
+            gaps=evaluation.get("gaps", []),
+        )
     except json.JSONDecodeError:
-        return 8, []
+        return QualityResult(score=8, gaps=[])

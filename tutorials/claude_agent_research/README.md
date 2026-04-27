@@ -78,6 +78,7 @@ flyte create secret TAVILY_API_KEY --project flytesnacks --domain development
 ```
 claude_agent_research/
 ├── config.py        # Flyte environment, secrets, resources
+├── models.py        # Pydantic data models (TopicReport, QualityResult, PipelineResult)
 ├── agent.py         # Claude agent — ReAct loop, planning, synthesis, quality eval
 ├── workflow.py      # Flyte tasks + pipeline orchestrator
 └── requirements.txt
@@ -85,16 +86,22 @@ claude_agent_research/
 
 ## How It Works
 
+- **`models.py`** — Pydantic models for structured data flow between tasks:
+  - `TopicReport` — topic + research report from a single agent run
+  - `QualityResult` — score + identified gaps from quality evaluation
+  - `PipelineResult` — final output with report, sub-reports, score, and iteration count
 - **`agent.py`** — Claude agent logic (no Flyte dependencies except `@flyte.trace` on search):
   - `run_research_agent()` — ReAct loop: prompt → Claude → tool calls → execute → repeat
   - `plan_topics()` — Claude breaks query into sub-topics
   - `synthesize_reports()` — Claude combines research into unified report
   - `evaluate_quality()` — Claude scores report and identifies gaps
 - **`workflow.py`** — Flyte tasks (each visible in the UI while running):
-  - `research_topic` — runs the Claude ReAct agent on one topic
-  - `synthesize` — combines research reports into a unified synthesis
-  - `quality_check` — scores the report and identifies gaps
-  - `research_pipeline` — orchestrates plan → fan-out → synthesize → quality loop
+  - `research_topic` → `TopicReport` — runs the Claude ReAct agent on one topic
+  - `synthesize` — combines `list[TopicReport]` into a unified synthesis
+  - `quality_check` → `QualityResult` — scores the report and identifies gaps
+  - `research_pipeline` → `PipelineResult` — orchestrates plan → fan-out → synthesize → quality loop
+
+Flyte natively serializes Pydantic models between tasks, so there's no manual JSON wrangling — just typed data flowing through the pipeline.
 
 ## Switching Models
 

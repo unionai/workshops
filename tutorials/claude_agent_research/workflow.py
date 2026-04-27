@@ -16,7 +16,6 @@ Usage:
 """
 
 import asyncio
-import json
 import logging
 
 import markdown
@@ -24,6 +23,7 @@ import markdown
 import flyte
 import flyte.report
 from config import base_env
+from models import TopicReport, QualityResult, PipelineResult
 from agent import (
     run_research_agent,
     plan_topics,
@@ -39,6 +39,40 @@ logging.getLogger("agent").setLevel(logging.INFO)
 env = base_env
 MODEL = "claude-haiku-4-5"
 
+REPORT_CSS = """\
+<style>
+  .report { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6; color: #1a1a2e; max-width: 800px; margin: 0 auto; padding: 20px; }
+  .report h1, .report h2, .report h3 { color: #16213e; margin-top: 1.4em; }
+  .report h2 { border-bottom: 2px solid #e2e8f0; padding-bottom: 0.3em; }
+  .report p { margin: 0.8em 0; }
+  .report ul, .report ol { padding-left: 1.5em; }
+  .report li { margin: 0.4em 0; }
+  .report a { color: #2563eb; text-decoration: none; }
+  .report a:hover { text-decoration: underline; }
+  .report code { background: #f1f5f9; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.9em; }
+  .report pre { background: #f1f5f9; padding: 1em; border-radius: 8px; overflow-x: auto; }
+  .report hr { border: none; border-top: 1px solid #e2e8f0; margin: 1.5em 0; }
+  .report table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  .report th, .report td { border: 1px solid #e2e8f0; padding: 0.6em 1em; text-align: left; }
+  .report th { background: #f8fafc; font-weight: 600; }
+  .badge { display: inline-block; padding: 0.2em 0.7em; border-radius: 12px;
+           font-size: 0.85em; font-weight: 600; }
+  .badge-blue { background: #dbeafe; color: #1e40af; }
+  .badge-green { background: #dcfce7; color: #166534; }
+  .badge-amber { background: #fef3c7; color: #92400e; }
+  .status { padding: 12px 16px; border-radius: 8px; margin: 1em 0; }
+  .status-running { background: #eff6ff; border-left: 4px solid #3b82f6; }
+  .status-done { background: #f0fdf4; border-left: 4px solid #22c55e; }
+</style>
+"""
+
+
+def styled(html: str) -> str:
+    """Wrap HTML content with report styling."""
+    return f'{REPORT_CSS}<div class="report">{html}</div>'
+
+
 def md_to_html(text: str) -> str:
     """Convert markdown to HTML for Flyte reports."""
     return markdown.markdown(text, extensions=["tables", "fenced_code"])
@@ -49,70 +83,73 @@ def md_to_html(text: str) -> str:
 # ------------------------------------------------------------------
 
 @env.task(report=True)
-async def research_topic(topic: str, max_searches: int = 3) -> str:
+async def research_topic(topic: str, max_searches: int = 3) -> TopicReport:
     """Run the Claude research agent on a single sub-topic."""
     log.info(f"📄 Researching: {topic}")
 
-    await flyte.report.replace.aio(
-        f"<h2>Researching: {topic}</h2><p>Running Claude agent...</p>"
-    )
+    await flyte.report.replace.aio(styled(
+        f'<h2>{topic}</h2>'
+        f'<div class="status status-running">Searching the web with Claude...</div>'
+    ))
     await flyte.report.flush.aio()
 
     report = await run_research_agent(topic, max_searches=max_searches, model=MODEL)
     log.info(f"✅ Done: {topic}")
 
-    await flyte.report.replace.aio(
-        f"<h2>{topic}</h2>{md_to_html(report)}"
-    )
+    await flyte.report.replace.aio(styled(
+        f'<h2>{topic}</h2>{md_to_html(report)}'
+    ))
     await flyte.report.flush.aio()
 
-    return json.dumps({"topic": topic, "report": report})
+    return TopicReport(topic=topic, report=report)
 
 
 @env.task(report=True)
-async def synthesize(query: str, results_json: str) -> str:
+async def synthesize(query: str, results: list[TopicReport]) -> str:
     """Combine sub-topic research reports into a unified synthesis."""
-    results = json.loads(results_json)
     log.info(f"📝 Synthesizing {len(results)} report(s)...")
 
-    await flyte.report.replace.aio(
-        f"<h2>Synthesizing</h2><p>Combining {len(results)} reports...</p>"
-    )
+    await flyte.report.replace.aio(styled(
+        f'<h2>Synthesis</h2>'
+        f'<div class="status status-running">Combining {len(results)} reports...</div>'
+    ))
     await flyte.report.flush.aio()
 
     synthesis = await synthesize_reports(query, results, model=MODEL)
     log.info(f"📝 Synthesis complete: {len(synthesis)} chars")
 
-    await flyte.report.replace.aio(
-        f"<h2>Synthesis</h2>{md_to_html(synthesis)}"
-    )
+    await flyte.report.replace.aio(styled(
+        f'<h2>Synthesis</h2>{md_to_html(synthesis)}'
+    ))
     await flyte.report.flush.aio()
 
     return synthesis
 
 
 @env.task(report=True)
-async def quality_check(query: str, synthesis: str) -> str:
+async def quality_check(query: str, synthesis: str) -> QualityResult:
     """Evaluate report quality and identify gaps."""
     log.info("🔎 Evaluating quality...")
 
-    await flyte.report.replace.aio(
-        "<h2>Quality Check</h2><p>Evaluating report...</p>"
-    )
+    await flyte.report.replace.aio(styled(
+        '<h2>Quality Check</h2>'
+        '<div class="status status-running">Evaluating report quality...</div>'
+    ))
     await flyte.report.flush.aio()
 
-    score, gaps = await evaluate_quality(query, synthesis, model=MODEL)
-    log.info(f"📊 Score: {score}/10, Gaps: {len(gaps)}")
+    result = await evaluate_quality(query, synthesis, model=MODEL)
+    log.info(f"📊 Score: {result.score}/10, Gaps: {len(result.gaps)}")
 
-    gap_html = "".join(f"<li>{g}</li>" for g in gaps) if gaps else "<li>None</li>"
-    await flyte.report.replace.aio(
-        f"<h2>Quality Check</h2>"
-        f"<p><b>Score:</b> {score}/10</p>"
-        f"<p><b>Gaps:</b></p><ul>{gap_html}</ul>"
-    )
+    badge_class = "badge-green" if result.score >= 8 else "badge-amber"
+    gap_html = "".join(f"<li>{g}</li>" for g in result.gaps) if result.gaps else "<li>None</li>"
+    await flyte.report.replace.aio(styled(
+        f'<h2>Quality Check</h2>'
+        f'<p><span class="badge {badge_class}">{result.score}/10</span></p>'
+        f'<p><b>Gaps:</b></p><ul>{gap_html}</ul>'
+    ))
     await flyte.report.flush.aio()
 
-    return json.dumps({"score": score, "gaps": gaps})
+    return result
 
 
 # ------------------------------------------------------------------
@@ -125,7 +162,7 @@ async def research_pipeline(
     num_topics: int = 3,
     max_searches: int = 3,
     max_iterations: int = 2,
-) -> str:
+) -> PipelineResult:
     """
     Research pipeline:
     1. Plan sub-topics (Claude)
@@ -136,11 +173,11 @@ async def research_pipeline(
     """
     log.info(f"🚀 Starting research pipeline: {query}")
 
-    await flyte.report.replace.aio(
-        f"<h2>Research Pipeline</h2>"
-        f"<p><b>Query:</b> {query}</p>"
-        f"<p>Planning sub-topics...</p>"
-    )
+    await flyte.report.replace.aio(styled(
+        f'<h2>Research Pipeline</h2>'
+        f'<p><b>Query:</b> {query}</p>'
+        f'<div class="status status-running">Planning sub-topics...</div>'
+    ))
     await flyte.report.flush.aio()
 
     # -- Step 1: Plan sub-topics --
@@ -148,7 +185,7 @@ async def research_pipeline(
     topics = await plan_topics(query, num_topics=num_topics, model=MODEL)
     log.info(f"📋 Sub-topics: {topics}")
 
-    all_results = []
+    all_results: list[TopicReport] = []
     iteration = 0
 
     while iteration < max_iterations:
@@ -157,12 +194,13 @@ async def research_pipeline(
         log.info(f"🔄 Iteration {iteration}/{max_iterations}")
         log.info(f"{'='*60}")
 
-        await flyte.report.replace.aio(
-            f"<h2>Research Pipeline</h2>"
-            f"<p><b>Query:</b> {query}</p>"
-            f"<p>Iteration {iteration}/{max_iterations} "
-            f"— researching {len(topics)} topic(s)...</p>"
-        )
+        await flyte.report.replace.aio(styled(
+            f'<h2>Research Pipeline</h2>'
+            f'<p><b>Query:</b> {query}</p>'
+            f'<div class="status status-running">'
+            f'Iteration {iteration}/{max_iterations} '
+            f'— researching {len(topics)} topic(s)...</div>'
+        ))
         await flyte.report.flush.aio()
 
         # -- Step 2: Fan out research to parallel Flyte tasks --
@@ -173,24 +211,22 @@ async def research_pipeline(
             )
             for i, topic in enumerate(topics)
         ]
-        results_json = await asyncio.gather(*research_coros)
+        new_results = await asyncio.gather(*research_coros)
 
-        new_results = [json.loads(r) for r in results_json]
         all_results.extend(new_results)
         for r in new_results:
-            log.info(f"  📄 {r['topic']}: {len(r['report'])} chars")
+            log.info(f"  📄 {r.topic}: {len(r.report)} chars")
 
         # -- Step 3: Synthesize --
         synthesis = await synthesize.override(
             short_name=f"synthesize-{iteration}"
-        )(query, json.dumps(all_results))
+        )(query, all_results)
 
         # -- Step 4: Quality check --
-        eval_json = await quality_check.override(
+        evaluation = await quality_check.override(
             short_name=f"quality-{iteration}"
         )(query, synthesis)
-        evaluation = json.loads(eval_json)
-        score, gaps = evaluation["score"], evaluation["gaps"]
+        score, gaps = evaluation.score, evaluation.gaps
         log.info(f"📊 Score: {score}/10, Gaps: {len(gaps)}")
 
         if not gaps or score >= 8 or iteration >= max_iterations:
@@ -207,19 +243,21 @@ async def research_pipeline(
         )
 
     # -- Final report --
-    await flyte.report.replace.aio(
-        f"<h2>Research Report</h2>"
-        f"<p><b>Query:</b> {query}</p>"
-        f"<p><b>Quality:</b> {score}/10 after {iteration} iteration(s)</p>"
-        f"<hr/>{md_to_html(synthesis)}"
-    )
+    badge_class = "badge-green" if score >= 8 else "badge-amber"
+    await flyte.report.replace.aio(styled(
+        f'<h2>Research Report</h2>'
+        f'<p><b>Query:</b> {query}</p>'
+        f'<p><span class="badge {badge_class}">{score}/10</span> '
+        f'after {iteration} iteration(s)</p>'
+        f'<hr/>{md_to_html(synthesis)}'
+    ))
     await flyte.report.flush.aio()
 
     log.info(f"\n🏁 Pipeline complete. Score: {score}/10, Iterations: {iteration}")
-    return json.dumps({
-        "query": query,
-        "report": synthesis,
-        "sub_reports": all_results,
-        "score": score,
-        "iterations": iteration,
-    })
+    return PipelineResult(
+        query=query,
+        report=synthesis,
+        sub_reports=all_results,
+        score=score,
+        iterations=iteration,
+    )
