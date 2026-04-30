@@ -17,3 +17,4 @@ claude.md
 checkpoint_step_*/
 eval_checkpoint_*/
 feast_artifacts
+kubectl
