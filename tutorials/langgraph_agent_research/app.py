@@ -3,7 +3,9 @@
 Development progression:
   1. Local app + local task:   RUN_MODE=local python app.py
   2. Local app + remote task:  python app.py
-  3. Full remote:              flyte deploy app.py serving_env
+  3. Deploy tasks + app:
+       flyte deploy workflow.py          # registers tasks & builds images
+       flyte deploy app.py serving_env   # deploys the UI
 """
 
 import json
@@ -12,34 +14,56 @@ import os
 from dotenv import load_dotenv
 import flyte
 import flyte.app
-
-from workflow import research_pipeline
+import flyte.remote as remote
 
 load_dotenv()
 
 RUN_MODE = os.getenv("RUN_MODE", "remote")
+FLYTE_UI_URL = os.getenv("FLYTE_UI_URL", "http://localhost:30080")
 
 serving_env = flyte.app.AppEnvironment(
     name="research-pipeline-ui",
     image=flyte.Image.from_debian_base(python_version=(3, 11)).with_pip_packages(
-        "flyte>=2.1.2", "gradio", "langgraph>=1.0.7", "langchain-openai",
+        "flyte>=2.1.4", "gradio", "langgraph>=1.0.7", "langchain-openai",
         "tavily-python", "markdown", "python-dotenv", "unionai-reuse",
     ),
-    resources=flyte.Resources(cpu=2, memory="2Gi"),
+    resources=flyte.Resources(cpu=1, memory="1Gi"),
     secrets=[
-        flyte.Secret(key="SAGE_OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
+        flyte.Secret(key="OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
         flyte.Secret(key="TAVILY_API_KEY", as_env_var="TAVILY_API_KEY"),
     ],
     requires_auth=False,
     port=7860,
-    include=["requirements.txt"],
+    include=[
+        "requirements.txt",
+        "config.py",
+        "workflow.py",
+        "graph.py",
+        "tools/__init__.py",
+        "tools/search.py",
+    ],
+)
+
+# Pre-registered task reference — fetched from control plane at runtime.
+# Deploy tasks first: flyte deploy workflow.py
+research_pipeline_task = remote.Task.get(
+    "research-pipeline-env.research_pipeline",
+    project="flytesnacks",
+    domain="development",
+    auto_version="latest",
 )
 
 
 def run_query(query, num_topics, max_searches, max_iterations):
     """Kick off the research pipeline as a Flyte task, stream URL then result."""
-    result = flyte.with_runcontext(mode=RUN_MODE).run(
-        research_pipeline,
+    if RUN_MODE == "local":
+        from workflow import research_pipeline
+        task = research_pipeline
+    else:
+        task = research_pipeline_task
+
+    result = flyte.run(
+        task,
         query=query,
         num_topics=int(num_topics),
         max_searches=int(max_searches),
@@ -51,6 +75,12 @@ def run_query(query, num_topics, max_searches, max_iterations):
     link_html = ""
     if run_url:
         url_str = str(run_url)
+        # Rewrite internal cluster URL to the external UI URL
+        if "flyte-binary-http" in url_str or "flyte:" in url_str:
+            # Extract the path portion (e.g., /v2/domain/development/...)
+            from urllib.parse import urlparse
+            parsed = urlparse(url_str)
+            url_str = f"{FLYTE_UI_URL}{parsed.path}"
         if url_str.startswith("http"):
             link_html = f'<a href="{url_str}" target="_blank">View run on Flyte</a>'
             yield "", link_html
@@ -109,15 +139,18 @@ def create_demo():
 @serving_env.server
 def app_server():
     """Launch the Gradio app (called by Flyte on remote deployment)."""
+    flyte.init_in_cluster(project="flytesnacks", domain="development")
     create_demo().launch(server_name="0.0.0.0", server_port=7860, share=False)
 
 
 if __name__ == "__main__":
-    if RUN_MODE == "remote":
+    if RUN_MODE != "local":
         flyte.init_from_config()
 
     create_demo().launch()
 
 # Local app + local task:   RUN_MODE=local python app.py
 # Local app + remote task:  python app.py
-# Deploy to cluster:        flyte deploy app.py serving_env
+# Deploy tasks + app:
+#   flyte deploy workflow.py          # registers tasks & builds images
+#   flyte deploy app.py serving_env   # deploys the UI

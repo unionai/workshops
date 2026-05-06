@@ -37,23 +37,92 @@ OPENAI_API_KEY=your-key-here
 TAVILY_API_KEY=your-key-here
 ```
 
-## Run
+## 1. Run Locally
+
+No cluster needed — everything runs in-process:
 
 ```bash
-# Local with TUI
+# With TUI
 flyte run --local --tui workflow.py research_pipeline \
   --query "Compare quantum computing approaches: superconducting vs trapped ion"
 
-# Local without TUI
+# Without TUI
 flyte run --local workflow.py research_pipeline \
   --query "What are the pros and cons of electric vehicles?" \
   --num-topics 2 --max-searches 1
+```
 
-# Remote (on a Flyte cluster)
+Or run the Gradio app locally:
+
+```bash
+RUN_MODE=local python app.py
+```
+
+## 2. Run on a Cluster
+
+### Start the devbox
+
+Make sure the Flyte devbox is installed and running:
+
+```bash
+flyte start devbox
+```
+
+This starts a local k3s cluster in Docker with a UI at http://localhost:30080/v2.
+
+### Configure Flyte
+
+Point the SDK at your cluster (run once from the project directory):
+
+```bash
+flyte create config \
+    --endpoint localhost:30080 \
+    --project flytesnacks \
+    --domain development \
+    --builder local \
+    --insecure
+```
+
+This writes `.flyte/config.yaml` in your project root.
+
+### Create secrets
+
+The tasks need API keys to call OpenAI and Tavily. Create them once per project/domain:
+
+```bash
+flyte create secret OPENAI_API_KEY --project flytesnacks --domain development
+flyte create secret TAVILY_API_KEY --project flytesnacks --domain development
+```
+
+### Register tasks
+
+Register the task environment and build container images. This makes the tasks available on the cluster:
+
+```bash
+flyte deploy workflow.py env
+```
+
+### Run the pipeline remotely
+
+```bash
 flyte run workflow.py research_pipeline \
   --query "Compare quantum computing approaches" \
-  --num_topics 5 --max_searches 3 --max_iterations 3
+  --num_topics 2 --max_searches 2 --max_iterations 1
 ```
+
+Or run the Gradio app locally against the remote cluster:
+
+```bash
+python app.py
+```
+
+### Deploy the Gradio app to the cluster
+
+```bash
+flyte deploy app.py serving_env
+```
+
+The app references pre-registered tasks via `remote.Task.get()` with `auto_version="latest"`, so it always picks up the latest version. When you update task code, re-run `flyte deploy workflow.py env` to register the new version.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -61,34 +130,6 @@ flyte run workflow.py research_pipeline \
 | `--num-topics` | 3 | Number of sub-topics to research in parallel |
 | `--max-searches` | 2 | Max web searches per sub-topic |
 | `--max-iterations` | 2 | Max quality gate iterations |
-
-## Gradio App
-
-A Gradio UI that kicks off the research pipeline as a Flyte task. Three run modes:
-
-```bash
-# Fully local (no cluster needed)
-RUN_MODE=local python app.py
-
-# Local app, remote pipeline execution
-python app.py
-
-# Deploy the whole app to a Flyte cluster
-flyte deploy app.py serving_env
-```
-
-In remote mode, the UI immediately shows a clickable link to watch the pipeline execute on the Flyte platform. Set `RUN_MODE=local` for fully offline development.
-
-### Deploy
-
-```bash
-# Create secrets for the cluster
-flyte create secret SAGE_OPENAI_API_KEY <your-key>
-flyte create secret TAVILY_API_KEY <your-key>
-
-# Deploy
-flyte deploy app.py serving_env
-```
 
 ## Project Structure
 
