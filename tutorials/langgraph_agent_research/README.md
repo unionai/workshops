@@ -49,7 +49,7 @@ flyte run --local --tui workflow.py research_pipeline \
 # Without TUI
 flyte run --local workflow.py research_pipeline \
   --query "What are the pros and cons of electric vehicles?" \
-  --num-topics 2 --max-searches 1
+  --num_topics 2 --max_searches 1
 ```
 
 Or run the Gradio app locally:
