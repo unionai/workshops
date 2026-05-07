@@ -8,7 +8,6 @@ Development progression:
        flyte deploy app.py serving_env   # deploys the UI
 """
 
-import json
 import os
 
 from dotenv import load_dotenv
@@ -24,24 +23,12 @@ FLYTE_UI_URL = os.getenv("FLYTE_UI_URL", "http://localhost:30080")
 serving_env = flyte.app.AppEnvironment(
     name="research-pipeline-ui",
     image=flyte.Image.from_debian_base(python_version=(3, 11)).with_pip_packages(
-        "flyte>=2.1.4", "gradio", "langgraph>=1.0.7", "langchain-openai",
-        "tavily-python", "markdown", "python-dotenv", "unionai-reuse",
+        "flyte>=2.1.4", "gradio", "python-dotenv",
     ),
     resources=flyte.Resources(cpu=1, memory="1Gi"),
-    secrets=[
-        flyte.Secret(key="OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
-        flyte.Secret(key="TAVILY_API_KEY", as_env_var="TAVILY_API_KEY"),
-    ],
     requires_auth=False,
     port=7860,
-    include=[
-        "requirements.txt",
-        "config.py",
-        "workflow.py",
-        "graph.py",
-        "tools/__init__.py",
-        "tools/search.py",
-    ],
+    scaling=flyte.app.Scaling(replicas=(0, 1), scaledown_after=300),
 )
 
 # Pre-registered task reference — fetched from control plane at runtime.
@@ -92,10 +79,16 @@ def run_query(query, num_topics, max_searches, max_iterations):
 
     # Wait for completion, then show the report
     result.wait()
-    output = json.loads(result.outputs()[0])
-    report = output["report"]
-    score = output.get("score", "N/A")
-    iterations = output.get("iterations", "N/A")
+    output = result.outputs()[0]
+    # Handle both PipelineResult (local) and dict (remote) outputs
+    if hasattr(output, "report"):
+        report = output.report
+        score = output.score
+        iterations = output.iterations
+    else:
+        report = output["report"]
+        score = output.get("score", "N/A")
+        iterations = output.get("iterations", "N/A")
 
     header = f"**Quality:** {score}/10 | **Iterations:** {iterations}\n\n---\n\n"
     yield header + report, link_html

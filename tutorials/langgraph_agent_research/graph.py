@@ -1,9 +1,8 @@
 """
 Research agent pipeline with Flyte-backed compute.
 
-This is the real LangGraph + Flyte integration story:
-- LangGraph controls the pipeline logic: planning, routing, quality gates, looping
-- Flyte provides the compute: each researcher runs as a separate task with its own resources
+LangGraph controls the pipeline logic: planning, routing, quality gates, looping.
+Flyte provides the compute: each step runs as a separate task with its own resources.
 
 The pipeline graph:
 
@@ -24,14 +23,13 @@ The ReAct research subgraph (runs inside each Flyte task):
     agent → (tool calls?) → tools → agent → ... → END
 """
 
-import json
-import operator
 import logging
+import operator
 from typing import Annotated, TypedDict
 
 import flyte
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Send
@@ -94,26 +92,32 @@ After gathering enough information, write a clear research summary with key find
 
 
 # ------------------------------------------------------------------
-# Research pipeline graph
+# Research pipeline graph — nodes dispatch to Flyte tasks
 # ------------------------------------------------------------------
 
 def build_pipeline_graph(
-    openai_api_key: str,
-    tavily_api_key: str,
+    plan_task,
     research_task,
-    model: str = "gpt-4.1-nano",
+    synthesize_task,
+    quality_check_task,
+    **_kwargs,
 ):
     """
     Build the research pipeline graph.
 
-    Args:
-        research_task: A Flyte task function that takes (topic, max_searches)
-                       and returns a JSON string with {topic, report}.
-                       This is how LangGraph dispatches to Flyte compute.
-    """
-    llm = ChatOpenAI(model=model, api_key=openai_api_key)
+    Each node dispatches to a Flyte task, making every step visible
+    in the Flyte UI with its own compute, reports, and logs.
 
-    # Define state inside the function so Flyte doesn't wrap it with pydantic
+    Args:
+        plan_task: Flyte task (query, num_topics) → list[str]
+        research_task: Flyte task (topic, max_searches) → TopicReport
+        synthesize_task: Flyte task (query, results) → str
+        quality_check_task: Flyte task (query, synthesis) → QualityResult
+    """
+    # Import here to avoid circular imports
+    from models import TopicReport
+
+    # State definition — kept inside the function so Flyte doesn't wrap it
     class PipelineState(TypedDict, total=False):
         query: str
         num_topics: int
@@ -127,28 +131,17 @@ def build_pipeline_graph(
         gaps: list[str]
         final_report: str
 
-    # -- Plan node ----------------------------------------------------------
-    @flyte.trace
+    # -- Plan node → dispatches to plan_topics Flyte task ---------------
     async def plan(state: PipelineState) -> dict:
-        """Split the query into focused sub-topics."""
+        """Split the query into focused sub-topics via Flyte task."""
         query = state["query"]
         num_topics = state.get("num_topics", 3)
 
-        response = llm.invoke(f"""\
-Break this research question into exactly {num_topics} focused sub-topics. \
-Return ONLY a JSON array of strings, nothing else.
-
-Question: {query}""")
-        try:
-            topics = json.loads(response.content)
-        except json.JSONDecodeError:
-            topics = [query]
-
-        topics = topics[:num_topics]
+        topics = await plan_task(query, num_topics)
         log.info(f"[Plan] {len(topics)} sub-topics: {topics}")
         return {"topics": topics, "iteration": 1}
 
-    # -- Fan-out to research ------------------------------------------------
+    # -- Fan-out to research --------------------------------------------
     def route_to_research(state: PipelineState) -> list[Send]:
         """Create a Send for each topic — each dispatches to a Flyte task."""
         topics = state.get("gaps") or state["topics"]
@@ -158,78 +151,46 @@ Question: {query}""")
             for t in topics
         ]
 
-    # -- Research node (dispatches to Flyte task) ---------------------------
+    # -- Research node → dispatches to research_topic Flyte task --------
     async def research(state: dict) -> dict:
-        """
-        Run research on a single topic via a Flyte task.
-
-        This is the key integration point: LangGraph controls the routing,
-        Flyte provides the compute. Each topic runs as a separate container.
-        """
+        """Run research on a single topic via a Flyte task."""
         topic = state["topic"]
         max_searches = state.get("max_searches", 2)
         log.info(f"[Research] Dispatching to Flyte task: {topic}")
 
-        result_json = await research_task(topic, max_searches)
-        result = json.loads(result_json)
+        result = await research_task(topic, max_searches)
         log.info(f"[Research] Flyte task complete: {topic}")
 
-        return {"research_results": [result]}
+        return {"research_results": [{"topic": result.topic, "report": result.report}]}
 
-    # -- Synthesize node ----------------------------------------------------
-    @flyte.trace
-    async def synthesize(state: PipelineState) -> dict:
-        """Combine all research results into a report."""
+    # -- Synthesize node → dispatches to synthesize Flyte task ----------
+    async def synthesize_node(state: PipelineState) -> dict:
+        """Combine all research results via Flyte task."""
         query = state["query"]
-        results = state["research_results"]
+        results = [TopicReport(**r) for r in state["research_results"]]
         iteration = state.get("iteration", 1)
 
-        sections = "\n\n---\n\n".join(
-            f"## {r['topic']}\n\n{r['report']}" for r in results
-        )
+        synthesis = await synthesize_task.override(
+            short_name=f"synthesize-{iteration}"
+        )(query, results)
 
-        response = llm.invoke(f"""\
-You have research reports on sub-topics of this question:
-
-{query}
-
-Sub-topic reports:
-
-{sections}
-
-Write a comprehensive report that synthesizes all findings. \
-Organize by theme, highlight connections between sub-topics, \
-and end with key takeaways.""")
         log.info(f"[Synthesize] Combined {len(results)} reports (iteration {iteration})")
-        return {"synthesis": response.content}
+        return {"synthesis": synthesis}
 
-    # -- Quality check node -------------------------------------------------
-    @flyte.trace
-    async def quality_check(state: PipelineState) -> dict:
-        """Evaluate the synthesis and identify any gaps."""
+    # -- Quality check node → dispatches to quality_check Flyte task ----
+    async def quality_check_node(state: PipelineState) -> dict:
+        """Evaluate the synthesis via Flyte task."""
         query = state["query"]
         synthesis = state["synthesis"]
         iteration = state.get("iteration", 1)
         max_iterations = state.get("max_iterations", 2)
 
-        response = llm.invoke(f"""\
-Evaluate this research report for the question: {query}
+        result = await quality_check_task.override(
+            short_name=f"quality-{iteration}"
+        )(query, synthesis)
 
-Report:
-{synthesis}
-
-Rate the report quality from 1-10 and identify any gaps or missing perspectives. \
-Return JSON: {{"score": <int>, "gaps": [<string>, ...]}}
-If the report is comprehensive (score >= 8) or there are no significant gaps, \
-return an empty gaps list.""")
-
-        try:
-            evaluation = json.loads(response.content)
-            score = evaluation.get("score", 8)
-            gaps = evaluation.get("gaps", [])
-        except json.JSONDecodeError:
-            score = 8
-            gaps = []
+        score = result.score
+        gaps = result.gaps
 
         # Don't loop forever
         if iteration >= max_iterations:
@@ -239,7 +200,7 @@ return an empty gaps list.""")
         log.info(f"[Quality] Score: {score}/10, Gaps: {len(gaps)} (iteration {iteration})")
         return {"score": score, "gaps": gaps, "iteration": iteration + 1}
 
-    # -- Routing after quality check ----------------------------------------
+    # -- Routing after quality check ------------------------------------
     def after_quality_check(state: PipelineState) -> str:
         """If gaps found, research more. Otherwise, finalize."""
         if state.get("gaps"):
@@ -247,31 +208,22 @@ return an empty gaps list.""")
             return "research_more"
         return "finalize"
 
-    # -- Identify gaps node (triggers Send fan-out on gaps) ------------------
+    # -- Identify gaps node (triggers Send fan-out on gaps) -------------
     async def identify_gaps(state: PipelineState) -> dict:
         """Pass-through node to trigger research fan-out on gaps."""
         return {}
 
-    # -- Finalize node ------------------------------------------------------
-    @flyte.trace
+    # -- Finalize node --------------------------------------------------
     async def finalize(state: PipelineState) -> dict:
         """Set the final report."""
         return {"final_report": state["synthesis"]}
 
-    # -- Wire the graph -----------------------------------------------------
-    #
-    #   START → plan ──Send──→ research → synthesize → quality_check
-    #                              ▲                       │
-    #                              │                 gaps? │ no gaps
-    #                     identify_gaps ◄───────────────────┤
-    #                     (Send fan-out)                    ▼
-    #                                                   finalize → END
-    #
+    # -- Wire the graph -------------------------------------------------
     graph = StateGraph(PipelineState)
     graph.add_node("plan", plan)
     graph.add_node("research", research)
-    graph.add_node("synthesize", synthesize)
-    graph.add_node("quality_check", quality_check)
+    graph.add_node("synthesize", synthesize_node)
+    graph.add_node("quality_check", quality_check_node)
     graph.add_node("identify_gaps", identify_gaps)
     graph.add_node("finalize", finalize)
 
