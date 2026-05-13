@@ -40,6 +40,350 @@ log.setLevel(logging.INFO)
 
 
 # ------------------------------------------------------------------
+# Report styling — shared CSS for all task reports
+# ------------------------------------------------------------------
+
+REPORT_CSS = """
+<style>
+  .report { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; color: #1a1a2e; }
+  .report h2 { color: #16213e; border-bottom: 2px solid #0f3460; padding-bottom: 8px; margin-top: 24px; }
+  .report h3 { color: #0f3460; margin-top: 20px; }
+  .report .card { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px; margin: 12px 0; }
+  .report .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 12px 0; }
+  .report .stat { background: #fff; border: 1px solid #e9ecef; border-radius: 6px; padding: 12px; text-align: center; }
+  .report .stat .value { font-size: 1.5em; font-weight: 700; color: #0f3460; }
+  .report .stat .label { font-size: 0.85em; color: #6c757d; margin-top: 4px; }
+  .report table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  .report th { background: #0f3460; color: #fff; padding: 10px 14px; text-align: left; font-weight: 600; }
+  .report td { padding: 8px 14px; border-bottom: 1px solid #dee2e6; }
+  .report tr:nth-child(even) { background: #f8f9fa; }
+  .report .highlight { color: #0f3460; font-weight: 700; }
+  .report .note { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px 14px; border-radius: 4px; margin: 12px 0; font-size: 0.9em; }
+  .report .img-pair { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
+  .report .img-pair > div { flex: 1; min-width: 300px; }
+  .report .img-pair img { width: 100%; border-radius: 6px; border: 1px solid #dee2e6; }
+  .report .img-pair .gt-label { color: #e94560; font-weight: 600; }
+  .report .img-pair .pred-label { color: #06d6a0; font-weight: 600; }
+  .report .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: 600; }
+  .report .badge-success { background: #d4edda; color: #155724; }
+  .report .badge-info { background: #d1ecf1; color: #0c5460; }
+  .report .chart-container { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px; margin: 16px 0; }
+</style>
+"""
+
+
+def _wrap_report(html: str) -> str:
+    """Wrap HTML content with report styling."""
+    return f'{REPORT_CSS}<div class="report">{html}</div>'
+
+
+# ------------------------------------------------------------------
+# SVG chart helpers — lightweight charts without matplotlib
+# ------------------------------------------------------------------
+
+def _make_line_chart(
+    data: list[dict],
+    x_key: str,
+    y_keys: list[str],
+    title: str = "",
+    x_label: str = "",
+    y_label: str = "",
+    colors: list[str] | None = None,
+    width: int = 700,
+    height: int = 300,
+    y_max_cap: float | None = None,
+    x_range_override: tuple[float, float] | None = None,
+) -> str:
+    """Generate an SVG line chart from a list of dicts.
+
+    Args:
+        data: List of dicts, each with x_key and y_keys values.
+        x_key: Key for x-axis values.
+        y_keys: Keys for y-axis series to plot.
+        title: Chart title.
+        x_label: X-axis label.
+        y_label: Y-axis label.
+        colors: Colors for each series (defaults to a built-in palette).
+        width: SVG width in pixels.
+        height: SVG height in pixels.
+        y_max_cap: If set, cap the y-axis at this value (e.g. 1.0 for mAP).
+        x_range_override: If set, force the x-axis to this (min, max) range.
+
+    Returns:
+        SVG string.
+    """
+
+    default_colors = ["#5a7db5", "#0f3460", "#06d6a0", "#ffc107", "#6c757d"]
+    colors = colors or default_colors
+
+    # Chart area margins
+    ml, mr, mt, mb = 60, 20, 40, 50
+    cw = width - ml - mr
+    ch = height - mt - mb
+
+    x_vals = [d[x_key] for d in data] if data else []
+    if x_range_override:
+        x_min, x_max = x_range_override
+    elif x_vals:
+        x_min, x_max = min(x_vals), max(x_vals)
+    else:
+        x_min, x_max = 0, 1
+    x_range = x_max - x_min or 1
+
+    # Compute y range across all series
+    all_y = []
+    for key in y_keys:
+        all_y.extend(d[key] for d in data if key in d)
+    y_min = min(all_y) if all_y else 0
+    y_max = max(all_y) if all_y else 1
+    y_pad = (y_max - y_min) * 0.1 or 0.1
+    y_min_plot = max(0, y_min - y_pad)
+    y_max_plot = y_max + y_pad
+    if y_max_cap is not None:
+        y_max_plot = min(y_max_plot, y_max_cap)
+    y_range = y_max_plot - y_min_plot or 1
+
+    def sx(v):
+        return ml + (v - x_min) / x_range * cw
+
+    def sy(v):
+        return mt + ch - (v - y_min_plot) / y_range * ch
+
+    # Build SVG
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'style="width:100%;max-width:{width}px;height:auto;">',
+        # Background
+        f'<rect width="{width}" height="{height}" fill="#fff" rx="6"/>',
+    ]
+
+    # Grid lines (5 horizontal)
+    for i in range(6):
+        y_tick = y_min_plot + y_range * i / 5
+        py = sy(y_tick)
+        lines.append(
+            f'<line x1="{ml}" y1="{py:.1f}" x2="{ml + cw}" y2="{py:.1f}" '
+            f'stroke="#e9ecef" stroke-width="1"/>'
+        )
+        lines.append(
+            f'<text x="{ml - 8}" y="{py + 4:.1f}" text-anchor="end" '
+            f'font-size="11" fill="#6c757d">{y_tick:.3f}</text>'
+        )
+
+    # Axes
+    lines.append(
+        f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ch}" '
+        f'stroke="#adb5bd" stroke-width="1.5"/>'
+    )
+    lines.append(
+        f'<line x1="{ml}" y1="{mt + ch}" x2="{ml + cw}" y2="{mt + ch}" '
+        f'stroke="#adb5bd" stroke-width="1.5"/>'
+    )
+
+    # X-axis ticks
+    if x_vals:
+        n_x_ticks = min(len(data), 10)
+        step = max(1, len(data) // n_x_ticks)
+        for i in range(0, len(data), step):
+            px = sx(x_vals[i])
+            lines.append(
+                f'<text x="{px:.1f}" y="{mt + ch + 20}" text-anchor="middle" '
+                f'font-size="11" fill="#6c757d">{x_vals[i]:.0f}</text>'
+            )
+    else:
+        # Empty chart — generate evenly spaced ticks from x range
+        for i in range(6):
+            x_tick = x_min + x_range * i / 5
+            px = sx(x_tick)
+            lines.append(
+                f'<text x="{px:.1f}" y="{mt + ch + 20}" text-anchor="middle" '
+                f'font-size="11" fill="#6c757d">{x_tick:.0f}</text>'
+            )
+
+    # Plot each series
+    if not data:
+        # Empty chart placeholder
+        lines.append(
+            f'<text x="{ml + cw / 2}" y="{mt + ch / 2}" text-anchor="middle" '
+            f'font-size="13" fill="#adb5bd" font-style="italic">Waiting for data...</text>'
+        )
+    for si, key in enumerate(y_keys):
+        color = colors[si % len(colors)]
+        points = [(sx(d[x_key]), sy(d[key])) for d in data if key in d]
+        if not points:
+            continue
+        # Draw line if we have 2+ points
+        if len(points) >= 2:
+            path_d = f"M {points[0][0]:.1f},{points[0][1]:.1f}"
+            for px, py in points[1:]:
+                path_d += f" L {px:.1f},{py:.1f}"
+            lines.append(
+                f'<path d="{path_d}" fill="none" stroke="{color}" '
+                f'stroke-width="2" stroke-linejoin="round"/>'
+            )
+        # Always show dots for sparse data (including single points)
+        if len(points) <= 30:
+            for px, py in points:
+                lines.append(
+                    f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3" fill="{color}"/>'
+                )
+
+    # Title
+    if title:
+        lines.append(
+            f'<text x="{width / 2}" y="22" text-anchor="middle" '
+            f'font-size="14" font-weight="600" fill="#1a1a2e">{title}</text>'
+        )
+
+    # Axis labels
+    if x_label:
+        lines.append(
+            f'<text x="{ml + cw / 2}" y="{height - 6}" text-anchor="middle" '
+            f'font-size="12" fill="#6c757d">{x_label}</text>'
+        )
+    if y_label:
+        lines.append(
+            f'<text x="14" y="{mt + ch / 2}" text-anchor="middle" '
+            f'font-size="12" fill="#6c757d" '
+            f'transform="rotate(-90, 14, {mt + ch / 2})">{y_label}</text>'
+        )
+
+    # Legend
+    if len(y_keys) > 1:
+        lx = ml + 10
+        for si, key in enumerate(y_keys):
+            color = colors[si % len(colors)]
+            ly = mt + 14 + si * 18
+            lines.append(
+                f'<rect x="{lx}" y="{ly - 6}" width="12" height="12" '
+                f'rx="2" fill="{color}"/>'
+            )
+            lines.append(
+                f'<text x="{lx + 16}" y="{ly + 4}" font-size="11" '
+                f'fill="#1a1a2e">{key}</text>'
+            )
+
+    lines.append("</svg>")
+    return "\n".join(lines)
+
+
+def _make_bar_chart(
+    labels: list[str],
+    series: dict[str, list[float]],
+    title: str = "",
+    colors: list[str] | None = None,
+    width: int = 700,
+    height: int = 300,
+    y_max_cap: float | None = None,
+) -> str:
+    """Generate an SVG grouped bar chart.
+
+    Args:
+        labels: Category labels for x-axis.
+        series: Dict mapping series name to list of values (same length as labels).
+        title: Chart title.
+        colors: Colors for each series.
+        width: SVG width.
+        height: SVG height.
+        y_max_cap: If set, cap the y-axis at this value (e.g. 1.0 for mAP).
+
+    Returns:
+        SVG string.
+    """
+    if not labels:
+        return ""
+
+    default_colors = ["#adb5bd", "#0f3460", "#06d6a0", "#5a7db5"]
+    colors = colors or default_colors
+
+    ml, mr, mt, mb = 60, 20, 40, 60
+    cw = width - ml - mr
+    ch = height - mt - mb
+
+    all_vals = [v for vals in series.values() for v in vals]
+    y_max = max(all_vals) if all_vals else 1
+    y_max_plot = y_max * 1.15
+    if y_max_cap is not None:
+        y_max_plot = min(y_max_plot, y_max_cap)
+
+    n_groups = len(labels)
+    n_series = len(series)
+    group_width = cw / n_groups
+    bar_width = group_width * 0.7 / max(n_series, 1)
+    gap = group_width * 0.15
+
+    def sy(v):
+        return mt + ch - (v / y_max_plot) * ch
+
+    lines_svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'style="width:100%;max-width:{width}px;height:auto;">',
+        f'<rect width="{width}" height="{height}" fill="#fff" rx="6"/>',
+    ]
+
+    # Grid lines
+    for i in range(6):
+        y_tick = y_max_plot * i / 5
+        py = sy(y_tick)
+        lines_svg.append(
+            f'<line x1="{ml}" y1="{py:.1f}" x2="{ml + cw}" y2="{py:.1f}" '
+            f'stroke="#e9ecef" stroke-width="1"/>'
+        )
+        lines_svg.append(
+            f'<text x="{ml - 8}" y="{py + 4:.1f}" text-anchor="end" '
+            f'font-size="11" fill="#6c757d">{y_tick:.3f}</text>'
+        )
+
+    # Bars
+    for gi, label in enumerate(labels):
+        gx = ml + gi * group_width + gap
+        for si, (name, vals) in enumerate(series.items()):
+            color = colors[si % len(colors)]
+            bx = gx + si * bar_width
+            val = vals[gi]
+            by = sy(val)
+            bh = mt + ch - by
+            lines_svg.append(
+                f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_width - 1:.1f}" '
+                f'height="{bh:.1f}" fill="{color}" rx="2"/>'
+            )
+            # Value label on top of bar
+            lines_svg.append(
+                f'<text x="{bx + bar_width / 2:.1f}" y="{by - 4:.1f}" '
+                f'text-anchor="middle" font-size="10" fill="#1a1a2e">'
+                f'{val:.3f}</text>'
+            )
+        # Group label
+        lines_svg.append(
+            f'<text x="{gx + n_series * bar_width / 2:.1f}" y="{mt + ch + 18}" '
+            f'text-anchor="middle" font-size="11" fill="#6c757d">{label}</text>'
+        )
+
+    # Title
+    if title:
+        lines_svg.append(
+            f'<text x="{width / 2}" y="22" text-anchor="middle" '
+            f'font-size="14" font-weight="600" fill="#1a1a2e">{title}</text>'
+        )
+
+    # Legend
+    lx = ml + cw - len(series) * 100
+    for si, name in enumerate(series):
+        color = colors[si % len(colors)]
+        lines_svg.append(
+            f'<rect x="{lx + si * 100}" y="{mt + ch + 35}" width="12" '
+            f'height="12" rx="2" fill="{color}"/>'
+        )
+        lines_svg.append(
+            f'<text x="{lx + si * 100 + 16}" y="{mt + ch + 46}" font-size="11" '
+            f'fill="#1a1a2e">{name}</text>'
+        )
+
+    lines_svg.append("</svg>")
+    return "\n".join(lines_svg)
+
+
+# ------------------------------------------------------------------
 # Task 1: Prepare dataset — download COCO JSON + images, split train/val
 # ------------------------------------------------------------------
 
@@ -243,6 +587,7 @@ async def train(
     lr: float = 5e-5,
     batch_size: int = 4,
     weight_decay: float = 1e-4,
+    eval_every_n_epochs: int | None = None,
 ) -> flyte.io.Dir:
     """Fine-tune RT-DETR (or any HuggingFace object-detection model) on COCO data."""
     import torch
@@ -255,8 +600,10 @@ async def train(
     )
 
     log.info(f"Training: model={model_name}")
-    await flyte.report.replace.aio(f"<h2>Loading model: {model_name}</h2>")
-    await flyte.report.flush.aio()
+    await flyte.report.replace.aio(_wrap_report(
+        f"<h2>Loading model...</h2><p>{model_name}</p>"
+        f"<p>Preparing dataset and initializing weights...</p>"
+    ), do_flush=True)
 
     # -- Load data --
     data_path = await data_dir.download()
@@ -270,6 +617,39 @@ async def train(
 
     train_ds, _ = _build_torch_dataset(train_json, images_root, augment=True)
     log.info(f"Train examples: {len(train_ds)} | Categories: {id2label}")
+
+    # -- Optionally load val set for periodic mAP evaluation --
+    val_json = os.path.join(data_path, "val.json")
+    val_images = None
+    val_targets = None
+    if eval_every_n_epochs and os.path.exists(val_json):
+        import torch as _torch
+        from PIL import Image
+
+        with open(val_json) as f:
+            val_coco = json.load(f)
+        images_by_id = {im["id"]: im for im in val_coco["images"]}
+        anns_by_image: dict[int, list] = {}
+        for a in val_coco["annotations"]:
+            anns_by_image.setdefault(a["image_id"], []).append(a)
+        val_images = []
+        val_targets = []
+        for img_id, meta in images_by_id.items():
+            path = os.path.join(images_root, os.path.basename(meta["file_name"]))
+            if not os.path.exists(path):
+                path = os.path.join(images_root, meta["file_name"])
+            val_images.append(Image.open(path).convert("RGB"))
+            boxes_xyxy = []
+            labels = []
+            for a in anns_by_image.get(img_id, []):
+                x, y, w, h = a["bbox"]
+                boxes_xyxy.append([x, y, x + w, y + h])
+                labels.append(a["category_id"])
+            val_targets.append({
+                "boxes": _torch.tensor(boxes_xyxy, dtype=_torch.float32).reshape(-1, 4),
+                "labels": _torch.tensor(labels, dtype=_torch.long),
+            })
+        log.info(f"Val examples for periodic eval: {len(val_images)}")
 
     # -- Processor + model --
     processor = AutoImageProcessor.from_pretrained(model_name)
@@ -311,18 +691,163 @@ async def train(
             f"{model.config.num_labels}. Check category id remapping in prepare_data."
         )
 
-    # -- Log-to-stdout callback only. We deliberately do NOT call
-    # flyte.report.replace from inside the callback: trainer.train() blocks
-    # the asyncio event loop, and the sync `replace` wrapper would deadlock
-    # against the syncify bridge that needs that loop to schedule work.
-    class StdoutProgressCallback(TrainerCallback):
+    # -- Collect training metrics and update the report chart live.
+    # trainer.train() runs in a background thread (via asyncio.to_thread),
+    # so the asyncio event loop stays free. We use run_coroutine_threadsafe
+    # to push report updates from the callback thread onto that loop.
+    training_log: list[dict] = []
+    eval_log: list[dict] = []  # periodic mAP checkpoints (epoch, map, map_50)
+    loop = asyncio.get_running_loop()
+
+    cat_badges = " ".join(
+        f'<span class="badge badge-info">{name}</span>'
+        for name in id2label.values()
+    )
+
+    def _build_training_report(max_steps: int) -> str:
+        """Build the live training report HTML from current training_log."""
+        stats_html = f"""
+        <h2>Training in Progress...</h2>
+        <h3>{model_name}</h3>
+        <div class="stat-grid">
+          <div class="stat"><div class="value">{len(train_ds)}</div><div class="label">Train Examples</div></div>
+          <div class="stat"><div class="value">{epochs}</div><div class="label">Epochs</div></div>
+          <div class="stat"><div class="value">{lr}</div><div class="label">Learning Rate</div></div>
+          <div class="stat"><div class="value">{batch_size}</div><div class="label">Batch Size</div></div>
+          <div class="stat"><div class="value">{total_params:,}</div><div class="label">Total Params</div></div>
+          <div class="stat"><div class="value">{trainable_params / total_params * 100:.1f}%</div><div class="label">Trainable</div></div>
+        </div>
+        <p>Categories: {cat_badges}</p>
+        """
+
+        charts_html = ""
+        if training_log:
+            current = training_log[-1]
+            progress_pct = current["step"] / max_steps * 100 if max_steps else 0
+            charts_html += f"""
+            <div class="card">
+              <b>Step {current['step']}/{max_steps}</b>
+              ({progress_pct:.0f}%) |
+              Epoch {current['epoch']:.2f}/{epochs} |
+              Loss: <span class="highlight">{current['loss']:.4f}</span>
+              <div style="background:#e9ecef;border-radius:4px;height:8px;margin-top:8px;">
+                <div style="background:#0f3460;width:{progress_pct:.1f}%;height:100%;border-radius:4px;"></div>
+              </div>
+            </div>
+            """
+
+            loss_chart = _make_line_chart(
+                data=training_log,
+                x_key="epoch",
+                y_keys=["loss"],
+                title="Training Loss",
+                x_label="Epoch",
+                y_label="Loss",
+                colors=["#5a7db5"],
+            )
+            charts_html += f'<div class="chart-container">{loss_chart}</div>'
+
+            if eval_every_n_epochs:
+                map_chart = _make_line_chart(
+                    data=eval_log,
+                    x_key="epoch",
+                    y_keys=["map", "map_50"],
+                    title="Validation mAP (periodic)",
+                    x_label="Epoch",
+                    y_label="mAP",
+                    colors=["#0f3460", "#06d6a0"],
+                    y_max_cap=1.0,
+                )
+                charts_html += f'<div class="chart-container">{map_chart}</div>'
+
+            if "lr" in training_log[0]:
+                lr_chart = _make_line_chart(
+                    data=training_log,
+                    x_key="epoch",
+                    y_keys=["lr"],
+                    title="Learning Rate Schedule",
+                    x_label="Epoch",
+                    y_label="LR",
+                    colors=["#0f3460"],
+                )
+                charts_html += f'<div class="chart-container">{lr_chart}</div>'
+
+        return _wrap_report(stats_html + charts_html)
+
+    class MetricsCallback(TrainerCallback):
+        def __init__(self):
+            self._last_eval_epoch = 0
+
         def on_log(self, args, state, control, logs=None, **kwargs):
             if not logs or "loss" not in logs:
                 return
+            entry = {
+                "step": state.global_step,
+                "epoch": round(logs.get("epoch", 0), 2),
+                "loss": round(logs["loss"], 4),
+            }
+            if "learning_rate" in logs:
+                entry["lr"] = logs["learning_rate"]
+            if "grad_norm" in logs:
+                entry["grad_norm"] = round(float(logs["grad_norm"]), 4)
+            training_log.append(entry)
             log.info(
                 f"step={state.global_step}/{state.max_steps} "
-                f"epoch={logs.get('epoch', 0):.2f} "
-                f"loss={logs['loss']:.4f}"
+                f"epoch={entry['epoch']:.2f} "
+                f"loss={entry['loss']:.4f}"
+            )
+
+            # Push a live report update onto the asyncio event loop.
+            # do_flush=True dispatches the update to the UI immediately.
+            asyncio.run_coroutine_threadsafe(
+                flyte.report.replace.aio(
+                    _build_training_report(state.max_steps),
+                    do_flush=True,
+                ),
+                loop,
+            )
+
+        def on_epoch_end(self, args, state, control, model=None, **kwargs):
+            if not eval_every_n_epochs or val_images is None:
+                return
+            current_epoch = round(state.epoch)
+            if current_epoch % eval_every_n_epochs != 0:
+                return
+            if current_epoch == self._last_eval_epoch:
+                return
+            self._last_eval_epoch = current_epoch
+
+            log.info(f"Running periodic mAP eval at epoch {current_epoch}...")
+            from torchmetrics.detection.mean_ap import MeanAveragePrecision
+
+            device = next(model.parameters()).device
+            # _run_inference sets model.eval(); restore train mode after.
+            preds = _run_inference(model, processor, val_images, device, threshold=0.5)
+            model.train()
+
+            formatted = [
+                {"boxes": p["boxes"], "scores": p["scores"], "labels": p["labels"]}
+                for p in preds
+            ]
+            metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+            metric.update(formatted, val_targets)
+            result = metric.compute()
+            map_val = round(result["map"].item(), 4)
+            map_50 = round(result["map_50"].item(), 4)
+
+            eval_log.append({
+                "epoch": current_epoch,
+                "map": map_val,
+                "map_50": map_50,
+            })
+            log.info(f"Epoch {current_epoch} — mAP: {map_val:.4f}, mAP@50: {map_50:.4f}")
+
+            asyncio.run_coroutine_threadsafe(
+                flyte.report.replace.aio(
+                    _build_training_report(state.max_steps),
+                    do_flush=True,
+                ),
+                loop,
             )
 
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -348,7 +873,7 @@ async def train(
         args=training_args,
         train_dataset=train_ds,
         data_collator=collate_fn,
-        callbacks=[StdoutProgressCallback()],
+        callbacks=[MetricsCallback()],
     )
 
     log.info("Starting training...")
@@ -362,13 +887,80 @@ async def train(
     processor.save_pretrained(save_dir)
     log.info(f"Model saved to {save_dir}")
 
-    await flyte.report.replace.aio(
-        f"<h2>Training Complete — {model_name}</h2>"
-        f"<p><b>Train examples:</b> {len(train_ds)}</p>"
-        f"<p><b>Epochs:</b> {epochs} | <b>LR:</b> {lr} | <b>Batch size:</b> {batch_size}</p>"
-        f"<p><b>Categories:</b> {', '.join(id2label.values())}</p>"
-    )
-    await flyte.report.flush.aio()
+    # -- Build final training report --
+    stats_html = f"""
+    <h2>Training Complete</h2>
+    <h3>{model_name}</h3>
+    <div class="stat-grid">
+      <div class="stat"><div class="value">{len(train_ds)}</div><div class="label">Train Examples</div></div>
+      <div class="stat"><div class="value">{epochs}</div><div class="label">Epochs</div></div>
+      <div class="stat"><div class="value">{lr}</div><div class="label">Learning Rate</div></div>
+      <div class="stat"><div class="value">{batch_size}</div><div class="label">Batch Size</div></div>
+      <div class="stat"><div class="value">{total_params:,}</div><div class="label">Total Params</div></div>
+      <div class="stat"><div class="value">{trainable_params / total_params * 100:.1f}%</div><div class="label">Trainable</div></div>
+    </div>
+    <p>Categories: {cat_badges}</p>
+    """
+
+    charts_html = ""
+    if training_log:
+        final_loss = training_log[-1]["loss"]
+        min_loss = min(d["loss"] for d in training_log)
+        initial_loss = training_log[0]["loss"]
+        total_steps = training_log[-1]["step"]
+
+        charts_html += f"""
+        <div class="card">
+          <b>Training Summary:</b>
+          Initial loss: {initial_loss:.4f} |
+          Final loss: <span class="highlight">{final_loss:.4f}</span> |
+          Min loss: {min_loss:.4f} |
+          Total steps: {total_steps}
+        </div>
+        """
+
+        epoch_range = (0, epochs)
+
+        loss_chart = _make_line_chart(
+            data=training_log,
+            x_key="epoch",
+            y_keys=["loss"],
+            title="Training Loss",
+            x_label="Epoch",
+            y_label="Loss",
+            colors=["#5a7db5"],
+            x_range_override=epoch_range,
+        )
+        charts_html += f'<div class="chart-container">{loss_chart}</div>'
+
+    if eval_log:
+        map_chart = _make_line_chart(
+            data=eval_log,
+            x_key="epoch",
+            y_keys=["map", "map_50"],
+            title="Validation mAP (periodic)",
+            x_label="Epoch",
+            y_label="mAP",
+            colors=["#0f3460", "#06d6a0"],
+            y_max_cap=1.0,
+            x_range_override=(0, epochs),
+        )
+        charts_html += f'<div class="chart-container">{map_chart}</div>'
+
+    if training_log and "lr" in training_log[0]:
+        lr_chart = _make_line_chart(
+            data=training_log,
+            x_key="epoch",
+            y_keys=["lr"],
+            title="Learning Rate Schedule",
+            x_label="Epoch",
+            y_label="LR",
+            colors=["#0f3460"],
+            x_range_override=(0, epochs),
+        )
+        charts_html += f'<div class="chart-container">{lr_chart}</div>'
+
+    await flyte.report.replace.aio(_wrap_report(stats_html + charts_html), do_flush=True)
 
     return await flyte.io.Dir.from_local(save_dir)
 
@@ -436,25 +1028,25 @@ def _img_to_data_uri(img, max_dim: int = 800) -> str:
 
 
 # ------------------------------------------------------------------
-# Task 3: Evaluate — COCO mAP, base vs fine-tuned
+# Task 3: Evaluate — COCO mAP on fine-tuned model
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
 async def evaluate(
-    model_name: str,
     finetuned_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
-    threshold: float = 0.3,
+    threshold: float = 0.5,
 ) -> str:
-    """Compute COCO mAP for base and fine-tuned models on the val split."""
+    """Compute COCO mAP for the fine-tuned model on the val split."""
     import torch
     from PIL import Image
     from torchmetrics.detection.mean_ap import MeanAveragePrecision
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
 
     log.info("Starting evaluation...")
-    await flyte.report.replace.aio("<h2>Evaluation</h2><p>Loading val split...</p>")
-    await flyte.report.flush.aio()
+    await flyte.report.replace.aio(_wrap_report(
+        "<h2>Evaluation</h2><p>Loading val split and scoring model...</p>"
+    ), do_flush=True)
 
     data_path = await data_dir.download()
     images_root = os.path.join(data_path, "images")
@@ -467,7 +1059,6 @@ async def evaluate(
     anns_by_image: dict[int, list] = {}
     for a in val_coco["annotations"]:
         anns_by_image.setdefault(a["image_id"], []).append(a)
-    id2label = {c["id"]: c["name"] for c in val_coco["categories"]}
 
     pil_images = []
     targets = []
@@ -491,80 +1082,89 @@ async def evaluate(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    def score_model(name: str, model_path: str, use_pretrained_labels: bool):
-        log.info(f"Scoring: {name} ({model_path})")
-        processor = AutoImageProcessor.from_pretrained(model_path)
-        kwargs = {}
-        if not use_pretrained_labels:
-            kwargs.update(
-                id2label=id2label,
-                label2id={v: k for k, v in id2label.items()},
-                ignore_mismatched_sizes=True,
-            )
-        model = AutoModelForObjectDetection.from_pretrained(model_path, **kwargs).to(device)
-        preds = _run_inference(model, processor, pil_images, device, threshold=threshold)
-
-        formatted_preds = [
-            {"boxes": p["boxes"], "scores": p["scores"], "labels": p["labels"]}
-            for p in preds
-        ]
-
-        # When scoring the pretrained base against custom labels its predictions
-        # are in COCO label space (80 classes), so mAP against our 2 classes is
-        # near-zero by construction. We still report it to show the lift.
-        metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
-        metric.update(formatted_preds, targets)
-
-        def to_python(v):
-            # torchmetrics returns per-class arrays for keys like `map_per_class`;
-            # only call .item() on true scalars, tolist() otherwise.
-            if hasattr(v, "numel"):
-                return v.item() if v.numel() == 1 else v.tolist()
-            return v
-
-        result = {k: to_python(v) for k, v in metric.compute().items()}
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return result, preds
-
-    base_metrics, base_preds = score_model(
-        "base", model_name, use_pretrained_labels=True
-    )
-
     ft_path = await finetuned_dir.download()
-    ft_metrics, ft_preds = score_model("finetuned", ft_path, use_pretrained_labels=False)
+    log.info(f"Scoring fine-tuned model: {ft_path}")
+    processor = AutoImageProcessor.from_pretrained(ft_path)
+    model = AutoModelForObjectDetection.from_pretrained(ft_path).to(device)
+    preds = _run_inference(model, processor, pil_images, device, threshold=threshold)
 
-    log.info(f"Base mAP: {base_metrics.get('map', 0):.3f}")
+    formatted_preds = [
+        {"boxes": p["boxes"], "scores": p["scores"], "labels": p["labels"]}
+        for p in preds
+    ]
+
+    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+    metric.update(formatted_preds, targets)
+
+    def to_python(v):
+        if hasattr(v, "numel"):
+            return v.item() if v.numel() == 1 else v.tolist()
+        return v
+
+    ft_metrics = {k: to_python(v) for k, v in metric.compute().items()}
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     log.info(f"Fine-tuned mAP: {ft_metrics.get('map', 0):.3f}")
 
+    metric_keys = ["map", "map_50", "map_75", "mar_10"]
+    metric_display = {
+        "map": "mAP",
+        "map_50": "mAP@50",
+        "map_75": "mAP@75",
+        "mar_10": "mAR@10",
+    }
+
     rows = []
-    for key in ["map", "map_50", "map_75", "mar_1", "mar_10"]:
+    for key in metric_keys:
+        ft_val = ft_metrics.get(key, 0)
         rows.append(
-            f"<tr><td>{key}</td>"
-            f"<td>{base_metrics.get(key, 0):.3f}</td>"
-            f"<td>{ft_metrics.get(key, 0):.3f}</td></tr>"
+            f"<tr><td><b>{metric_display.get(key, key)}</b></td>"
+            f"<td class='highlight'>{ft_val:.3f}</td></tr>"
         )
     table = (
-        "<table><tr><th>Metric</th><th>Base</th><th>Fine-tuned</th></tr>"
+        "<table><tr><th>Metric</th><th>Score</th></tr>"
         + "".join(rows)
         + "</table>"
     )
 
-    await flyte.report.replace.aio(
-        f"<h2>Evaluation — COCO mAP</h2>"
-        f"<p>Val images: {len(pil_images)} | Threshold: {threshold}</p>"
-        f"{table}"
-        f"<p><i>Note: the base model was pretrained on COCO's 80 classes, so it "
-        f"emits boxes labelled with COCO categories rather than ours — "
-        f"hence the near-zero base mAP. The lift comes from teaching the "
-        f"decoder to predict our category ids.</i></p>"
+    bar_chart = _make_bar_chart(
+        labels=[metric_display.get(k, k) for k in metric_keys],
+        series={"Fine-tuned": [ft_metrics.get(k, 0) for k in metric_keys]},
+        title="COCO Evaluation Metrics",
+        colors=["#0f3460"],
+        y_max_cap=1.0,
     )
-    await flyte.report.flush.aio()
+
+    ft_map = ft_metrics.get("map", 0)
+    ft_map50 = ft_metrics.get("map_50", 0)
+
+    eval_html = f"""
+    <h2>Evaluation — COCO mAP</h2>
+    <div class="stat-grid">
+      <div class="stat"><div class="value">{len(pil_images)}</div><div class="label">Val Images</div></div>
+      <div class="stat"><div class="value">{threshold}</div><div class="label">Threshold</div></div>
+      <div class="stat"><div class="value highlight">{ft_map:.3f}</div><div class="label">mAP</div></div>
+      <div class="stat"><div class="value highlight">{ft_map50:.3f}</div><div class="label">mAP@50</div></div>
+    </div>
+    <div class="chart-container">{bar_chart}</div>
+    {table}
+    <div class="note">
+      <b>mAP</b> (mean Average Precision) measures how accurately the model
+      detects objects — balancing whether predictions are correct (precision)
+      and whether all objects are found (recall). The @50 and @75 variants
+      require IoU overlaps of 50% and 75% between predicted and ground-truth
+      boxes. <b>mAR</b> (mean Average Recall) measures how many ground-truth
+      objects the model finds, with @1 and @10 limiting detections to 1 or 10
+      per image.
+    </div>
+    """
+
+    await flyte.report.replace.aio(_wrap_report(eval_html), do_flush=True)
 
     return json.dumps(
         {
-            "base": {k: round(v, 4) for k, v in base_metrics.items() if isinstance(v, (int, float))},
             "finetuned": {k: round(v, 4) for k, v in ft_metrics.items() if isinstance(v, (int, float))},
             "num_val_images": len(pil_images),
         }
@@ -579,8 +1179,9 @@ async def evaluate(
 async def inference_demo(
     finetuned_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
-    threshold: float = 0.3,
+    threshold: float = 0.5,
     max_images: int = 8,
+    metrics_json: str = "{}",
 ) -> str:
     """Run the fine-tuned model on val images, render bboxes, embed in the report."""
     import torch
@@ -630,25 +1231,68 @@ async def inference_demo(
     preds = _run_inference(model, processor, pil_images, device, threshold=threshold)
 
     html_blocks = []
-    for img, pred, gt in zip(pil_images, preds, gt_per_image):
-        pred_img = _draw_boxes(img, pred["boxes"], pred["labels"], pred["scores"], id2label, color="lime")
-        gt_img = _draw_boxes(img, gt["boxes"], gt["labels"], gt["scores"], id2label, color="red")
-        html_blocks.append(
-            f"""
-<div style="display:flex; gap:8px; margin:12px 0;">
-  <div><p><b>Ground truth</b> ({len(gt['labels'])} boxes)</p>
-    <img src="{_img_to_data_uri(gt_img)}" style="max-width:380px;" /></div>
-  <div><p><b>Predictions</b> ({len(pred['labels'])} boxes, threshold={threshold})</p>
-    <img src="{_img_to_data_uri(pred_img)}" style="max-width:380px;" /></div>
-</div>"""
+    total_gt = 0
+    total_pred = 0
+    for i, (img, pred, gt) in enumerate(zip(pil_images, preds, gt_per_image)):
+        n_gt = len(gt["labels"])
+        n_pred = len(pred["labels"])
+        total_gt += n_gt
+        total_pred += n_pred
+        pred_img = _draw_boxes(
+            img, pred["boxes"], pred["labels"], pred["scores"],
+            id2label, color="lime",
         )
+        gt_img = _draw_boxes(
+            img, gt["boxes"], gt["labels"], gt["scores"],
+            id2label, color="red",
+        )
+        html_blocks.append(f"""
+        <div class="card">
+          <b>Image {i + 1}</b>
+          <div class="img-pair">
+            <div>
+              <p><span class="gt-label">Ground Truth</span>
+                 <span class="badge badge-info">{n_gt} boxes</span></p>
+              <img src="{_img_to_data_uri(gt_img)}" />
+            </div>
+            <div>
+              <p><span class="pred-label">Predictions</span>
+                 <span class="badge badge-success">{n_pred} boxes</span>
+                 (threshold={threshold})</p>
+              <img src="{_img_to_data_uri(pred_img)}" />
+            </div>
+          </div>
+        </div>""")
 
-    await flyte.report.replace.aio(
-        f"<h2>Inference Demo — fine-tuned RT-DETR</h2>"
-        f"<p>Showing {len(pil_images)} val image(s). Green = predictions, red = ground truth.</p>"
-        + "".join(html_blocks)
-    )
-    await flyte.report.flush.aio()
+    # Parse metrics if provided (from evaluate task)
+    metrics = json.loads(metrics_json)
+    ft_metrics = metrics.get("finetuned", {})
+    ft_map = ft_metrics.get("map", None)
+    ft_map50 = ft_metrics.get("map_50", None)
+
+    metrics_stats = ""
+    if ft_map is not None:
+        metrics_stats = f"""
+        <div class="stat"><div class="value highlight">{ft_map:.3f}</div><div class="label">mAP</div></div>
+        <div class="stat"><div class="value highlight">{ft_map50:.3f}</div><div class="label">mAP@50</div></div>
+        """
+
+    demo_html = f"""
+    <h2>Inference Demo</h2>
+    <h3>Fine-tuned RT-DETR on validation images</h3>
+    <div class="stat-grid">
+      {metrics_stats}
+      <div class="stat"><div class="value">{len(pil_images)}</div><div class="label">Images Shown</div></div>
+      <div class="stat"><div class="value">{total_gt}</div><div class="label">Ground Truth Boxes</div></div>
+      <div class="stat"><div class="value">{total_pred}</div><div class="label">Predicted Boxes</div></div>
+      <div class="stat"><div class="value">{threshold}</div><div class="label">Confidence Threshold</div></div>
+    </div>
+    <p><span class="gt-label">Red = ground truth</span> |
+       <span class="pred-label">Green = predictions</span></p>
+    {"".join(html_blocks)}
+    """
+
+    await flyte.report.replace.aio(_wrap_report(demo_html), do_flush=True)
 
     return json.dumps(
         {
@@ -672,8 +1316,9 @@ async def pipeline(
     lr: float = 5e-5,
     batch_size: int = 4,
     val_fraction: float = 0.2,
-    threshold: float = 0.3,
+    threshold: float = 0.5,
     demo_images: int = 8,
+    eval_every_n_epochs: int | None = None,
 ) -> str:
     """
     End-to-end RT-DETRv2 fine-tuning pipeline.
@@ -685,13 +1330,28 @@ async def pipeline(
     """
     log.info(f"Pipeline: {model_name} | dataset={dataset_repo}")
 
+    def _pipeline_progress(step: int, label: str) -> str:
+        steps = ["Preparing Data", "Fine-tuning", "Evaluating", "Inference Demo"]
+        dots = ""
+        for i, s in enumerate(steps):
+            if i + 1 < step:
+                icon = '<span style="color:#06d6a0;">&#10003;</span>'
+            elif i + 1 == step:
+                icon = '<span style="color:#e94560;">&#9679;</span>'
+            else:
+                icon = '<span style="color:#adb5bd;">&#9675;</span>'
+            dots += f"<span style='margin:0 8px;'>{icon} {s}</span>"
+        return f"""
+        <h2>RT-DETRv2 Object Detection Pipeline</h2>
+        <p><b>Model:</b> {model_name} | <b>Dataset:</b> {dataset_repo}</p>
+        <div class="card" style="text-align:center;">{dots}</div>
+        <p>{label}</p>
+        """
+
     await flyte.report.replace.aio(
-        f"<h2>RT-DETRv2 Object Detection Pipeline</h2>"
-        f"<p><b>Model:</b> {model_name}</p>"
-        f"<p><b>Dataset:</b> {dataset_repo}</p>"
-        f"<p>Step 1/4: Preparing data...</p>"
+        _wrap_report(_pipeline_progress(1, "Downloading and splitting dataset...")),
+        do_flush=True,
     )
-    await flyte.report.flush.aio()
 
     data_dir = await prepare_data(
         dataset_repo=dataset_repo,
@@ -701,45 +1361,51 @@ async def pipeline(
     )
 
     await flyte.report.replace.aio(
-        f"<h2>RT-DETRv2 Object Detection Pipeline</h2>"
-        f"<p><b>Model:</b> {model_name}</p>"
-        f"<p>Step 2/4: Fine-tuning...</p>"
+        _wrap_report(_pipeline_progress(2, "Fine-tuning model...")),
+        do_flush=True,
     )
-    await flyte.report.flush.aio()
 
-    finetuned_dir = await train(model_name, data_dir, epochs, lr, batch_size)
+    finetuned_dir = await train(
+        model_name, data_dir, epochs, lr, batch_size,
+        eval_every_n_epochs=eval_every_n_epochs,
+    )
 
     await flyte.report.replace.aio(
-        f"<h2>RT-DETRv2 Object Detection Pipeline</h2>"
-        f"<p><b>Model:</b> {model_name}</p>"
-        f"<p>Step 3/4: Evaluating...</p>"
+        _wrap_report(_pipeline_progress(3, "Running COCO mAP evaluation...")),
+        do_flush=True,
     )
-    await flyte.report.flush.aio()
 
-    metrics_json = await evaluate(model_name, finetuned_dir, data_dir, threshold)
+    metrics_json = await evaluate(finetuned_dir, data_dir, threshold)
     metrics = json.loads(metrics_json)
 
     await flyte.report.replace.aio(
-        f"<h2>RT-DETRv2 Object Detection Pipeline</h2>"
-        f"<p><b>Model:</b> {model_name}</p>"
-        f"<p>Step 4/4: Rendering inference demo...</p>"
+        _wrap_report(_pipeline_progress(4, "Rendering bounding box demo...")),
+        do_flush=True,
     )
-    await flyte.report.flush.aio()
 
-    demo_json = await inference_demo(finetuned_dir, data_dir, threshold, demo_images)
+    demo_json = await inference_demo(
+        finetuned_dir, data_dir, threshold, demo_images,
+        metrics_json=metrics_json,
+    )
 
-    base_map = metrics["base"].get("map", 0)
     ft_map = metrics["finetuned"].get("map", 0)
     ft_map50 = metrics["finetuned"].get("map_50", 0)
 
-    await flyte.report.replace.aio(
-        f"<h2>Pipeline Complete</h2>"
-        f"<p><b>Model:</b> {model_name}</p>"
-        f"<p><b>Val images:</b> {metrics['num_val_images']}</p>"
-        f"<p><b>Base mAP:</b> {base_map:.3f}</p>"
-        f"<p><b>Fine-tuned mAP:</b> {ft_map:.3f} (mAP@50: {ft_map50:.3f})</p>"
-    )
-    await flyte.report.flush.aio()
+    final_html = f"""
+    <h2>Pipeline Complete</h2>
+    <h3>{model_name}</h3>
+    <div class="stat-grid">
+      <div class="stat"><div class="value">{metrics['num_val_images']}</div><div class="label">Val Images</div></div>
+      <div class="stat"><div class="value highlight">{ft_map:.3f}</div><div class="label">mAP</div></div>
+      <div class="stat"><div class="value highlight">{ft_map50:.3f}</div><div class="label">mAP@50</div></div>
+    </div>
+    <div class="card">
+      <b>Configuration:</b> {epochs} epochs | LR {lr} | Batch size {batch_size} |
+      Val fraction {val_fraction} | Threshold {threshold}
+    </div>
+    """
+
+    await flyte.report.replace.aio(_wrap_report(final_html), do_flush=True)
 
     log.info(f"Pipeline complete. Fine-tuned mAP: {ft_map:.3f}")
     return json.dumps({"metrics": metrics, "demo": json.loads(demo_json)})
