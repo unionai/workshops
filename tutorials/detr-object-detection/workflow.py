@@ -30,8 +30,9 @@ import shutil
 import tempfile
 
 import flyte
+import flyte.io
 import flyte.report
-from config import cpu_env, gpu_env, HF_TOKEN
+from config import cpu_env, gpu_env
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -57,7 +58,6 @@ async def prepare_data(
     local_repo = snapshot_download(
         repo_id=dataset_repo,
         repo_type="dataset",
-        token=HF_TOKEN,
     )
 
     ann_file = os.path.join(local_repo, annotations_path)
@@ -272,10 +272,9 @@ async def train(
     log.info(f"Train examples: {len(train_ds)} | Categories: {id2label}")
 
     # -- Processor + model --
-    processor = AutoImageProcessor.from_pretrained(model_name, token=HF_TOKEN)
+    processor = AutoImageProcessor.from_pretrained(model_name)
     model = AutoModelForObjectDetection.from_pretrained(
         model_name,
-        token=HF_TOKEN,
         num_labels=len(id2label),
         id2label=id2label,
         label2id=label2id,
@@ -494,8 +493,8 @@ async def evaluate(
 
     def score_model(name: str, model_path: str, use_pretrained_labels: bool):
         log.info(f"Scoring: {name} ({model_path})")
-        processor = AutoImageProcessor.from_pretrained(model_path, token=HF_TOKEN)
-        kwargs = {"token": HF_TOKEN}
+        processor = AutoImageProcessor.from_pretrained(model_path)
+        kwargs = {}
         if not use_pretrained_labels:
             kwargs.update(
                 id2label=id2label,

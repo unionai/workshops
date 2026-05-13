@@ -15,5 +15,4 @@ albumentations>=1.4.0
 torchmetrics>=1.4.0
 pycocotools>=2.0.7
 numpy
-python-dotenv
 markdown
