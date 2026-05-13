@@ -29,6 +29,6 @@ gpu_env = flyte.TaskEnvironment(
 cpu_env = flyte.TaskEnvironment(
     name="rtdetr-detection-cpu",
     image=base_image,
-    resources=flyte.Resources(cpu=2, memory="8Gi"),
+    resources=flyte.Resources(cpu=2, memory="6Gi"),
     depends_on=[gpu_env],
 )

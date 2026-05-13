@@ -76,6 +76,15 @@ flyte run --local --tui workflow.py pipeline --epochs 2 --batch_size 2 --demo_im
 
 ### Remote (GPU cluster)
 
+```
+flyte create config \
+    --endpoint tryv2.hosted.unionai.cloud \
+    --project workshops \
+    --domain development \
+    --builder remote
+```
+
+
 ```bash
 flyte run workflow.py pipeline --epochs 30
 ```
