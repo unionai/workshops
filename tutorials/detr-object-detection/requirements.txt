@@ -1,7 +1,8 @@
 # PyTorch cu130 aarch64 wheels for DGX Spark (GB10 / Blackwell / sm_121).
 # Required: cu12x wheels fail to import since DGX Spark only ships libcudart.so.13.
-# On non-DGX-Spark hosts, replace this with the matching cu12x index for your GPU.
---extra-index-url https://download.pytorch.org/whl/cu130
+# On non-DGX-Spark hosts (e.g. Union cluster with T4s), leave this commented to
+# use PyPI's default cu12x wheels.
+# --extra-index-url https://download.pytorch.org/whl/cu130
 
 flyte[tui]>=2.0
 torch>=2.9.0

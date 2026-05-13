@@ -11,8 +11,8 @@ import flyte
 #     indexes for the best matching version.
 base_image = flyte.Image.from_debian_base(
     name="rtdetr-detection-v1",
-    registry="localhost:30000",
-    platform=("linux/arm64",),
+    # registry="localhost:30000",
+    # platform=("linux/arm64",),
 ).with_requirements(
     "requirements.txt",
     extra_args="--index-strategy unsafe-best-match",

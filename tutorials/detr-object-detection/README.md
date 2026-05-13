@@ -118,10 +118,24 @@ flyte run workflow.py pipeline \
 | `--images_subdir` | `swag/images` | Path to image directory inside the repo |
 | `--epochs` | `30` | Training epochs |
 | `--lr` | `5e-5` | Learning rate |
-| `--batch_size` | `4` | Per-device batch size |
+| `--batch_size` | `4` | Per-device batch size (see [Choosing batch size](#choosing-batch-size)) |
 | `--val_fraction` | `0.2` | Fraction of images held out for validation |
 | `--threshold` | `0.3` | Score threshold for predictions in eval/demo |
 | `--demo_images` | `8` | Number of val images rendered in the inference report |
+
+## Choosing batch size
+
+Inputs are resized to 640×640 by the HF image processor. Rough guidance for
+`--batch_size` with the default RT-DETRv2-R18 (mixed precision on):
+
+| GPU | VRAM | R18 | R50 (`rtdetr_v2_r50vd`) |
+|---|---|---|---|
+| T4 | 16 GB | **4** (default) — 8 cuts close | 2 |
+| L4 / A10 | 24 GB | 8–16 | 4–8 |
+| DGX Spark | 128 GB unified | 16–32 | 16 |
+
+Drop to `--batch_size 2` if you OOM. On DGX Spark, bump to 16+ to keep the GPU
+fed.
 
 ## Evaluation
 
