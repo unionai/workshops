@@ -502,6 +502,570 @@ def _make_mini_bar(
 
 
 # ------------------------------------------------------------------
+# Amino acid coloring by property class
+# ------------------------------------------------------------------
+
+AA_COLORS = {
+    # Hydrophobic (gold/amber)
+    "A": "#d97706", "V": "#d97706", "I": "#d97706", "L": "#d97706",
+    "M": "#d97706", "F": "#b45309", "W": "#b45309", "P": "#d97706",
+    # Positive charge (blue)
+    "R": "#2563eb", "H": "#3b82f6", "K": "#2563eb",
+    # Negative charge (red)
+    "D": "#dc2626", "E": "#dc2626",
+    # Polar uncharged (green)
+    "S": "#059669", "T": "#059669", "N": "#059669", "Q": "#059669",
+    # Special (purple/gray)
+    "C": "#7c3aed", "G": "#6b7280", "Y": "#7c3aed",
+}
+
+AA_CLASSES = {
+    "Hydrophobic": ("A", "V", "I", "L", "M", "F", "W", "P"),
+    "Positive": ("R", "H", "K"),
+    "Negative": ("D", "E"),
+    "Polar": ("S", "T", "N", "Q"),
+    "Special": ("C", "G", "Y"),
+}
+
+AA_CLASS_COLORS = {
+    "Hydrophobic": "#d97706",
+    "Positive": "#2563eb",
+    "Negative": "#dc2626",
+    "Polar": "#059669",
+    "Special": "#7c3aed",
+}
+
+
+def _make_sequence_display(name: str, sequence: str, width: int = 900) -> str:
+    """Render a color-coded amino acid sequence — the classic bioinformatics look."""
+    chars_per_line = 60
+    char_w = 11
+    line_h = 18
+    n_lines = (len(sequence) + chars_per_line - 1) // chars_per_line
+    label_w = 50  # space for position numbers
+    svg_h = n_lines * line_h + 40
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {svg_h}" '
+        f'style="width:100%;max-width:{width}px;height:auto;font-family:monospace;">',
+        f'<rect width="{width}" height="{svg_h}" fill="#fff" rx="6"/>',
+    ]
+
+    for line_idx in range(n_lines):
+        start = line_idx * chars_per_line
+        end = min(start + chars_per_line, len(sequence))
+        chunk = sequence[start:end]
+        y = 20 + line_idx * line_h
+
+        # Position label
+        svg.append(
+            f'<text x="{label_w - 8}" y="{y}" text-anchor="end" '
+            f'font-size="9" fill="#9ca3af">{start + 1}</text>'
+        )
+
+        for ci, aa in enumerate(chunk):
+            x = label_w + ci * char_w
+            color = AA_COLORS.get(aa, "#6b7280")
+            # Subtle background highlight
+            svg.append(
+                f'<rect x="{x}" y="{y - 11}" width="{char_w}" height="{line_h - 2}" '
+                f'fill="{color}" opacity="0.12" rx="1"/>'
+            )
+            svg.append(
+                f'<text x="{x + char_w / 2:.1f}" y="{y}" text-anchor="middle" '
+                f'font-size="10" font-weight="600" fill="{color}">{aa}</text>'
+            )
+
+            # Add a thin spacer every 10 residues for readability
+            if (start + ci + 1) % 10 == 0 and ci < len(chunk) - 1:
+                svg.append(
+                    f'<line x1="{x + char_w + 1}" y1="{y - 10}" '
+                    f'x2="{x + char_w + 1}" y2="{y + 3}" '
+                    f'stroke="#e5e7eb" stroke-width="0.5"/>'
+                )
+
+    # Legend at bottom
+    ly = svg_h - 8
+    lx = label_w
+    for cls_name, cls_color in AA_CLASS_COLORS.items():
+        svg.append(
+            f'<rect x="{lx}" y="{ly - 8}" width="8" height="8" rx="1" fill="{cls_color}"/>'
+        )
+        svg.append(
+            f'<text x="{lx + 12}" y="{ly}" font-size="8" fill="#6b7280">{cls_name}</text>'
+        )
+        lx += len(cls_name) * 6 + 24
+
+    svg.append("</svg>")
+    return "\n".join(svg)
+
+
+def _make_radar_chart(
+    labels: list[str],
+    values: list[float],
+    title: str = "",
+    color: str = "#059669",
+    fill_color: str = "#d1fae5",
+    width: int = 300,
+    height: int = 300,
+) -> str:
+    """Generate an SVG radar/spider chart for protein properties."""
+    import math
+
+    n = len(labels)
+    if n < 3:
+        return ""
+
+    cx, cy = width / 2, height / 2 + 10
+    r = min(cx, cy) - 50
+    angle_step = 2 * math.pi / n
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'style="width:100%;max-width:{width}px;height:auto;">',
+        f'<rect width="{width}" height="{height}" fill="#fff" rx="6"/>',
+    ]
+
+    # Title
+    if title:
+        svg.append(
+            f'<text x="{width / 2}" y="18" text-anchor="middle" '
+            f'font-size="12" font-weight="600" fill="#1a1a2e">{title}</text>'
+        )
+
+    # Grid rings (4 levels)
+    for level in range(1, 5):
+        lr = r * level / 4
+        ring_points = []
+        for i in range(n):
+            angle = -math.pi / 2 + i * angle_step
+            px = cx + lr * math.cos(angle)
+            py = cy + lr * math.sin(angle)
+            ring_points.append(f"{px:.1f},{py:.1f}")
+        ring_points.append(ring_points[0])
+        svg.append(
+            f'<polygon points="{" ".join(ring_points)}" fill="none" '
+            f'stroke="#e5e7eb" stroke-width="0.8"/>'
+        )
+
+    # Axis lines + labels
+    for i in range(n):
+        angle = -math.pi / 2 + i * angle_step
+        ax = cx + r * math.cos(angle)
+        ay = cy + r * math.sin(angle)
+        svg.append(
+            f'<line x1="{cx}" y1="{cy}" x2="{ax:.1f}" y2="{ay:.1f}" '
+            f'stroke="#d1d5db" stroke-width="0.8"/>'
+        )
+        # Label
+        lx = cx + (r + 18) * math.cos(angle)
+        ly = cy + (r + 18) * math.sin(angle)
+        anchor = "middle"
+        if lx < cx - 10:
+            anchor = "end"
+        elif lx > cx + 10:
+            anchor = "start"
+        svg.append(
+            f'<text x="{lx:.1f}" y="{ly + 4:.1f}" text-anchor="{anchor}" '
+            f'font-size="9" fill="#374151">{labels[i]}</text>'
+        )
+
+    # Data polygon
+    data_points = []
+    for i in range(n):
+        angle = -math.pi / 2 + i * angle_step
+        v = max(0, min(1, values[i]))  # clamp 0-1
+        px = cx + r * v * math.cos(angle)
+        py = cy + r * v * math.sin(angle)
+        data_points.append(f"{px:.1f},{py:.1f}")
+
+    svg.append(
+        f'<polygon points="{" ".join(data_points)}" fill="{fill_color}" '
+        f'fill-opacity="0.4" stroke="{color}" stroke-width="2"/>'
+    )
+
+    # Dots at vertices
+    for i in range(n):
+        angle = -math.pi / 2 + i * angle_step
+        v = max(0, min(1, values[i]))
+        px = cx + r * v * math.cos(angle)
+        py = cy + r * v * math.sin(angle)
+        svg.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3" fill="{color}"/>')
+
+    svg.append("</svg>")
+    return "\n".join(svg)
+
+
+def _make_scatter_plot(
+    points: list[dict],
+    x_key: str,
+    y_key: str,
+    label_key: str = "label",
+    title: str = "",
+    x_label: str = "",
+    y_label: str = "",
+    color_key: str | None = None,
+    width: int = 700,
+    height: int = 400,
+) -> str:
+    """Generate an SVG scatter plot with labeled points."""
+    if not points:
+        return ""
+
+    ml, mr, mt, mb = 70, 30, 40, 50
+    cw = width - ml - mr
+    ch = height - mt - mb
+
+    x_vals = [p[x_key] for p in points]
+    y_vals = [p[y_key] for p in points]
+    x_min, x_max = min(x_vals), max(x_vals)
+    y_min, y_max = min(y_vals), max(y_vals)
+    x_pad = (x_max - x_min) * 0.1 or 1
+    y_pad = (y_max - y_min) * 0.1 or 1
+    x_min -= x_pad
+    x_max += x_pad
+    y_min -= y_pad
+    y_max += y_pad
+    x_range = x_max - x_min or 1
+    y_range = y_max - y_min or 1
+
+    def sx(v):
+        return ml + (v - x_min) / x_range * cw
+
+    def sy(v):
+        return mt + ch - (v - y_min) / y_range * ch
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'style="width:100%;max-width:{width}px;height:auto;">',
+        f'<rect width="{width}" height="{height}" fill="#fff" rx="6"/>',
+    ]
+
+    # Grid
+    for i in range(6):
+        gy = y_min + y_range * i / 5
+        py = sy(gy)
+        svg.append(
+            f'<line x1="{ml}" y1="{py:.1f}" x2="{ml + cw}" y2="{py:.1f}" '
+            f'stroke="#f3f4f6" stroke-width="1"/>'
+        )
+        svg.append(
+            f'<text x="{ml - 8}" y="{py + 4:.1f}" text-anchor="end" '
+            f'font-size="10" fill="#9ca3af">{gy:.1f}</text>'
+        )
+
+    for i in range(6):
+        gx = x_min + x_range * i / 5
+        px = sx(gx)
+        svg.append(
+            f'<text x="{px:.1f}" y="{mt + ch + 18}" text-anchor="middle" '
+            f'font-size="10" fill="#9ca3af">{gx:.0f}</text>'
+        )
+
+    # Axes
+    svg.append(
+        f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ch}" '
+        f'stroke="#d1d5db" stroke-width="1"/>'
+    )
+    svg.append(
+        f'<line x1="{ml}" y1="{mt + ch}" x2="{ml + cw}" y2="{mt + ch}" '
+        f'stroke="#d1d5db" stroke-width="1"/>'
+    )
+
+    # pH 7 reference line if y is pI
+    if y_label and "pI" in y_label and y_min < 7 < y_max:
+        ref_y = sy(7)
+        svg.append(
+            f'<line x1="{ml}" y1="{ref_y:.1f}" x2="{ml + cw}" y2="{ref_y:.1f}" '
+            f'stroke="#dc2626" stroke-width="1" stroke-dasharray="6,3" opacity="0.5"/>'
+        )
+        svg.append(
+            f'<text x="{ml + cw + 4}" y="{ref_y + 4:.1f}" '
+            f'font-size="9" fill="#dc2626">pH 7</text>'
+        )
+
+    # Points
+    color_map = {"stable": "#059669", "unstable": "#f59e0b"}
+    for p in points:
+        px = sx(p[x_key])
+        py = sy(p[y_key])
+        color = color_map.get(p.get(color_key, ""), "#059669") if color_key else "#059669"
+        label = p.get(label_key, "")
+        svg.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="5" fill="{color}" opacity="0.85"/>')
+        svg.append(
+            f'<text x="{px + 7:.1f}" y="{py + 3:.1f}" '
+            f'font-size="8" fill="#374151">{label}</text>'
+        )
+
+    # Title
+    if title:
+        svg.append(
+            f'<text x="{width / 2}" y="22" text-anchor="middle" '
+            f'font-size="13" font-weight="600" fill="#1a1a2e">{title}</text>'
+        )
+    if x_label:
+        svg.append(
+            f'<text x="{ml + cw / 2}" y="{height - 6}" text-anchor="middle" '
+            f'font-size="11" fill="#6c757d">{x_label}</text>'
+        )
+    if y_label:
+        svg.append(
+            f'<text x="14" y="{mt + ch / 2}" text-anchor="middle" '
+            f'font-size="11" fill="#6c757d" '
+            f'transform="rotate(-90, 14, {mt + ch / 2})">{y_label}</text>'
+        )
+
+    # Legend if color_key
+    if color_key:
+        lx = ml + 10
+        for label_name, c in color_map.items():
+            svg.append(f'<circle cx="{lx}" cy="{mt + 14}" r="4" fill="{c}"/>')
+            svg.append(
+                f'<text x="{lx + 8}" y="{mt + 18}" font-size="9" fill="#374151">'
+                f'{label_name.title()}</text>'
+            )
+            lx += len(label_name) * 7 + 20
+
+    svg.append("</svg>")
+    return "\n".join(svg)
+
+
+def _make_dendrogram(
+    names: list[str],
+    matrix: list[list[float]],
+    title: str = "",
+    width: int = 700,
+    height: int = 350,
+    color: str = "#059669",
+) -> str:
+    """Generate an SVG dendrogram from a similarity matrix using simple UPGMA clustering."""
+    n = len(names)
+    if n < 2:
+        return ""
+
+    # Convert similarity to distance
+    dist = [[1.0 - matrix[i][j] for j in range(n)] for i in range(n)]
+
+    # UPGMA hierarchical clustering
+    # Each cluster: {"members": [indices], "height": float, "left": cluster, "right": cluster}
+    clusters = [{"members": [i], "height": 0.0, "left": None, "right": None} for i in range(n)]
+    active = list(range(n))
+
+    merges = []  # (left_idx, right_idx, merge_height)
+    while len(active) > 1:
+        # Find closest pair
+        best_d = float("inf")
+        bi, bj = 0, 1
+        for ii in range(len(active)):
+            for jj in range(ii + 1, len(active)):
+                ci, cj = active[ii], active[jj]
+                # Average distance between all members
+                d = 0
+                count = 0
+                for mi in clusters[ci]["members"]:
+                    for mj in clusters[cj]["members"]:
+                        d += dist[mi][mj]
+                        count += 1
+                avg_d = d / count if count else 0
+                if avg_d < best_d:
+                    best_d = avg_d
+                    bi, bj = ii, jj
+
+        ci, cj = active[bi], active[bj]
+        new_cluster = {
+            "members": clusters[ci]["members"] + clusters[cj]["members"],
+            "height": best_d,
+            "left": clusters[ci],
+            "right": clusters[cj],
+        }
+        clusters.append(new_cluster)
+        new_idx = len(clusters) - 1
+        active.pop(bj)
+        active.pop(bi)
+        active.append(new_idx)
+
+    root = clusters[active[0]]
+
+    # Layout: assign x positions to leaves, then draw
+    ml, mr, mt, mb = 30, 30, 40, 80
+    cw = width - ml - mr
+    ch = height - mt - mb
+
+    max_h = root["height"] or 1
+
+    # Assign leaf positions
+    leaf_positions = {}
+    leaf_counter = [0]
+
+    def assign_leaves(node):
+        if node["left"] is None and node["right"] is None:
+            idx = node["members"][0]
+            leaf_positions[idx] = leaf_counter[0]
+            leaf_counter[0] += 1
+        else:
+            if node["left"]:
+                assign_leaves(node["left"])
+            if node["right"]:
+                assign_leaves(node["right"])
+
+    assign_leaves(root)
+
+    n_leaves = len(leaf_positions)
+    leaf_spacing = cw / max(n_leaves - 1, 1) if n_leaves > 1 else cw
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'style="width:100%;max-width:{width}px;height:auto;">',
+        f'<rect width="{width}" height="{height}" fill="#fff" rx="6"/>',
+    ]
+
+    if title:
+        svg.append(
+            f'<text x="{width / 2}" y="22" text-anchor="middle" '
+            f'font-size="13" font-weight="600" fill="#1a1a2e">{title}</text>'
+        )
+
+    def get_x(node):
+        if node["left"] is None and node["right"] is None:
+            idx = node["members"][0]
+            return ml + leaf_positions[idx] * leaf_spacing
+        lx = get_x(node["left"])
+        rx = get_x(node["right"])
+        return (lx + rx) / 2
+
+    def get_y(h):
+        return mt + ch - (h / max_h) * ch
+
+    def draw_node(node):
+        if node["left"] is None and node["right"] is None:
+            return
+        lx = get_x(node["left"])
+        rx = get_x(node["right"])
+        ly = get_y(node["left"]["height"])
+        ry = get_y(node["right"]["height"])
+        my = get_y(node["height"])
+
+        # Vertical lines from children up to merge height
+        svg.append(
+            f'<line x1="{lx:.1f}" y1="{ly:.1f}" x2="{lx:.1f}" y2="{my:.1f}" '
+            f'stroke="{color}" stroke-width="2"/>'
+        )
+        svg.append(
+            f'<line x1="{rx:.1f}" y1="{ry:.1f}" x2="{rx:.1f}" y2="{my:.1f}" '
+            f'stroke="{color}" stroke-width="2"/>'
+        )
+        # Horizontal line connecting them
+        svg.append(
+            f'<line x1="{lx:.1f}" y1="{my:.1f}" x2="{rx:.1f}" y2="{my:.1f}" '
+            f'stroke="{color}" stroke-width="2"/>'
+        )
+
+        if node["left"]:
+            draw_node(node["left"])
+        if node["right"]:
+            draw_node(node["right"])
+
+    draw_node(root)
+
+    # Leaf labels (rotated)
+    for idx, pos in leaf_positions.items():
+        x = ml + pos * leaf_spacing
+        short = names[idx].split("(")[0].strip()
+        if len(short) > 18:
+            short = short[:16] + ".."
+        svg.append(
+            f'<text x="{x:.1f}" y="{mt + ch + 14}" '
+            f'text-anchor="end" font-size="10" fill="#374151" '
+            f'transform="rotate(-40, {x:.1f}, {mt + ch + 14})">{short}</text>'
+        )
+
+    # Y-axis labels (distance)
+    for i in range(5):
+        d = max_h * i / 4
+        y = get_y(d)
+        svg.append(
+            f'<text x="{ml - 4}" y="{y + 3:.1f}" text-anchor="end" '
+            f'font-size="9" fill="#9ca3af">{d:.2f}</text>'
+        )
+
+    svg.append("</svg>")
+    return "\n".join(svg)
+
+
+def _make_ss_track(
+    sequence: str,
+    helix_frac: float,
+    turn_frac: float,
+    sheet_frac: float,
+    width: int = 300,
+    height: int = 24,
+) -> str:
+    """Generate a secondary structure track bar (simplified prediction display).
+
+    Uses a simple heuristic: assign structure based on local hydrophobicity patterns.
+    Helix-favoring residues: A, L, M, E, Q, K, R
+    Sheet-favoring residues: V, I, Y, F, W, T
+    Turn-favoring residues: G, S, N, D, P
+    """
+    helix_aa = set("ALMEQKR")
+    sheet_aa = set("VIYFWT")
+    turn_aa = set("GSNDP")
+
+    # Assign per-residue with sliding window smoothing
+    n = len(sequence)
+    raw = []
+    for aa in sequence:
+        if aa in helix_aa:
+            raw.append("H")
+        elif aa in sheet_aa:
+            raw.append("E")
+        elif aa in turn_aa:
+            raw.append("T")
+        else:
+            raw.append("C")
+
+    # Smooth with window of 3 (majority vote)
+    smoothed = list(raw)
+    for i in range(1, n - 1):
+        window = [raw[i - 1], raw[i], raw[i + 1]]
+        from collections import Counter
+        counts = Counter(window)
+        smoothed[i] = counts.most_common(1)[0][0]
+
+    colors_map = {"H": "#059669", "E": "#3b82f6", "T": "#f59e0b", "C": "#e5e7eb"}
+    label_map = {"H": "Helix", "E": "Sheet", "T": "Turn", "C": "Coil"}
+
+    seg_w = width / max(n, 1)
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'style="width:100%;max-width:{width}px;height:auto;">',
+    ]
+
+    for i, ss in enumerate(smoothed):
+        x = i * seg_w
+        svg.append(
+            f'<rect x="{x:.1f}" y="0" width="{max(seg_w, 1):.1f}" '
+            f'height="{height - 8}" fill="{colors_map[ss]}" rx="0"/>'
+        )
+
+    # Mini legend
+    lx = 0
+    for code in ["H", "E", "T"]:
+        svg.append(
+            f'<rect x="{lx}" y="{height - 6}" width="6" height="6" fill="{colors_map[code]}"/>'
+        )
+        svg.append(
+            f'<text x="{lx + 8}" y="{height}" font-size="6" fill="#6b7280">'
+            f'{label_map[code]}</text>'
+        )
+        lx += len(label_map[code]) * 4 + 16
+
+    svg.append("</svg>")
+    return "\n".join(svg)
+
+
+# ------------------------------------------------------------------
 # Hydrophobicity profile helper
 # ------------------------------------------------------------------
 
@@ -585,6 +1149,18 @@ async def load_sequences(
         error_items = "".join(f"<li>{e}</li>" for e in errors)
         error_html = f'<div class="note"><b>Warnings:</b><ul>{error_items}</ul></div>'
 
+    # Color-coded sequence displays
+    seq_displays = ""
+    for name, seq in validated.items():
+        short_name = name.split("(")[0].strip()
+        seq_svg = _make_sequence_display(short_name, seq)
+        seq_displays += f"""
+        <div class="chart-container">
+          <h3 style="margin-top:0;">{name} <span style="font-size:0.8em;color:#6c757d;">({len(seq)} aa)</span></h3>
+          {seq_svg}
+        </div>
+        """
+
     report_html = f"""
     <h2>Protein Sequences Loaded</h2>
     <div class="stat-grid">
@@ -598,6 +1174,16 @@ async def load_sequences(
       <tr><th>Protein</th><th>Length</th><th>Sequence (first 50 residues)</th></tr>
       {"".join(rows)}
     </table>
+    <h2>Color-Coded Sequences</h2>
+    <div class="note">
+      Residues colored by physicochemical class:
+      <b style="color:#d97706;">Hydrophobic</b> (A, V, I, L, M, F, W, P) &middot;
+      <b style="color:#2563eb;">Positive</b> (R, H, K) &middot;
+      <b style="color:#dc2626;">Negative</b> (D, E) &middot;
+      <b style="color:#059669;">Polar</b> (S, T, N, Q) &middot;
+      <b style="color:#7c3aed;">Special</b> (C, G, Y)
+    </div>
+    {seq_displays}
     """
 
     await flyte.report.replace.aio(_wrap_report(report_html), do_flush=True)
@@ -657,7 +1243,7 @@ async def analyze_properties(
             "helix_fraction": round(helix, 3),
             "turn_fraction": round(turn, 3),
             "sheet_fraction": round(sheet, 3),
-            "aa_composition": {k: round(v, 4) for k, v in aa_percent.items()},
+            "aa_composition": {k: round(v / 100, 4) for k, v in aa_percent.items()},
         }
 
     names = list(all_props.keys())
@@ -784,11 +1370,87 @@ async def analyze_properties(
     </div>
     """
 
+    # MW vs pI scatter plot
+    scatter_points = []
+    for n in names:
+        props = all_props[n]
+        short = n.split("(")[0].strip()
+        if len(short) > 14:
+            short = short[:12] + ".."
+        stability = "stable" if props["instability_index"] < 40 else "unstable"
+        scatter_points.append({
+            "mw": props["molecular_weight"],
+            "pi": props["isoelectric_point"],
+            "label": short,
+            "stability": stability,
+        })
+
+    scatter_chart = _make_scatter_plot(
+        points=scatter_points,
+        x_key="mw",
+        y_key="pi",
+        label_key="label",
+        title="Molecular Weight vs Isoelectric Point",
+        x_label="Molecular Weight (Da)",
+        y_label="Isoelectric Point (pI)",
+        color_key="stability",
+        width=700,
+        height=400,
+    )
+
+    # Radar charts (show first 4 proteins side by side for comparison)
+    radar_html = '<h3>Property Profiles (Radar)</h3><div style="display:flex;flex-wrap:wrap;gap:8px;">'
+    radar_labels = ["MW", "pI", "Stability", "Hydrophob.", "Aromatic.", "Helix"]
+
+    # Compute normalization ranges
+    mw_vals = [all_props[n]["molecular_weight"] for n in names]
+    pi_vals = [all_props[n]["isoelectric_point"] for n in names]
+    ii_vals = [all_props[n]["instability_index"] for n in names]
+    gravy_vals = [all_props[n]["gravy"] for n in names]
+    arom_vals = [all_props[n]["aromaticity"] for n in names]
+    helix_vals = [all_props[n]["helix_fraction"] for n in names]
+
+    def _normalize(val, vals):
+        mn, mx = min(vals), max(vals)
+        return (val - mn) / (mx - mn) if mx > mn else 0.5
+
+    radar_colors = ["#059669", "#0891b2", "#7c3aed", "#d97706", "#dc2626", "#3b82f6", "#6b7280"]
+    radar_fills = ["#d1fae5", "#cffafe", "#ede9fe", "#fef3c7", "#fee2e2", "#dbeafe", "#f3f4f6"]
+
+    for idx, n in enumerate(names):
+        props = all_props[n]
+        short = n.split("(")[0].strip()
+        if len(short) > 16:
+            short = short[:14] + ".."
+        values = [
+            _normalize(props["molecular_weight"], mw_vals),
+            _normalize(props["isoelectric_point"], pi_vals),
+            1.0 - _normalize(props["instability_index"], ii_vals),  # invert: higher = more stable
+            _normalize(props["gravy"], gravy_vals),
+            _normalize(props["aromaticity"], arom_vals),
+            _normalize(props["helix_fraction"], helix_vals),
+        ]
+        ci = idx % len(radar_colors)
+        radar_svg = _make_radar_chart(
+            labels=radar_labels,
+            values=values,
+            title=short,
+            color=radar_colors[ci],
+            fill_color=radar_fills[ci],
+            width=220,
+            height=220,
+        )
+        radar_html += f'<div class="chart-container" style="flex:0 0 auto;padding:8px;">{radar_svg}</div>'
+
+    radar_html += '</div>'
+
     report_html = f"""
     {stats_html}
+    <div class="chart-container">{scatter_chart}</div>
     <div class="chart-container">{mw_chart}</div>
     <div class="chart-container">{pi_chart}</div>
     <div class="chart-container">{ss_chart}</div>
+    {radar_html}
     <div class="chart-container">{aa_heatmap}</div>
     {stability_table}
     """
@@ -837,10 +1499,9 @@ async def compute_similarity(
         f"<p>Computing pairwise alignment for {n} proteins ({n * (n - 1) // 2} pairs)...</p>"
     ), do_flush=True)
 
-    # Compute pairwise percent identity using simple global alignment
-    # Using a simplified approach: count matching residues at aligned positions
+    # Compute pairwise percent identity using global alignment
     def percent_identity(seq1: str, seq2: str) -> float:
-        """Compute percent identity between two sequences using Bio.Align."""
+        """Compute percent identity by counting matching residues in the alignment."""
         from Bio import Align
 
         aligner = Align.PairwiseAligner()
@@ -855,16 +1516,16 @@ async def compute_similarity(
             return 0.0
 
         best = alignments[0]
-        # Count matches from the alignment
-        aligned_seq1 = str(best).split("\n")[0] if "\n" in str(best) else seq1
-        aligned_seq2 = str(best).split("\n")[2] if "\n" in str(best) else seq2
 
-        # Use the score to estimate identity
-        score = best.score
-        max_len = max(len(seq1), len(seq2))
-        # Normalize: perfect match would score 2*max_len
-        identity = max(0.0, min(1.0, score / (2.0 * max_len)))
-        return round(identity, 4)
+        # Count matching residues from aligned segment pairs
+        matches = 0
+        for (t_start, t_end), (q_start, q_end) in zip(best.aligned[0], best.aligned[1]):
+            for k in range(t_end - t_start):
+                if seq1[t_start + k] == seq2[q_start + k]:
+                    matches += 1
+
+        total_len = max(len(seq1), len(seq2))
+        return round(matches / total_len, 4) if total_len > 0 else 0.0
 
     # Build similarity matrix
     matrix = [[0.0] * n for _ in range(n)]
@@ -922,6 +1583,16 @@ async def compute_similarity(
     max_sim = pairs[0][2] if pairs else 0
     min_sim = pairs[-1][2] if pairs else 0
 
+    # Hierarchical clustering dendrogram
+    dendrogram = _make_dendrogram(
+        names=names,
+        matrix=matrix,
+        title="Hierarchical Clustering (UPGMA)",
+        width=700,
+        height=350,
+        color="#059669",
+    )
+
     report_html = f"""
     <h2>Sequence Similarity Analysis</h2>
     <div class="stat-grid">
@@ -930,6 +1601,8 @@ async def compute_similarity(
       <div class="stat"><div class="value">{avg_sim:.1%}</div><div class="label">Average Similarity</div></div>
       <div class="stat"><div class="value">{max_sim:.1%}</div><div class="label">Maximum Similarity</div></div>
     </div>
+
+    <div class="chart-container">{dendrogram}</div>
 
     <div class="chart-container">{heatmap}</div>
 
@@ -941,10 +1614,11 @@ async def compute_similarity(
 
     <div class="note">
       <b>Sequence similarity</b> measures how closely related two proteins are at the primary
-      structure level. High sequence identity (>30%) often implies shared evolutionary origin
-      and similar 3D structure. Proteins with <25% identity are considered to be in the
+      structure level. High sequence identity (&gt;30%) often implies shared evolutionary origin
+      and similar 3D structure. Proteins with &lt;25% identity are considered to be in the
       "twilight zone" where structural similarity cannot be reliably inferred from sequence alone.
-      The values shown represent global pairwise alignment scores normalized by sequence length.
+      The <b>dendrogram</b> shows hierarchical clustering (UPGMA) — proteins that cluster together
+      share more sequence identity.
     </div>
     """
 
@@ -1058,6 +1732,23 @@ async def generate_summary(
         else:
             sparkline_html = ""
 
+        # Secondary structure track
+        if seq:
+            ss_track = _make_ss_track(
+                seq, props["helix_fraction"], props["turn_fraction"], props["sheet_fraction"],
+                width=300, height=24,
+            )
+            ss_track_html = f"""
+            <div style="margin-top:8px;">
+              <div style="font-size:0.8em;color:#6c757d;margin-bottom:2px;">
+                Secondary Structure Prediction
+              </div>
+              {ss_track}
+            </div>
+            """
+        else:
+            ss_track_html = ""
+
         # Top 5 amino acids mini bar
         aa_comp = props.get("aa_composition", {})
         sorted_aa = sorted(aa_comp.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -1096,6 +1787,7 @@ async def generate_summary(
           </div>
           <div class="viz">
             {sparkline_html}
+            {ss_track_html}
             {mini_bar_html}
           </div>
         </div>
