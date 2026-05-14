@@ -83,19 +83,29 @@ def launch_app(server_url: str):
         return COLORS[label_id % len(COLORS)]
 
     # -- Drawing helper --
+    def _get_font(img_width: int):
+        """Get a readable font, trying several common paths."""
+        font_size = max(16, img_width // 35)
+        for font_name in [
+            "DejaVuSans-Bold.ttf",
+            "DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "Arial.ttf",
+            "arial.ttf",
+        ]:
+            try:
+                return ImageFont.truetype(font_name, size=font_size)
+            except (OSError, IOError):
+                continue
+        return ImageFont.load_default(size=font_size)
+
     def draw_detections(image: Image.Image, detections: list) -> Image.Image:
         """Draw bounding boxes and labels on the image."""
         img = image.copy()
         draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype(
-                "DejaVuSans-Bold.ttf",
-                size=max(14, img.width // 40),
-            )
-        except Exception:
-            font = ImageFont.load_default()
-
-        line_width = max(2, img.width // 300)
+        font = _get_font(img.width)
+        line_width = max(3, img.width // 250)
 
         for det in detections:
             box = det["box"]
@@ -104,12 +114,23 @@ def launch_app(server_url: str):
             label = det["label"]
             score = det["score"]
 
+            # Draw box
             draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
 
+            # Draw label background + text above the box
             caption = f"{label} {score:.0%}"
             text_bbox = draw.textbbox((x1, y1), caption, font=font)
-            draw.rectangle(text_bbox, fill=color)
-            draw.text((x1, y1), caption, fill="white", font=font)
+            text_h = text_bbox[3] - text_bbox[1]
+            # Position label above the box, or inside if at the top edge
+            label_y = y1 - text_h - 4 if y1 - text_h - 4 > 0 else y1
+            text_bbox = draw.textbbox((x1, label_y), caption, font=font)
+            pad = 3
+            draw.rectangle(
+                [text_bbox[0] - pad, text_bbox[1] - pad,
+                 text_bbox[2] + pad, text_bbox[3] + pad],
+                fill=color,
+            )
+            draw.text((x1, label_y), caption, fill="white", font=font)
 
         return img
 
