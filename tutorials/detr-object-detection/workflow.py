@@ -306,9 +306,9 @@ def _make_bar_chart(
 
     all_vals = [v for vals in series.values() for v in vals]
     y_max = max(all_vals) if all_vals else 1
-    y_max_plot = y_max * 1.15
+    y_max_plot = y_max * 1.15 or 1
     if y_max_cap is not None:
-        y_max_plot = min(y_max_plot, y_max_cap)
+        y_max_plot = min(y_max_plot, y_max_cap) or y_max_cap
 
     n_groups = len(labels)
     n_series = len(series)
@@ -830,7 +830,7 @@ async def train(
 
             device = next(model.parameters()).device
             # _run_inference sets model.eval(); restore train mode after.
-            preds = _run_inference(model, processor, val_images, device, threshold=0.5)
+            preds = _run_inference(model, processor, val_images, device, threshold=0.3)
             model.train()
 
             formatted = [
