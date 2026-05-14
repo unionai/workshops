@@ -521,7 +521,13 @@ def _build_torch_dataset(coco_path: str, images_root: str, augment: bool):
         transform = A.Compose(
             [
                 A.HorizontalFlip(p=0.5),
-                A.RandomBrightnessContrast(p=0.3),
+                A.VerticalFlip(p=0.1),
+                A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
+                A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=30, val_shift_limit=20, p=0.4),
+                A.Rotate(limit=15, border_mode=0, p=0.4),
+                A.RandomScale(scale_limit=0.2, p=0.4),
+                A.GaussianBlur(blur_limit=(3, 5), p=0.2),
+                A.GaussNoise(p=0.2),
             ],
             bbox_params=A.BboxParams(
                 format="coco",
@@ -1344,9 +1350,11 @@ async def pipeline(
     threshold: float = 0.5,
     demo_images: int = 8,
     eval_every_n_epochs: int | None = None,
-) -> str:
+) -> tuple[flyte.io.Dir, str]:
     """
     End-to-end RT-DETRv2 fine-tuning pipeline.
+
+    Returns the fine-tuned model directory and a JSON summary.
 
     1. Download COCO dataset from HuggingFace and split train/val
     2. Fine-tune RT-DETRv2 on the train split
@@ -1433,4 +1441,4 @@ async def pipeline(
     await flyte.report.replace.aio(_wrap_report(final_html), do_flush=True)
 
     log.info(f"Pipeline complete. Fine-tuned mAP: {ft_map:.3f}")
-    return json.dumps({"metrics": metrics, "demo": json.loads(demo_json)})
+    return finetuned_dir, json.dumps({"metrics": metrics, "demo": json.loads(demo_json)})

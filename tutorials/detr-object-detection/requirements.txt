@@ -17,3 +17,7 @@ torchmetrics>=1.4.0
 pycocotools>=2.0.7
 numpy
 markdown
+fastapi
+uvicorn
+gradio>=5.0.0
+httpx
