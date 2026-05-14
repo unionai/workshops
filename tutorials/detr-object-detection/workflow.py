@@ -62,7 +62,7 @@ REPORT_CSS = """
   .report .img-pair { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
   .report .img-pair > div { flex: 1; min-width: 300px; }
   .report .img-pair img { width: 100%; border-radius: 6px; border: 1px solid #dee2e6; }
-  .report .img-pair .gt-label { color: #e94560; font-weight: 600; }
+  .report .img-pair .gt-label { color: #5a7db5; font-weight: 600; }
   .report .img-pair .pred-label { color: #06d6a0; font-weight: 600; }
   .report .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: 600; }
   .report .badge-success { background: #d4edda; color: #155724; }
@@ -93,6 +93,7 @@ def _make_line_chart(
     height: int = 300,
     y_max_cap: float | None = None,
     x_range_override: tuple[float, float] | None = None,
+    y_display_names: dict[str, str] | None = None,
 ) -> str:
     """Generate an SVG line chart from a list of dicts.
 
@@ -212,14 +213,15 @@ def _make_line_chart(
         points = [(sx(d[x_key]), sy(d[key])) for d in data if key in d]
         if not points:
             continue
-        # Draw line if we have 2+ points
+        # Draw line if we have 2+ points (dash odd series for visibility)
         if len(points) >= 2:
             path_d = f"M {points[0][0]:.1f},{points[0][1]:.1f}"
             for px, py in points[1:]:
                 path_d += f" L {px:.1f},{py:.1f}"
+            dash = ' stroke-dasharray="6,3"' if si % 2 == 1 else ""
             lines.append(
                 f'<path d="{path_d}" fill="none" stroke="{color}" '
-                f'stroke-width="2" stroke-linejoin="round"/>'
+                f'stroke-width="2" stroke-linejoin="round"{dash}/>'
             )
         # Always show dots for sparse data (including single points)
         if len(points) <= 30:
@@ -249,6 +251,7 @@ def _make_line_chart(
         )
 
     # Legend
+    names = y_display_names or {}
     if len(y_keys) > 1:
         lx = ml + 10
         for si, key in enumerate(y_keys):
@@ -258,9 +261,10 @@ def _make_line_chart(
                 f'<rect x="{lx}" y="{ly - 6}" width="12" height="12" '
                 f'rx="2" fill="{color}"/>'
             )
+            label = names.get(key, key)
             lines.append(
                 f'<text x="{lx + 16}" y="{ly + 4}" font-size="11" '
-                f'fill="#1a1a2e">{key}</text>'
+                f'fill="#1a1a2e">{label}</text>'
             )
 
     lines.append("</svg>")
@@ -748,6 +752,8 @@ async def train(
             charts_html += f'<div class="chart-container">{loss_chart}</div>'
 
             if eval_every_n_epochs:
+                # Match x-axis to the loss chart: start at 0, end at current epoch
+                current_max_epoch = current["epoch"]
                 map_chart = _make_line_chart(
                     data=eval_log,
                     x_key="epoch",
@@ -757,6 +763,8 @@ async def train(
                     y_label="mAP",
                     colors=["#0f3460", "#06d6a0"],
                     y_max_cap=1.0,
+                    y_display_names={"map": "mAP (0.50:0.95)", "map_50": "mAP@50"},
+                    x_range_override=(0, current_max_epoch),
                 )
                 charts_html += f'<div class="chart-container">{map_chart}</div>'
 
@@ -944,6 +952,7 @@ async def train(
             colors=["#0f3460", "#06d6a0"],
             y_max_cap=1.0,
             x_range_override=(0, epochs),
+            y_display_names={"map": "mAP (0.50:0.95)", "map_50": "mAP@50"},
         )
         charts_html += f'<div class="chart-container">{map_chart}</div>'
 
@@ -1186,6 +1195,7 @@ async def inference_demo(
     """Run the fine-tuned model on val images, render bboxes, embed in the report."""
     import torch
     from PIL import Image
+    from torchmetrics.detection.mean_ap import MeanAveragePrecision
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
 
     data_path = await data_dir.download()
@@ -1238,17 +1248,32 @@ async def inference_demo(
         n_pred = len(pred["labels"])
         total_gt += n_gt
         total_pred += n_pred
+
+        # Per-image mAP
+        metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+        metric.update(
+            [{"boxes": pred["boxes"], "scores": pred["scores"], "labels": pred["labels"]}],
+            [{"boxes": gt["boxes"], "labels": gt["labels"]}],
+        )
+        img_metrics = metric.compute()
+        img_map = img_metrics["map"].item()
+        img_map_badge = (
+            f'<span class="badge badge-success">mAP {img_map:.2f}</span>'
+            if img_map >= 0.5
+            else f'<span class="badge badge-info">mAP {img_map:.2f}</span>'
+        )
+
         pred_img = _draw_boxes(
             img, pred["boxes"], pred["labels"], pred["scores"],
             id2label, color="lime",
         )
         gt_img = _draw_boxes(
             img, gt["boxes"], gt["labels"], gt["scores"],
-            id2label, color="red",
+            id2label, color="dodgerblue",
         )
         html_blocks.append(f"""
         <div class="card">
-          <b>Image {i + 1}</b>
+          <b>Image {i + 1}</b> {img_map_badge}
           <div class="img-pair">
             <div>
               <p><span class="gt-label">Ground Truth</span>
@@ -1287,7 +1312,7 @@ async def inference_demo(
       <div class="stat"><div class="value">{total_pred}</div><div class="label">Predicted Boxes</div></div>
       <div class="stat"><div class="value">{threshold}</div><div class="label">Confidence Threshold</div></div>
     </div>
-    <p><span class="gt-label">Red = ground truth</span> |
+    <p><span class="gt-label">Blue = ground truth</span> |
        <span class="pred-label">Green = predictions</span></p>
     {"".join(html_blocks)}
     """
