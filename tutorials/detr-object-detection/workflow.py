@@ -393,7 +393,7 @@ def _make_bar_chart(
 
 @cpu_env.task(cache="auto")
 async def prepare_data(
-    dataset_repo: str = "sagecodes/union_swag_coco",
+    dataset_repo: str = "sagecodes/union_flyte_swag_object_detection",
     annotations_path: str = "swag/train.json",
     images_subdir: str = "swag/images",
     val_fraction: float = 0.2,
@@ -1340,7 +1340,7 @@ async def inference_demo(
 @cpu_env.task(report=True)
 async def pipeline(
     model_name: str = "PekingU/rtdetr_v2_r18vd",
-    dataset_repo: str = "sagecodes/union_swag_coco",
+    dataset_repo: str = "sagecodes/union_flyte_swag_object_detection",
     annotations_path: str = "swag/train.json",
     images_subdir: str = "swag/images",
     epochs: int = 30,
