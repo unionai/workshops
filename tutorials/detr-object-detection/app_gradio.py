@@ -49,7 +49,7 @@ gradio_env = flyte.app.AppEnvironment(
     parameters=[
         flyte.app.Parameter(
             name="server_url",
-            value=f"http://{SERVER_APP_NAME}-workshops-development.flyte.svc.cluster.local",
+            value="",
             env_var="SERVER_URL",
         ),
     ],
@@ -289,8 +289,26 @@ if __name__ == "__main__":
         # Local dev — connect to a running server
         launch_app(server_url)
     else:
-        # Deploy to cluster
+        # Deploy to cluster — auto-discover the server endpoint
         flyte.init_from_config(root_dir=pathlib.Path(__file__).parent)
+
+        from flyte.remote._app import App
+
+        try:
+            server_app = App.get(SERVER_APP_NAME)
+            server_endpoint = server_app.endpoint
+            log.info(f"Found detection server at: {server_endpoint}")
+        except Exception:
+            raise RuntimeError(
+                f"Could not find deployed app '{SERVER_APP_NAME}'. "
+                "Deploy the model server first with: python app_server.py"
+            )
+
+        for p in gradio_env.parameters:
+            if p.name == "server_url":
+                p.value = server_endpoint
+                break
+
         log.info("Deploying Gradio frontend...")
         deployed = flyte.deploy(gradio_env)
         log.info(f"Gradio app deployed: {deployed}")
