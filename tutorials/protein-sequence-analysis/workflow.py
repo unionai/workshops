@@ -3,7 +3,8 @@ Protein Sequence Analysis — Analyze, compare, and visualize protein properties
 
 Pipeline: load a curated set of real protein sequences, compute biophysical
 properties (MW, pI, stability, hydrophobicity, secondary structure), build a
-pairwise similarity matrix, and generate a comprehensive visual summary report.
+pairwise similarity matrix, run ESM-2 protein language model for embeddings
+and contact maps, and generate a comprehensive visual summary report.
 
 Usage:
     # Default (curated set of 7 proteins)
@@ -12,8 +13,11 @@ Usage:
     # Custom sequences via JSON
     flyte run --local --tui workflow.py pipeline --sequences_json '{"MyProtein": "MVLSPADKTNVKA"}'
 
-    # Remote
+    # Remote (GPU for ESM-2)
     flyte run workflow.py pipeline
+
+    # Swap ESM-2 model (larger = more accurate)
+    flyte run workflow.py pipeline --esm_model "facebook/esm2_t12_35M_UR50D"
 """
 
 import json
@@ -24,7 +28,7 @@ import tempfile
 import flyte
 import flyte.io
 import flyte.report
-from config import cpu_env
+from config import cpu_env, gpu_env
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -1634,7 +1638,313 @@ async def compute_similarity(
 
 
 # ------------------------------------------------------------------
-# Task 4: Generate comprehensive summary
+# Task 4: ESM-2 protein language model — embeddings + contact maps
+# ------------------------------------------------------------------
+
+@gpu_env.task(report=True)
+async def esm_analysis(
+    seq_dir: flyte.io.Dir,
+    model_name: str = "facebook/esm2_t12_35M_UR50D",
+) -> str:
+    """Run ESM-2 protein language model to extract embeddings and contact maps.
+
+    ESM-2 is a transformer trained on ~250M protein sequences. It learns
+    representations that capture evolutionary and structural information —
+    proteins with similar embeddings tend to share 3D structure and function,
+    even when sequence identity is low.
+
+    This task:
+    1. Extracts per-protein mean embeddings from ESM-2
+    2. Projects embeddings to 2D with UMAP (via t-SNE from sklearn)
+    3. Extracts attention-based contact maps for each protein
+    4. Computes embedding-space cosine similarity (compare with sequence similarity)
+    """
+    import torch
+    import numpy as np
+    from transformers import AutoTokenizer, EsmModel
+    from sklearn.manifold import TSNE
+
+    log.info(f"Loading ESM-2 model: {model_name}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log.info(f"Using device: {device}")
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = EsmModel.from_pretrained(model_name, output_attentions=True).to(device)
+    model.eval()
+
+    # Read sequences
+    seq_path = await seq_dir.download()
+    proteins = {}
+    for fname in sorted(os.listdir(seq_path)):
+        if not fname.endswith(".fasta"):
+            continue
+        with open(os.path.join(seq_path, fname)) as f:
+            lines = f.readlines()
+        name = lines[0].strip().lstrip(">")
+        seq = "".join(line.strip() for line in lines[1:])
+        proteins[name] = seq
+
+    names = list(proteins.keys())
+    n = len(names)
+
+    await flyte.report.replace.aio(_wrap_report(
+        f"<h2>ESM-2 Protein Language Model</h2>"
+        f"<p>Running inference on {n} proteins with {model_name}...</p>"
+    ), do_flush=True)
+
+    # --- Extract embeddings and attention maps ---
+    embeddings = {}  # name -> mean embedding vector
+    contact_maps = {}  # name -> contact probability matrix
+
+    for idx, name in enumerate(names):
+        seq = proteins[name]
+        log.info(f"ESM-2 inference [{idx + 1}/{n}]: {name} ({len(seq)} aa)")
+
+        inputs = tokenizer(seq, return_tensors="pt", add_special_tokens=True).to(device)
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        # Mean embedding (skip BOS/EOS tokens)
+        hidden = outputs.last_hidden_state[0]  # (seq_len+2, hidden_dim)
+        # Trim special tokens (first and last)
+        hidden = hidden[1:-1]  # (seq_len, hidden_dim)
+        mean_emb = hidden.mean(dim=0).cpu().numpy()
+        embeddings[name] = mean_emb
+
+        # Contact map from attention — average across layers and heads,
+        # then symmetrize. This is a simplified version of the approach
+        # used in the ESM papers for contact prediction.
+        attentions = outputs.attentions  # tuple of (1, heads, seq_len+2, seq_len+2)
+        # Stack all layers, average across layers and heads
+        attn_stack = torch.stack(attentions, dim=0)  # (layers, 1, heads, L+2, L+2)
+        attn_mean = attn_stack[:, 0].mean(dim=(0, 1))  # (L+2, L+2)
+        # Trim special tokens
+        attn_map = attn_mean[1:-1, 1:-1].cpu().numpy()  # (L, L)
+        # Symmetrize
+        attn_map = (attn_map + attn_map.T) / 2
+        # APC correction (Average Product Correction) — removes background
+        row_mean = attn_map.mean(axis=1, keepdims=True)
+        col_mean = attn_map.mean(axis=0, keepdims=True)
+        total_mean = attn_map.mean()
+        if total_mean > 0:
+            attn_map = attn_map - (row_mean * col_mean) / total_mean
+        attn_map = np.clip(attn_map, 0, None)
+        contact_maps[name] = attn_map
+
+    # --- t-SNE projection to 2D ---
+    emb_matrix = np.array([embeddings[n] for n in names])
+    if n >= 4:
+        perplexity = min(5, n - 1)
+        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, max_iter=1000)
+        coords_2d = tsne.fit_transform(emb_matrix)
+    else:
+        # Too few proteins for t-SNE, use first 2 PCA components
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=2)
+        coords_2d = pca.fit_transform(emb_matrix)
+
+    # --- Cosine similarity in embedding space ---
+    from sklearn.metrics.pairwise import cosine_similarity
+    cos_sim = cosine_similarity(emb_matrix)
+
+    # --- Build report ---
+
+    # Stat grid
+    hidden_dim = emb_matrix.shape[1]
+    stats_html = f"""
+    <h2>ESM-2 Protein Language Model Analysis</h2>
+    <div class="note">
+      <b>What is ESM-2?</b> A transformer model trained on ~250M protein sequences from nature.
+      It learns representations that capture evolutionary conservation, structural motifs, and
+      functional relationships — information that goes beyond what raw sequence alignment can reveal.
+      Proteins with similar ESM-2 embeddings tend to share 3D structure and biological function,
+      even when their sequences have diverged beyond recognition by traditional alignment.
+    </div>
+    <div class="stat-grid">
+      <div class="stat"><div class="value">{n}</div><div class="label">Proteins Analyzed</div></div>
+      <div class="stat"><div class="value">{model_name.split('/')[-1]}</div><div class="label">Model</div></div>
+      <div class="stat"><div class="value">{hidden_dim}</div><div class="label">Embedding Dim</div></div>
+      <div class="stat"><div class="value">{device.upper()}</div><div class="label">Device</div></div>
+    </div>
+    """
+
+    # Embedding scatter plot (t-SNE / PCA projection)
+    scatter_points = []
+    for i, name in enumerate(names):
+        short = name.split("(")[0].strip()
+        if len(short) > 14:
+            short = short[:12] + ".."
+        scatter_points.append({
+            "x": float(coords_2d[i, 0]),
+            "y": float(coords_2d[i, 1]),
+            "label": short,
+        })
+
+    embedding_scatter = _make_scatter_plot(
+        points=scatter_points,
+        x_key="x",
+        y_key="y",
+        label_key="label",
+        title="Protein Embedding Space (t-SNE projection)",
+        x_label="t-SNE 1",
+        y_label="t-SNE 2",
+        width=700,
+        height=450,
+    )
+
+    # Cosine similarity heatmap
+    short_names = []
+    for nm in names:
+        short = nm.split("(")[0].strip()
+        if len(short) > 16:
+            short = short[:14] + ".."
+        short_names.append(short)
+
+    cos_sim_list = [[round(float(cos_sim[i][j]), 4) for j in range(n)] for i in range(n)]
+    cos_heatmap = _make_heatmap(
+        matrix=cos_sim_list,
+        row_labels=short_names,
+        col_labels=short_names,
+        title="ESM-2 Embedding Cosine Similarity",
+        color_scale="green",
+        width=700,
+        height=max(400, n * 55 + 120),
+        value_format=".0%",
+    )
+
+    similarity_note = """
+    <div class="note">
+      <b>Embedding vs Sequence Similarity:</b> Unlike sequence alignment (which counts matching
+      amino acids), ESM-2 cosine similarity measures how similar two proteins look to a model
+      that has seen 250 million evolutionary examples. Two proteins can have low sequence identity
+      (&lt;20%) but high embedding similarity if they share structural or functional features
+      that the model has learned to recognize.
+    </div>
+    """
+
+    # Contact maps — show as small heatmaps for each protein
+    contact_html = "<h3>Predicted Contact Maps</h3>"
+    contact_html += """
+    <div class="note">
+      <b>Contact maps</b> predict which pairs of residues are close in 3D space. Derived from
+      ESM-2 attention weights with APC (Average Product Correction). Bright spots off the diagonal
+      indicate predicted contacts between distant residues — these reveal the protein's fold without
+      needing an explicit structure prediction.
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;">
+    """
+
+    for name in names:
+        short = name.split("(")[0].strip()
+        cmap = contact_maps[name]
+        seq_len = cmap.shape[0]
+
+        # Create a small contact map visualization
+        map_size = min(200, max(100, seq_len * 2))
+        cm_svg = _make_contact_map(cmap, short, size=map_size)
+        contact_html += f'<div class="chart-container" style="flex:0 0 auto;padding:8px;">{cm_svg}</div>'
+
+    contact_html += "</div>"
+
+    report_html = f"""
+    {stats_html}
+    <div class="chart-container">{embedding_scatter}</div>
+    <div class="chart-container">{cos_heatmap}</div>
+    {similarity_note}
+    {contact_html}
+    """
+
+    await flyte.report.replace.aio(_wrap_report(report_html), do_flush=True)
+
+    # Output
+    output = {
+        "model": model_name,
+        "embedding_dim": hidden_dim,
+        "device": device,
+        "cosine_similarity": {
+            "names": names,
+            "matrix": cos_sim_list,
+        },
+        "tsne_coords": {names[i]: [float(coords_2d[i, 0]), float(coords_2d[i, 1])] for i in range(n)},
+    }
+    return json.dumps(output)
+
+
+def _make_contact_map(
+    matrix,
+    title: str = "",
+    size: int = 200,
+) -> str:
+    """Generate an SVG contact map (square heatmap with bio-style coloring)."""
+    import numpy as np
+
+    n = matrix.shape[0]
+    mt = 30
+    ml = 10
+    cell = max(1, (size - ml) / n)
+    svg_w = ml + n * cell + 10
+    svg_h = mt + n * cell + 30
+
+    # Normalize to 0-1
+    v_max = np.percentile(matrix, 98) if matrix.size > 0 else 1
+    v_max = max(v_max, 1e-6)
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w:.0f} {svg_h:.0f}" '
+        f'style="width:100%;max-width:{svg_w:.0f}px;height:auto;">',
+        f'<rect width="{svg_w:.0f}" height="{svg_h:.0f}" fill="#fff" rx="4"/>',
+    ]
+
+    if title:
+        svg.append(
+            f'<text x="{svg_w / 2}" y="16" text-anchor="middle" '
+            f'font-size="10" font-weight="600" fill="#1a1a2e">{title}</text>'
+        )
+
+    # Downsample if too large (>100 residues → bin to 100x100)
+    if n > 100:
+        bin_size = n // 100
+        new_n = n // bin_size
+        binned = np.zeros((new_n, new_n))
+        for i in range(new_n):
+            for j in range(new_n):
+                binned[i, j] = matrix[
+                    i * bin_size:(i + 1) * bin_size,
+                    j * bin_size:(j + 1) * bin_size,
+                ].mean()
+        matrix = binned
+        n = new_n
+        cell = max(1, (size - ml) / n)
+
+    # Draw cells — use a dark teal color scale
+    for i in range(n):
+        for j in range(n):
+            val = min(matrix[i, j] / v_max, 1.0)
+            # White → dark teal
+            r = int(255 - val * (255 - 6))
+            g = int(255 - val * (255 - 95))
+            b = int(255 - val * (255 - 70))
+            x = ml + j * cell
+            y = mt + i * cell
+            svg.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{cell:.1f}" '
+                f'height="{cell:.1f}" fill="rgb({r},{g},{b})"/>'
+            )
+
+    # Axis labels
+    svg.append(
+        f'<text x="{ml + n * cell / 2}" y="{mt + n * cell + 16}" text-anchor="middle" '
+        f'font-size="8" fill="#6b7280">Residue position</text>'
+    )
+
+    svg.append("</svg>")
+    return "\n".join(svg)
+
+
+# ------------------------------------------------------------------
+# Task 5: Generate comprehensive summary
 # ------------------------------------------------------------------
 
 @cpu_env.task(report=True)
@@ -1896,21 +2206,29 @@ async def generate_summary(
 @cpu_env.task(report=True)
 async def pipeline(
     sequences_json: str = "",
-) -> tuple[str, str]:
+    esm_model: str = "facebook/esm2_t12_35M_UR50D",
+) -> tuple[str, str, str]:
     """
     End-to-end protein sequence analysis pipeline.
 
-    Returns (properties JSON, similarity JSON).
+    Returns (properties JSON, similarity JSON, ESM-2 analysis JSON).
 
     1. Load and validate protein sequences
     2. Analyze biophysical properties (MW, pI, stability, etc.)
     3. Compute pairwise sequence similarity
-    4. Generate comprehensive visual summary report
+    4. ESM-2 protein language model — embeddings, contact maps
+    5. Generate comprehensive visual summary report
     """
     log.info("Starting protein sequence analysis pipeline...")
 
     def _pipeline_progress(step: int, label: str) -> str:
-        steps = ["Load Sequences", "Analyze Properties", "Compute Similarity", "Generate Summary"]
+        steps = [
+            "Load Sequences",
+            "Analyze Properties",
+            "Compute Similarity",
+            "ESM-2 Embeddings",
+            "Generate Summary",
+        ]
         dots = ""
         for i, s in enumerate(steps):
             if i + 1 < step:
@@ -1947,9 +2265,16 @@ async def pipeline(
     )
     similarity_json_result = await compute_similarity(seq_dir=seq_dir)
 
-    # Stage 4: Generate summary
+    # Stage 4: ESM-2 analysis
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(4, "Generating comprehensive summary report...")),
+        _wrap_report(_pipeline_progress(4, "Running ESM-2 protein language model...")),
+        do_flush=True,
+    )
+    esm_json_result = await esm_analysis(seq_dir=seq_dir, model_name=esm_model)
+
+    # Stage 5: Generate summary
+    await flyte.report.replace.aio(
+        _wrap_report(_pipeline_progress(5, "Generating comprehensive summary report...")),
         do_flush=True,
     )
     summary_json = await generate_summary(
@@ -1960,6 +2285,7 @@ async def pipeline(
 
     # Final pipeline report
     summary = json.loads(summary_json)
+    esm_data = json.loads(esm_json_result)
     classification = summary.get("classification", {})
 
     final_html = f"""
@@ -1969,7 +2295,7 @@ async def pipeline(
       <div class="stat"><div class="value">{summary['total_residues']:,}</div><div class="label">Total Residues</div></div>
       <div class="stat"><div class="value">{summary['avg_molecular_weight']:,.0f} Da</div><div class="label">Avg MW</div></div>
       <div class="stat"><div class="value">{summary['stable_count']}/{summary['total_proteins']}</div><div class="label">Stable Proteins</div></div>
-      <div class="stat"><div class="value">{summary['avg_pairwise_similarity']:.1%}</div><div class="label">Avg Similarity</div></div>
+      <div class="stat"><div class="value">{summary['avg_pairwise_similarity']:.1%}</div><div class="label">Avg Seq Similarity</div></div>
     </div>
     <div class="card">
       <b>Classification:</b>
@@ -1977,15 +2303,21 @@ async def pipeline(
       Stability: {classification['by_stability']['stable']} stable, {classification['by_stability']['unstable']} unstable |
       Charge: {classification['by_charge']['acidic']} acidic, {classification['by_charge']['basic']} basic
     </div>
+    <div class="card">
+      <b>ESM-2 Analysis:</b>
+      Model: {esm_data.get('model', 'N/A')} |
+      Embedding dim: {esm_data.get('embedding_dim', 'N/A')} |
+      Device: {esm_data.get('device', 'N/A')}
+    </div>
     <div class="note">
-      All 4 pipeline stages completed successfully. View individual task reports for detailed
+      All 5 pipeline stages completed successfully. View individual task reports for detailed
       visualizations including molecular weight comparisons, secondary structure analysis,
-      amino acid composition heatmaps, similarity matrices, hydrophobicity profiles, and
-      per-protein property cards.
+      amino acid composition heatmaps, similarity matrices, ESM-2 embedding projections,
+      contact maps, hydrophobicity profiles, and per-protein property cards.
     </div>
     """
 
     await flyte.report.replace.aio(_wrap_report(final_html), do_flush=True)
 
     log.info("Pipeline complete.")
-    return properties_json_result, similarity_json_result
+    return properties_json_result, similarity_json_result, esm_json_result

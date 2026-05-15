@@ -17,6 +17,7 @@ This tutorial takes a set of protein sequences and runs a computational analysis
 | **Load Sequences** | Are these valid proteins? How long are they? | Sequences are written in the one-letter amino acid code (e.g., `M` = methionine, `K` = lysine). Invalid characters get flagged. |
 | **Analyze Properties** | How big? What charge? Stable or not? | Molecular weight tells you if it's a small peptide or a large enzyme. Isoelectric point (pI) tells you its charge behavior — critical for purification. Instability index predicts whether it'll survive in a test tube. |
 | **Compute Similarity** | Are any of these proteins related? | Sequence alignment finds shared ancestry. Proteins with >30% identity usually share 3D structure and function. Below 25% is the "twilight zone" — can't tell from sequence alone. |
+| **ESM-2 Embeddings** | What does a protein language model see? | ESM-2 (Meta) is a transformer trained on 250M protein sequences. It captures evolutionary and structural patterns that sequence alignment misses — two proteins can look very different in sequence but cluster together in embedding space because they share a fold. |
 | **Generate Summary** | What's the big picture? | Per-protein cards with hydrophobicity profiles (which regions are water-loving vs water-hating) and structural predictions. Classification by size, stability, and charge. |
 
 ## The Default Proteins
@@ -47,6 +48,10 @@ The pipeline ships with 7 real proteins chosen to show biological diversity:
 
 **Sequence Similarity** — Two proteins with similar sequences likely evolved from a common ancestor and probably fold into similar shapes. Measured by aligning sequences and counting matching positions.
 
+**Protein Language Models (ESM-2)** — Just as GPT learns language by reading billions of sentences, ESM-2 learns protein "grammar" from 250 million sequences. It picks up patterns that evolution has conserved: which residues tend to co-occur, which positions are flexible vs constrained, what a "typical" protein looks like. The result is an embedding — a vector representation — for each protein that encodes structural and functional information far beyond what raw sequence comparison can capture. This is the same technology that powered breakthroughs like ESMFold (Meta's fast structure predictor) and is now standard in protein engineering labs.
+
+**Contact Maps** — A contact map predicts which residue pairs are physically close in 3D space (typically <8 Angstroms). You can extract approximate contact maps from ESM-2's attention weights — the model has learned which residues "pay attention" to each other, and this correlates with spatial proximity. Contact maps look like symmetric heatmaps with patterns along the diagonal (local structure) and off-diagonal spots (long-range contacts that define the fold).
+
 ## Reports
 
 Each task generates a Flyte report with SVG visualizations:
@@ -58,6 +63,9 @@ Each task generates a Flyte report with SVG visualizations:
 - Amino acid composition heatmap (proteins x 20 amino acids)
 - Hierarchical clustering dendrogram (UPGMA) from sequence similarity
 - Pairwise similarity heatmap
+- ESM-2 embedding space scatter plot (t-SNE projection)
+- ESM-2 cosine similarity heatmap (compare with sequence similarity)
+- Per-protein contact maps from ESM-2 attention weights
 - Per-protein cards with hydrophobicity sparklines and structure tracks
 
 ## What's Here
@@ -83,8 +91,11 @@ uv pip install -r requirements.txt
 # Default — analyze 7 curated proteins
 flyte run --local --tui workflow.py pipeline
 
-# Remote execution
+# Remote execution (GPU for ESM-2)
 flyte run workflow.py pipeline
+
+# Swap ESM-2 model (larger = more accurate but slower)
+flyte run workflow.py pipeline --esm_model "facebook/esm2_t12_35M_UR50D"
 
 # Custom sequences via JSON
 flyte run --local --tui workflow.py pipeline \
@@ -102,4 +113,5 @@ Even a simple bioinformatics pipeline like this benefits from orchestration:
 - **Caching** — sequence loading is cached. Change an analysis parameter and only downstream tasks re-run. In real pipelines with expensive structure predictions, this saves hours of GPU time.
 - **Reproducibility** — every run is versioned. When a collaborator asks "what parameters did you use for that analysis?", you can point them to the exact execution.
 - **Reports** — results render directly in the Flyte UI. No Jupyter notebooks to share, no screenshots to paste into Slack.
-- **Scale** — this tutorial runs on CPU, but swap in a GPU task for structure prediction (ESMFold, AlphaFold) and the same pipeline scales to a cluster.
+- **Resource isolation** — biophysical analysis runs on CPU, ESM-2 inference runs on GPU. Each task gets exactly the resources it needs.
+- **Scale** — ESM-2 runs on a single GPU here. Swap in a larger model (ESM-2 650M) or add structure prediction (ESMFold, AlphaFold) and the same pipeline scales to a cluster.
