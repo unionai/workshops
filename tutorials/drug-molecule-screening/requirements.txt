@@ -1,0 +1,4 @@
+flyte[tui]>=2.0
+rdkit-pypi
+numpy
+scikit-learn
