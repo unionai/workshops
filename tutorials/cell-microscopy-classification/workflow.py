@@ -3,7 +3,7 @@ Cell Microscopy Image Classification — Fine-tune ViT on blood cell images.
 
 Pipeline: download a HuggingFace image classification dataset, fine-tune a
 Vision Transformer (ViT), evaluate with per-class metrics and confusion matrix,
-and render an inference demo with confidence visualizations.
+and render inference results with confidence visualizations.
 
 Works with any HuggingFace dataset that has "image" and "label" columns.
 
@@ -1138,11 +1138,11 @@ async def evaluate(
 
 
 # ------------------------------------------------------------------
-# Task 4: Inference demo — predictions on sample images
+# Task 4: Inference — predictions on sample images
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
-async def inference_demo(
+async def inference(
     finetuned_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
     max_images: int = 12,
@@ -1155,9 +1155,9 @@ async def inference_demo(
     from torchvision import transforms
     from transformers import AutoImageProcessor, AutoModelForImageClassification
 
-    log.info("Starting inference demo...")
+    log.info("Starting inference...")
     await flyte.report.replace.aio(_wrap_report(
-        "<h2>Inference Demo</h2><p>Running predictions on sample images...</p>"
+        "<h2>Inference</h2><p>Running predictions on sample images...</p>"
     ), do_flush=True)
 
     data_path = await data_dir.download()
@@ -1225,7 +1225,7 @@ async def inference_demo(
 
     # Build report
     num_correct = sum(1 for r in results if r["correct"])
-    demo_accuracy = num_correct / len(results) if results else 0
+    sample_accuracy = num_correct / len(results) if results else 0
     confidences = [r["confidence"] for r in results]
     most_confident = max(results, key=lambda r: r["confidence"]) if results else None
     least_confident = min(results, key=lambda r: r["confidence"]) if results else None
@@ -1242,13 +1242,13 @@ async def inference_demo(
         extra_stats += f'<div class="stat"><div class="value highlight">{macro_f1:.3f}</div><div class="label">Macro F1</div></div>'
 
     stats_html = f"""
-    <h2>Inference Demo</h2>
+    <h2>Inference Results</h2>
     <h3>Cell Microscopy Classification Results</h3>
     <div class="stat-grid">
       {extra_stats}
       <div class="stat"><div class="value">{len(results)}</div><div class="label">Images Shown</div></div>
       <div class="stat"><div class="value">{num_correct}/{len(results)}</div><div class="label">Correct</div></div>
-      <div class="stat"><div class="value">{demo_accuracy:.0%}</div><div class="label">Demo Accuracy</div></div>
+      <div class="stat"><div class="value">{sample_accuracy:.0%}</div><div class="label">Sample Accuracy</div></div>
     </div>
     """
 
@@ -1310,9 +1310,9 @@ async def inference_demo(
         </div>
         """
 
-    demo_html = stats_html + grid_html + summary_html
+    report_html = stats_html + grid_html + summary_html
 
-    await flyte.report.replace.aio(_wrap_report(demo_html), do_flush=True)
+    await flyte.report.replace.aio(_wrap_report(report_html), do_flush=True)
 
     del model
     if torch.cuda.is_available():
@@ -1321,7 +1321,7 @@ async def inference_demo(
     return json.dumps({
         "num_images": len(results),
         "num_correct": num_correct,
-        "demo_accuracy": float(demo_accuracy),
+        "sample_accuracy": float(sample_accuracy),
         "avg_confidence": float(np.mean(confidences)) if confidences else 0,
     })
 
@@ -1338,7 +1338,7 @@ async def pipeline(
     batch_size: int = 16,
     learning_rate: float = 2e-5,
     val_fraction: float = 0.2,
-    demo_images: int = 12,
+    sample_images: int = 12,
 ) -> tuple[flyte.io.Dir, str]:
     """
     End-to-end cell microscopy image classification pipeline.
@@ -1348,12 +1348,12 @@ async def pipeline(
     1. Download dataset from HuggingFace and split train/val
     2. Fine-tune a Vision Transformer (ViT) for classification
     3. Evaluate with per-class metrics and confusion matrix
-    4. Inference demo with confidence visualizations
+    4. Inference with confidence visualizations
     """
     log.info(f"Pipeline: {model_name} | dataset={dataset_name}")
 
     def _pipeline_progress(step: int, label: str) -> str:
-        steps = ["Preparing Data", "Fine-tuning ViT", "Evaluating", "Inference Demo"]
+        steps = ["Preparing Data", "Fine-tuning ViT", "Evaluating", "Inference"]
         dots = ""
         for i, s in enumerate(steps):
             if i + 1 < step:
@@ -1401,13 +1401,13 @@ async def pipeline(
     metrics_json = await evaluate(finetuned_dir, data_dir)
     metrics = json.loads(metrics_json)
 
-    # Step 4: Inference demo
+    # Step 4: Inference
     await flyte.report.replace.aio(
         _wrap_report(_pipeline_progress(4, "Generating inference visualizations...")),
         do_flush=True,
     )
-    demo_json = await inference_demo(
-        finetuned_dir, data_dir, demo_images,
+    inference_json = await inference(
+        finetuned_dir, data_dir, sample_images,
         metrics_json=metrics_json,
     )
 
@@ -1415,7 +1415,7 @@ async def pipeline(
     accuracy = metrics.get("accuracy", 0)
     macro_f1 = metrics.get("macro_f1", 0)
     num_val = metrics.get("num_val", 0)
-    demo = json.loads(demo_json)
+    inference_results = json.loads(inference_json)
 
     final_html = f"""
     <h2>Pipeline Complete</h2>
@@ -1424,14 +1424,14 @@ async def pipeline(
       <div class="stat"><div class="value">{num_val}</div><div class="label">Val Images</div></div>
       <div class="stat"><div class="value highlight">{accuracy:.1%}</div><div class="label">Overall Accuracy</div></div>
       <div class="stat"><div class="value highlight">{macro_f1:.3f}</div><div class="label">Macro F1</div></div>
-      <div class="stat"><div class="value">{demo.get('avg_confidence', 0):.1%}</div><div class="label">Avg Confidence</div></div>
+      <div class="stat"><div class="value">{inference_results.get('avg_confidence', 0):.1%}</div><div class="label">Avg Confidence</div></div>
     </div>
     <div class="card">
       <b>Configuration:</b> {epochs} epochs | LR {learning_rate} | Batch size {batch_size} |
-      Val fraction {val_fraction} | {demo_images} demo images
+      Val fraction {val_fraction} | {sample_images} sample images
     </div>
     <div class="note">
-      Pipeline ran: prepare_data &#8594; train &#8594; evaluate &#8594; inference_demo.
+      Pipeline ran: prepare_data &#8594; train &#8594; evaluate &#8594; inference.
       Check individual task reports for detailed charts, confusion matrix, and prediction visualizations.
     </div>
     """
@@ -1439,4 +1439,4 @@ async def pipeline(
     await flyte.report.replace.aio(_wrap_report(final_html), do_flush=True)
 
     log.info(f"Pipeline complete. Accuracy: {accuracy:.1%}, F1: {macro_f1:.3f}")
-    return finetuned_dir, json.dumps({"metrics": metrics, "demo": demo})
+    return finetuned_dir, json.dumps({"metrics": metrics, "inference": inference_results})
