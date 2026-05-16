@@ -114,6 +114,10 @@ flyte run --local --tui workflow.py pipeline \
     --molecules_json '{"Aspirin": "CC(=O)OC1=CC=CC=C1C(=O)O", "Caffeine": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"}'
 ```
 
+## A Note on Scope
+
+This tutorial is designed for educational purposes — it teaches real cheminformatics concepts (SMILES, Lipinski's rules, molecular fingerprints, drug-likeness scoring) and real Flyte patterns (task decomposition, caching, reports) using a curated set of 15 well-known drugs. In real-world drug discovery, virtual screening campaigns operate on libraries of hundreds of thousands to millions of compounds sourced from databases like ZINC or ChEMBL, incorporate molecular docking against 3D protein targets, ADMET (absorption, distribution, metabolism, excretion, toxicity) prediction, and ML-based scoring models. The pipeline architecture here — load, compute, screen, report — is the same structure those production pipelines follow, just at a smaller scale.
+
 ## Why Flyte / Union?
 
 Drug screening pipelines benefit from orchestration even at tutorial scale:
