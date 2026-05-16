@@ -1093,7 +1093,7 @@ def _hydrophobicity_profile(sequence: str, window: int = 7) -> list[float]:
 # Task 1: Load sequences
 # ------------------------------------------------------------------
 
-@cpu_env.task(cache="auto", report=True)
+@cpu_env.task(cache="auto")
 async def load_sequences(
     sequences_json: str = "",
 ) -> flyte.io.Dir:
@@ -1944,7 +1944,274 @@ def _make_contact_map(
 
 
 # ------------------------------------------------------------------
-# Task 5: Generate comprehensive summary
+# Task 5: ESMFold — 3D structure prediction from sequence
+# ------------------------------------------------------------------
+
+@gpu_env.task(report=True)
+async def predict_structures(
+    seq_dir: flyte.io.Dir,
+    max_length: int = 400,
+) -> flyte.io.Dir:
+    """Predict 3D protein structures using ESMFold.
+
+    ESMFold predicts a protein's 3D structure directly from sequence — no
+    multiple sequence alignment needed. Outputs PDB files and an interactive
+    3D viewer in the report.
+    """
+    import torch
+    import numpy as np
+    from transformers import AutoTokenizer, EsmForProteinFolding
+
+    log.info("Loading ESMFold model...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log.info(f"Using device: {device}")
+
+    tokenizer = AutoTokenizer.from_pretrained("facebook/esmfold_v1")
+    model = EsmForProteinFolding.from_pretrained("facebook/esmfold_v1", low_cpu_mem_usage=True)
+    model = model.to(device)
+    model.eval()
+
+    seq_path = await seq_dir.download()
+    proteins = {}
+    for fname in sorted(os.listdir(seq_path)):
+        if not fname.endswith(".fasta"):
+            continue
+        with open(os.path.join(seq_path, fname)) as f:
+            lines = f.readlines()
+        name = lines[0].strip().lstrip(">")
+        seq = "".join(line.strip() for line in lines[1:])
+        proteins[name] = seq
+
+    names = list(proteins.keys())
+    n = len(names)
+
+    await flyte.report.replace.aio(_wrap_report(
+        "<h2>ESMFold — 3D Structure Prediction</h2>"
+        f"<p>Predicting structures for {n} proteins...</p>"
+    ), do_flush=True)
+
+    out_dir = tempfile.mkdtemp(prefix="esmfold_structures_")
+    structure_data = {}
+
+    for idx, name in enumerate(names):
+        seq = proteins[name]
+        short = name.split("(")[0].strip()
+
+        if len(seq) > max_length:
+            log.info(f"Skipping {short} ({len(seq)} aa > {max_length} max)")
+            continue
+
+        log.info(f"ESMFold [{idx + 1}/{n}]: {short} ({len(seq)} aa)")
+
+        await flyte.report.replace.aio(_wrap_report(
+            "<h2>ESMFold — 3D Structure Prediction</h2>"
+            f"<p>Folding protein {idx + 1}/{n}: <b>{short}</b> ({len(seq)} residues)...</p>"
+        ), do_flush=True)
+
+        inputs = tokenizer(seq, return_tensors="pt", add_special_tokens=False).to(device)
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        # Convert to PDB
+        pdb_str = _outputs_to_pdb(outputs, seq)
+
+        # Extract pLDDT confidence
+        plddt_raw = outputs.plddt[0].cpu().numpy()
+        # plddt may be (num_recycles, seq_len) — take last recycle
+        if plddt_raw.ndim == 2:
+            plddt_raw = plddt_raw[-1]
+        # Flatten if still multi-dim
+        plddt = plddt_raw.flatten()[:len(seq)]
+        if plddt.max() <= 1.0:
+            plddt = plddt * 100
+        plddt_mean = float(np.mean(plddt))
+
+        # Save PDB
+        safe_name = name.replace(" ", "_").replace("/", "-").replace("(", "").replace(")", "")
+        pdb_path = os.path.join(out_dir, f"{safe_name}.pdb")
+        with open(pdb_path, "w") as f:
+            f.write(pdb_str)
+
+        structure_data[name] = {
+            "pdb_str": pdb_str,
+            "plddt_mean": round(plddt_mean, 1),
+            "plddt_per_residue": [round(float(v), 1) for v in plddt[:len(seq)]],
+            "length": len(seq),
+        }
+        log.info(f"  → mean pLDDT: {plddt_mean:.1f}")
+
+    # --- Build report ---
+    n_folded = len(structure_data)
+    avg_plddt = sum(d["plddt_mean"] for d in structure_data.values()) / n_folded if n_folded else 0
+
+    stats_html = f"""
+    <h2>ESMFold — 3D Structure Prediction</h2>
+    <div class="note">
+      <b>ESMFold</b> predicts 3D structure directly from amino acid sequence.
+      <b>pLDDT</b> measures per-residue confidence:
+      &gt;90 = very high, 70-90 = confident, 50-70 = low, &lt;50 = disordered.
+    </div>
+    <div class="stat-grid">
+      <div class="stat"><div class="value">{n_folded}</div><div class="label">Structures Predicted</div></div>
+      <div class="stat"><div class="value">{avg_plddt:.1f}</div><div class="label">Avg pLDDT</div></div>
+      <div class="stat"><div class="value">{device.upper()}</div><div class="label">Device</div></div>
+    </div>
+    """
+
+    viewers_html = ""
+    for name, data in structure_data.items():
+        short = name.split("(")[0].strip()
+        plddt_val = data["plddt_mean"]
+
+        if plddt_val >= 90:
+            badge = '<span class="badge badge-success">Very High Confidence</span>'
+        elif plddt_val >= 70:
+            badge = '<span class="badge badge-info">Confident</span>'
+        elif plddt_val >= 50:
+            badge = '<span class="badge badge-warning">Low Confidence</span>'
+        else:
+            badge = '<span class="badge badge-danger">Disordered</span>'
+
+        plddt_sparkline = _make_plddt_sparkline(data["plddt_per_residue"])
+
+        pdb_escaped = data["pdb_str"].replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        viewer_id = f"viewer_{hash(name) & 0xFFFFFF:06x}"
+
+        viewers_html += f"""
+        <div class="card" style="margin:16px 0;">
+          <h3 style="margin-top:0;">{short}
+            <span style="font-size:0.7em;color:#6c757d;">({data['length']} aa)</span>
+            {badge}
+          </h3>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;">
+            <div id="{viewer_id}" style="width:400px;height:350px;border:1px solid #d1fae5;border-radius:8px;position:relative;"></div>
+            <div style="flex:1;min-width:250px;">
+              <p><b>Mean pLDDT:</b> {plddt_val:.1f} / 100</p>
+              <div style="font-size:0.8em;color:#6c757d;margin-bottom:4px;">Per-residue confidence</div>
+              {plddt_sparkline}
+              <div style="margin-top:8px;font-size:0.75em;color:#9ca3af;">
+                <span style="color:#0053d6;">■ &gt;90</span>
+                <span style="color:#65cbf3;">■ 70-90</span>
+                <span style="color:#ffdb13;">■ 50-70</span>
+                <span style="color:#ff7d45;">■ &lt;50</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <script>
+        (function() {{
+          var pdb = `{pdb_escaped}`;
+          function initViewer() {{
+            if (typeof $3Dmol === 'undefined') {{ setTimeout(initViewer, 200); return; }}
+            var viewer = $3Dmol.createViewer(document.getElementById("{viewer_id}"), {{backgroundColor: "white"}});
+            viewer.addModel(pdb, "pdb");
+            viewer.setStyle({{}}, {{cartoon: {{color: "spectrum"}}}});
+            viewer.zoomTo();
+            viewer.render();
+            viewer.spin("y", 1);
+          }}
+          initViewer();
+        }})();
+        </script>
+        """
+
+    threeDmol_script = '<script src="https://3dmol.csb.pitt.edu/build/3Dmol-min.js"></script>'
+
+    report_html = f"""
+    {threeDmol_script}
+    {stats_html}
+    {viewers_html}
+    """
+
+    await flyte.report.replace.aio(_wrap_report(report_html), do_flush=True)
+    return await flyte.io.Dir.from_local(out_dir)
+
+
+def _outputs_to_pdb(outputs, sequence: str) -> str:
+    """Convert ESMFold outputs to PDB format string."""
+    import numpy as np
+
+    # positions shape: (batch, num_recycles, seq_len, num_atoms, 3)
+    # Take last recycling iteration
+    pos = outputs.positions[0]
+    if pos.dim() == 4:
+        # (num_recycles, seq_len, num_atoms, 3) — take last recycle
+        pos = pos[-1]
+    positions = pos.cpu().numpy()  # (seq_len, num_atoms, 3)
+    atom_names = ["N", "CA", "C", "O"]
+    aa_3letter = {
+        "A": "ALA", "R": "ARG", "N": "ASN", "D": "ASP", "C": "CYS",
+        "Q": "GLN", "E": "GLU", "G": "GLY", "H": "HIS", "I": "ILE",
+        "L": "LEU", "K": "LYS", "M": "MET", "F": "PHE", "P": "PRO",
+        "S": "SER", "T": "THR", "W": "TRP", "Y": "TYR", "V": "VAL",
+    }
+
+    pdb_lines = []
+    atom_idx = 1
+    for res_idx, aa in enumerate(sequence):
+        res_name = aa_3letter.get(aa, "UNK")
+        for atom_i, atom_name in enumerate(atom_names):
+            if atom_i >= positions.shape[1]:
+                break
+            x, y, z = positions[res_idx, atom_i]
+            if np.isnan(x) or np.isnan(y) or np.isnan(z):
+                continue
+            pdb_lines.append(
+                f"ATOM  {atom_idx:5d}  {atom_name:<3s} {res_name} A{res_idx + 1:4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           {atom_name[0]:>2s}"
+            )
+            atom_idx += 1
+    pdb_lines.append("END")
+    return "\n".join(pdb_lines)
+
+
+def _make_plddt_sparkline(values: list[float], width: int = 400, height: int = 50) -> str:
+    """pLDDT sparkline with AlphaFold-style coloring."""
+    if not values or len(values) < 2:
+        return ""
+
+    pad = 4
+    cw = width - 2 * pad
+    ch = height - 2 * pad
+    seg_w = cw / len(values)
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'style="width:100%;max-width:{width}px;height:auto;">',
+    ]
+
+    for i, v in enumerate(values):
+        x = pad + i * seg_w
+        bar_h = (v / 100) * ch
+        y = pad + ch - bar_h
+
+        if v >= 90:
+            color = "#0053d6"
+        elif v >= 70:
+            color = "#65cbf3"
+        elif v >= 50:
+            color = "#ffdb13"
+        else:
+            color = "#ff7d45"
+
+        svg.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{max(seg_w, 1):.1f}" '
+            f'height="{bar_h:.1f}" fill="{color}"/>'
+        )
+
+    ref_y = pad + ch - (70 / 100) * ch
+    svg.append(
+        f'<line x1="{pad}" y1="{ref_y:.1f}" x2="{pad + cw}" y2="{ref_y:.1f}" '
+        f'stroke="#adb5bd" stroke-width="0.5" stroke-dasharray="3,2"/>'
+    )
+
+    svg.append("</svg>")
+    return "\n".join(svg)
+
+
+# ------------------------------------------------------------------
+# Task 6: Generate comprehensive summary
 # ------------------------------------------------------------------
 
 @cpu_env.task(report=True)
@@ -2227,6 +2494,7 @@ async def pipeline(
             "Analyze Properties",
             "Compute Similarity",
             "ESM-2 Embeddings",
+            "ESMFold 3D",
             "Generate Summary",
         ]
         dots = ""
@@ -2272,9 +2540,16 @@ async def pipeline(
     )
     esm_json_result = await esm_analysis(seq_dir=seq_dir, model_name=esm_model)
 
-    # Stage 5: Generate summary
+    # Stage 5: ESMFold structure prediction
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(5, "Generating comprehensive summary report...")),
+        _wrap_report(_pipeline_progress(5, "Predicting 3D structures with ESMFold...")),
+        do_flush=True,
+    )
+    structures_dir = await predict_structures(seq_dir=seq_dir)
+
+    # Stage 6: Generate summary
+    await flyte.report.replace.aio(
+        _wrap_report(_pipeline_progress(6, "Generating comprehensive summary report...")),
         do_flush=True,
     )
     summary_json = await generate_summary(
@@ -2310,10 +2585,10 @@ async def pipeline(
       Device: {esm_data.get('device', 'N/A')}
     </div>
     <div class="note">
-      All 5 pipeline stages completed successfully. View individual task reports for detailed
+      All 6 pipeline stages completed successfully. View individual task reports for detailed
       visualizations including molecular weight comparisons, secondary structure analysis,
       amino acid composition heatmaps, similarity matrices, ESM-2 embedding projections,
-      contact maps, hydrophobicity profiles, and per-protein property cards.
+      contact maps, 3D protein structures, hydrophobicity profiles, and per-protein property cards.
     </div>
     """
 

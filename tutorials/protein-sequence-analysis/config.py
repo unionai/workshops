@@ -9,7 +9,7 @@ base_image = flyte.Image.from_debian_base(
 gpu_env = flyte.TaskEnvironment(
     name="protein-analysis-gpu",
     image=base_image,
-    resources=flyte.Resources(cpu=4, memory="16Gi", gpu=1),
+    resources=flyte.Resources(cpu=4, memory="24Gi", gpu=1),
 )
 
 cpu_env = flyte.TaskEnvironment(
