@@ -58,7 +58,14 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 | [Fraud Detection with Feast](tutorials/fraud-detection-feast/) | Fraud scoring pipeline with Feast feature store, XGBoost, and real-time serving |
 | [Stable Diffusion](tutorials/starter-examples/stable-diffusion/) | Image generation with SDXL Turbo |
 | [Image Classifier](tutorials/starter-examples/image-classifier/) | Fine-tune ResNet18 on Beans dataset |
-| [LLM Fine-Tuning: SQL](tutorials/llm-fine-tuning-sql/) | Fine-tune an LLM on text-to-SQL with LoRA, QLoRA, or full fine-tuning — then deploy via vLLM |
+| [LLM Fine-Tuning: LoRA/QLoRA](tutorials/llm-fine-tuning-lora-qlora/) | Fine-tune an LLM on text-to-SQL with LoRA, QLoRA, or full fine-tuning — live training reports, FastAPI serving, Gradio UI |
+
+## Biotech / Life Sciences
+
+| Tutorial | Description |
+|----------|-------------|
+| [Protein Sequence Analysis](tutorials/protein-sequence-analysis/) | Analyze protein properties, compute sequence similarity, run ESM-2 embeddings, and predict 3D structures with ESMFold |
+| [Drug Molecule Screening](tutorials/drug-molecule-screening/) | Virtual drug screening — compute physicochemical properties, apply Lipinski's Rule of Five, rank candidates by drug-likeness |
 
 ## Data
 
