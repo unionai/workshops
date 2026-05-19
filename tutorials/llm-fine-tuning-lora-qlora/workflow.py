@@ -169,12 +169,21 @@ async def train(
             model = prepare_model_for_kbit_training(model)
 
         lora_config = LoraConfig(
-            r=lora_r,
-            lora_alpha=lora_alpha,
+            r=lora_r,              # Rank — size of the low-rank matrices. Higher = more capacity but more params
+            lora_alpha=lora_alpha,  # Scaling factor — controls adapter impact. Effective scale = alpha/r
+            # Attention layers — LoRA adapters inject low-rank updates here:
+            #   q_proj (Query)     — what to look for in context
+            #   k_proj (Key)       — what each token offers to match against
+            #   v_proj (Value)     — what information to extract once matched
+            #   o_proj (Output)    — combines multi-head attention results
+            # MLP layers — LoRA adapters also update the feed-forward network:
+            #   gate_proj (Gate)   — controls how much information flows through (SwiGLU activation)
+            #   up_proj (Up)       — projects to a higher dimension for richer representations
+            #   down_proj (Down)   — projects back down to the model's hidden size
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM",
+            lora_dropout=0.05,     # Dropout on adapter weights — light regularization to prevent overfitting
+            bias="none",           # Don't train bias terms — keeps adapter small and stable
+            task_type="CAUSAL_LM", # Tells PEFT this is a text generation model (vs classification, etc.)
         )
         model = get_peft_model(model, lora_config)
         trainable_params, total_params = model.get_nb_trainable_parameters()

@@ -31,6 +31,34 @@ export HF_TOKEN=your-token
 # or add HF_TOKEN=your-token to .env
 ```
 
+## How LoRA Works
+
+**Full fine-tuning** updates every weight in the model — effective but expensive. For a 7B model that's billions of parameters to train, store, and deploy.
+
+**LoRA (Low-Rank Adaptation)** takes a different approach: freeze the entire base model and inject small trainable adapters alongside the original weights. Instead of modifying a large weight matrix `W` directly, LoRA adds a low-rank decomposition `A × B` that learns a small correction:
+
+```
+                    ┌─────────────────────────┐
+                    │   Original Weight W      │
+input ────────────→ │   (frozen, e.g. 768×768) │──→ main output
+    │               └─────────────────────────┘         │
+    │               ┌───────────┐ ┌───────────┐         │
+    └─────────────→ │ A (768×16) │→│ B (16×768) │→ × α/r ──→ + ──→ combined output
+                    └───────────┘ └───────────┘
+                    (LoRA adapter, trainable)
+```
+
+The original weight `W` stays completely frozen. The adapter matrices `A` and `B` are tiny — for a 768×768 layer with rank `r=16`, LoRA adds only 24,576 params vs the original 589,824 (~4%).
+
+**Key parameters:**
+- **`r` (rank)** — size of the adapter matrices. Higher = more capacity but more params
+- **`alpha`** — scaling factor. The adapter output is multiplied by `alpha/r` before being added. Controls how strongly the adapter influences the output. Common practice: `alpha = 2 × r`
+- **`alpha` adds zero extra parameters** — it's just a scalar multiplier
+
+These small corrections are applied at every key layer in every transformer block — which is enough to steer the model's behavior significantly while training only 2-4% of total parameters.
+
+**QLoRA** goes further: it quantizes the frozen base model to 4-bit precision, reducing memory even more. The LoRA adapters still train in full precision. This lets you fine-tune models that wouldn't otherwise fit in GPU memory.
+
 ## Fine-Tuning Methods
 
 | Method | What happens | Memory | Best for |
@@ -174,6 +202,25 @@ When swapping models, be aware that **LoRA target module names vary between arch
 ```python
 target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 ```
+
+These are the layers inside each transformer block where LoRA injects low-rank adapters:
+
+**Attention layers** — how the model decides what to focus on:
+| Module | Name | What it does |
+|--------|------|-------------|
+| `q_proj` | Query | What to look for in the context |
+| `k_proj` | Key | What each token offers to match against |
+| `v_proj` | Value | What information to extract once matched |
+| `o_proj` | Output | Combines multi-head attention results |
+
+**MLP (feed-forward) layers** — how the model processes information after attention:
+| Module | Name | What it does |
+|--------|------|-------------|
+| `gate_proj` | Gate | Controls how much information flows through (SwiGLU activation) |
+| `up_proj` | Up | Projects to a higher dimension for richer representations |
+| `down_proj` | Down | Projects back down to the model's hidden size |
+
+By targeting all seven layers, LoRA can adapt both *what the model pays attention to* and *how it processes that information* — without retraining all the weights.
 
 Other architectures use different naming conventions:
 
