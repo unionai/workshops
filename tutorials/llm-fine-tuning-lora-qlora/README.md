@@ -4,6 +4,10 @@ Fine-tune a language model on text-to-SQL with full fine-tuning, LoRA, or QLoRA 
 
 **Default model:** [SmolLM2-135M](https://huggingface.co/HuggingFaceTB/SmolLM2-135M) — a tiny 135M parameter model. Small enough to train quickly on a single GPU, large enough to learn the SQL pattern and demonstrate the difference between fine-tuning methods.
 
+<a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/llm-fine-tuning-lora-qlora/llm-fine-tune-tutorial.ipynb">
+  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
+</a>
+
 ## What's Here
 
 | File | What it does |
