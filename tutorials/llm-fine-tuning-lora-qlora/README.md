@@ -1,6 +1,8 @@
 # LLM Fine-Tuning: Text-to-SQL
 
-Fine-tune a language model on text-to-SQL with full fine-tuning, LoRA, or QLoRA — all in one Flyte pipeline. Then deploy the result as an OpenAI-compatible API via vLLM.
+Fine-tune a language model on text-to-SQL with full fine-tuning, LoRA, or QLoRA — all in one Flyte pipeline. Then deploy the result as a FastAPI endpoint with a Gradio UI.
+
+**Default model:** [SmolLM2-135M](https://huggingface.co/HuggingFaceTB/SmolLM2-135M) — a tiny 135M parameter model. Small enough to train quickly on a single GPU, large enough to learn the SQL pattern and demonstrate the difference between fine-tuning methods.
 
 ## What's Here
 
@@ -112,7 +114,9 @@ After training, deploy as an OpenAI-compatible API:
 python serve.py
 
 # Deploy a specific run (e.g. your best LoRA run)
-python serve.py --run-name <run-name>
+python serve.py --run-name rk2zfpk6x49c5vs45652
+
+# python serve.py --run-name <run-name>
 ```
 
 This deploys a FastAPI endpoint that loads the fine-tuned model and serves SQL generation. `RunOutput` pulls the model directory from your training pipeline.
@@ -120,7 +124,7 @@ This deploys a FastAPI endpoint that loads the fine-tuned model and serves SQL g
 Test the endpoint:
 
 ```bash
-curl -X POST https://your-app-url/generate \
+curl -X POST https://steep-fog-ad9c2.apps.tryv2.hosted.unionai.cloud/generate \
   -H "Content-Type: application/json" \
   -d '{
     "schema": "CREATE TABLE employees (id INT, name VARCHAR, department VARCHAR, salary INT)",
@@ -157,8 +161,44 @@ Everything is HuggingFace-based, so swapping is just changing a string:
 
 ```bash
 # Different model
-flyte run --local --tui workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B"
+flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B"
 
 # Different dataset (must have similar structure or update format_example in workflow.py)
-flyte run --local --tui workflow.py pipeline --dataset_name "your-org/your-dataset"
+flyte run workflow.py pipeline --dataset_name "your-org/your-dataset"
 ```
+
+### LoRA target modules
+
+When swapping models, be aware that **LoRA target module names vary between architectures**. The default targets in `workflow.py` are set for LLaMA-style models (SmolLM2, Qwen, Mistral, etc.):
+
+```python
+target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+```
+
+Other architectures use different naming conventions:
+
+| Architecture | Attention modules | Example models |
+|-------------|------------------|----------------|
+| LLaMA-style | `q_proj`, `k_proj`, `v_proj`, `o_proj` | SmolLM2, Qwen, Mistral, LLaMA |
+| GPT-2 / GPT-Neo | `q_proj`, `k_proj`, `v_proj`, `out_proj` | GPT-2, GPT-Neo, GPT-J |
+| BLOOM | `query_key_value`, `dense` | BLOOM, BLOOMZ |
+| Falcon | `query_key_value`, `dense` | Falcon |
+| Phi | `q_proj`, `k_proj`, `v_proj`, `dense` | Phi-1, Phi-2 |
+
+If you see LoRA training with 0 trainable parameters or an error about missing modules, check the model's attention layer names:
+
+```python
+# Quick way to find the right module names
+from transformers import AutoModelForCausalLM
+model = AutoModelForCausalLM.from_pretrained("your-model")
+print([n for n, _ in model.named_modules() if "proj" in n or "query" in n or "dense" in n])
+```
+
+### Good models to try
+
+| Model | Params | Notes |
+|-------|--------|-------|
+| `HuggingFaceTB/SmolLM2-135M` | 135M | Default — fast training, good for demos |
+| `Qwen/Qwen2.5-0.5B` | 500M | Better quality, still fits easily on a T4 |
+| `Qwen/Qwen2.5-1.5B` | 1.5B | Good quality, may benefit from QLoRA on smaller GPUs |
+| `meta-llama/Llama-3.2-1B` | 1B | Strong base model, requires HF token (gated) |
