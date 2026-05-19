@@ -72,6 +72,10 @@ env = FastAPIAppEnvironment(
         "fastapi", "uvicorn", "torch", "transformers", "accelerate",
     ),
     resources=flyte.Resources(cpu=2, memory="8Gi", gpu=1),
+    scaling=flyte.app.Scaling(
+        replicas=(0, 1),
+        scaledown_after=1800,  # 30 minutes
+    ),
     requires_auth=False,
     parameters=[
         Parameter(
