@@ -37,6 +37,8 @@ export HF_TOKEN=your-token
 | `lora` | Freeze base, train low-rank adapters | Medium | Good balance of quality and efficiency |
 | `qlora` | 4-bit quantized base + LoRA adapters | Low | Larger models on limited GPU memory |
 
+> **Note on QLoRA:** With a small model like SmolLM2-135M, QLoRA is overkill — the model already fits easily in GPU memory, and 4-bit quantization just hurts quality. QLoRA shines when you need to fine-tune a model that's too large to fit in VRAM otherwise (e.g., a 7B+ model on a single T4). It's included here to show *how* it works so you can apply it when you need it.
+
 ## Run
 
 ### LoRA (default)
