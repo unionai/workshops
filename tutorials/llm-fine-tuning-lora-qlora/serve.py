@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import flyte
@@ -87,17 +87,14 @@ env = FastAPIAppEnvironment(
 
 
 class SQLRequest(BaseModel):
-    schema_: str | None = None
-    schema_text: str | None = None
+    model_config = {"populate_by_name": True}
+
+    schema_: str | None = Field(None, alias="schema")
     question: str
 
     @property
     def context(self) -> str:
-        return self.schema_ or self.schema_text or ""
-
-    class Config:
-        populate_by_name = True
-        fields = {"schema_": {"alias": "schema"}}
+        return self.schema_ or ""
 
 
 class SQLResponse(BaseModel):
@@ -163,26 +160,13 @@ if __name__ == "__main__":
 
     # Override the parameter with a specific run if provided
     if args.run_name:
-        deploy_env = FastAPIAppEnvironment(
-            name=env.name,
-            app=app,
-            description=env.description,
-            image=env.image,
-            resources=env.resources,
-            requires_auth=False,
-            parameters=[
-                Parameter(
-                    name="model",
-                    value=flyte.app.RunOutput(
-                        run_name=args.run_name,
-                        type="directory",
-                    ),
-                    mount=MODEL_MOUNT_PATH,
-                ),
-            ],
-        )
-    else:
-        deploy_env = env
+        for p in env.parameters:
+            if p.name == "model":
+                p.value = flyte.app.RunOutput(
+                    run_name=args.run_name,
+                    type="directory",
+                )
+                break
 
-    deployed = flyte.serve(deploy_env)
+    deployed = flyte.serve(env)
     print(f"Deployed: {deployed.url}")
