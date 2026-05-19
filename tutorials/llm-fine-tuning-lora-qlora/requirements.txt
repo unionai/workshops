@@ -8,4 +8,5 @@ bitsandbytes>=0.44.0
 accelerate>=0.34.0
 markdown
 python-dotenv
-flyteplugins-vllm>=2.0
+fastapi 
+uvicorn 

@@ -9,7 +9,8 @@ Fine-tune a language model on text-to-SQL with full fine-tuning, LoRA, or QLoRA 
 | `config.py` | Flyte environments — CPU for data prep, GPU for training |
 | `workflow.py` | Pipeline: prepare data → train (full/LoRA/QLoRA) → evaluate before/after |
 | `report_helpers.py` | Report CSS, SVG chart generators (line/bar), and HTML helpers |
-| `serve.py` | Deploy the fine-tuned model as a vLLM endpoint |
+| `serve.py` | Deploy the fine-tuned model as a FastAPI endpoint |
+| `app_gradio.py` | Gradio UI for interactive text-to-SQL queries |
 
 ## Setup
 
@@ -112,31 +113,41 @@ python serve.py
 python serve.py --run-name <run-name>
 ```
 
-This uses vLLM to serve the fine-tuned model with `RunOutput` pulling the model artifact from your training run.
+This deploys a FastAPI endpoint that loads the fine-tuned model and serves SQL generation. `RunOutput` pulls the model directory from your training pipeline.
 
 Test the endpoint:
 
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="https://your-app-url/v1", api_key="na")
-
-response = client.chat.completions.create(
-    model="finetuned-sql",
-    messages=[{
-        "role": "user",
-        "content": (
-            "### Task: Generate a SQL query to answer the question.\n"
-            "### Schema:\n"
-            "CREATE TABLE employees (id INT, name VARCHAR, department VARCHAR, salary INT)\n"
-            "### Question:\n"
-            "What is the average salary by department?\n"
-            "### SQL:\n"
-        ),
-    }],
-)
-print(response.choices[0].message.content)
+```bash
+curl -X POST https://your-app-url/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schema": "CREATE TABLE employees (id INT, name VARCHAR, department VARCHAR, salary INT)",
+    "question": "What is the average salary by department?"
+  }'
 ```
+
+Response:
+
+```json
+{
+  "sql": "SELECT department, AVG(salary) FROM employees GROUP BY department",
+  "raw_output": "SELECT department, AVG(salary) FROM employees GROUP BY department"
+}
+```
+
+## Gradio UI
+
+Deploy an interactive frontend for the model:
+
+```bash
+# Auto-discovers the deployed serve.py endpoint
+python app_gradio.py
+
+# Or connect to a specific server
+SERVER_URL=https://your-app-url python app_gradio.py
+```
+
+Includes example schemas and questions to try out.
 
 ## Swapping Models and Datasets
 
