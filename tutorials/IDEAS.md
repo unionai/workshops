@@ -36,6 +36,16 @@ Ideas for follow-up tutorials using this pipeline as a template.
 
 Each reuses the same pipeline — just swap `--model_name` and `--dataset_name` (with a tweaked `format_example` in workflow.py).
 
+## Carbon Genomic Foundation Model Tutorials
+
+HuggingFace released [Carbon](https://github.com/huggingface/carbon) (May 2026) — an open-source family of autoregressive genomic foundation models (500M, 3B, 8B) trained on 1T tokens of DNA. 275x faster than Evo2. Hybrid tokenizer (6-mer + single-base resolution).
+
+| Tutorial Idea | What it does | Visuals |
+|--------------|-------------|---------|
+| **Variant Effect Prediction** (building this) | Score clinically relevant mutations (BRCA2, TP53, CFTR) as pathogenic vs benign using Carbon's zero-shot log-likelihood scoring | Mutation impact heatmaps, gene diagrams, pathogenicity classification charts |
+| **DNA Sequence Generation & Analysis** | Generate DNA with Carbon, then analyze GC content, codon usage, open reading frames, compare to real genes | Codon frequency wheels, ORF track diagrams, GC content sparklines, generated vs real sequence comparisons |
+| **Gene Comparison Across Species + DNA-to-Structure** | Embed/score homologous genes across species with Carbon, visualize evolutionary relationships, then translate to protein and fold both ref and mutant with ESMFold to show structural impact of cross-species divergence | Phylogenetic dendrograms, cross-species similarity heatmaps, embedding UMAP projections, side-by-side 3D protein structures with pLDDT coloring |
+
 ## Notes
 
 - Phi-4-mini is the best candidate to demonstrate QLoRA's real value (3.8B won't fit full fine-tune on a T4)
