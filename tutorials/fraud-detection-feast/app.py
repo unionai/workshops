@@ -124,6 +124,10 @@ serving_env = FastAPIAppEnvironment(
         "pandas", "pyarrow",
     ),
     resources=flyte.Resources(cpu=2, memory="4Gi"),
+    scaling=flyte.app.Scaling(
+        replicas=(0, 1),
+        scaledown_after=1800,  # 30 minutes
+    ),
     requires_auth=False,
 )
 

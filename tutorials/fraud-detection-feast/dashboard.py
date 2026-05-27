@@ -221,6 +221,10 @@ dashboard_env = FastAPIAppEnvironment(
         "gradio==6.15.0", "requests", "fastapi", "uvicorn",
     ),
     resources=flyte.Resources(cpu=1, memory="1Gi"),
+    scaling=flyte.app.Scaling(
+        replicas=(0, 1),
+        scaledown_after=1800,  # 30 minutes
+    ),
     requires_auth=False,
 )
 
