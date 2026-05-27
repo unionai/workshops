@@ -16,7 +16,6 @@ Usage:
     flyte run --local --tui workflow.py fraud_detection_pipeline
 """
 
-import asyncio
 import json
 import logging
 import math
@@ -140,8 +139,9 @@ async def prepare_data() -> flyte.io.Dir:
         age=("age", "first"),
     ).reset_index()
     user_stats["std_amt"] = user_stats["std_amt"].fillna(0)
-    latest_ts = df.groupby("user_id")["event_timestamp"].max().reset_index()
-    user_stats = user_stats.merge(latest_ts, on="user_id")
+    # Use earliest timestamp so Feast point-in-time joins work for all transactions
+    earliest_ts = df.groupby("user_id")["event_timestamp"].min().reset_index()
+    user_stats = user_stats.merge(earliest_ts, on="user_id")
 
     # ------------------------------------------------------------------
     # Save to temp directory
@@ -184,38 +184,198 @@ async def prepare_data() -> flyte.io.Dir:
 
 
 # ------------------------------------------------------------------
-# Task 2: Train XGBoost model
+# Task 2: Set up Feast and materialize user profiles to online store
+# ------------------------------------------------------------------
+
+@env.task(report=True)
+async def materialize_features(data_dir: flyte.io.Dir) -> flyte.io.Dir:
+    """Apply Feast definitions and materialize user profiles to SQLite online store."""
+    from feast import Entity, FeatureStore, FeatureView, Field, FileSource
+    from feast.types import Float64, Int64
+
+    data_path = await data_dir.download()
+
+    # Create a self-contained Feast repo in a temp directory
+    feast_dir = tempfile.mkdtemp()
+
+    # Copy parquet into feast dir so the repo is fully self-contained
+    shutil.copy2(
+        os.path.join(data_path, "user_features.parquet"),
+        os.path.join(feast_dir, "user_features.parquet"),
+    )
+
+    # Write feature_store.yaml
+    yaml_content = (
+        "project: fraud_detection\n"
+        f"registry: {feast_dir}/registry.db\n"
+        "provider: local\n"
+        "online_store:\n"
+        "  type: sqlite\n"
+        f"  path: {feast_dir}/online_store.db\n"
+        "offline_store:\n"
+        "  type: file\n"
+        "entity_key_serialization_version: 3\n"
+    )
+    yaml_path = os.path.join(feast_dir, "feature_store.yaml")
+    with open(yaml_path, "w") as f:
+        f.write(yaml_content)
+
+    store = FeatureStore(repo_path=feast_dir)
+
+    # Define entity and feature view
+    user = Entity(name="user", join_keys=["user_id"], description="Credit card holder")
+
+    user_source = FileSource(
+        path=os.path.join(feast_dir, "user_features.parquet"),
+        timestamp_field="event_timestamp",
+    )
+
+    user_stats = FeatureView(
+        name="user_stats",
+        entities=[user],
+        ttl=timedelta(days=0),  # No expiry — workshop data has old timestamps
+        schema=[
+            Field(name="txn_count", dtype=Int64),
+            Field(name="mean_amt", dtype=Float64),
+            Field(name="std_amt", dtype=Float64),
+            Field(name="max_amt", dtype=Float64),
+            Field(name="home_lat", dtype=Float64),
+            Field(name="home_long", dtype=Float64),
+            Field(name="age", dtype=Int64),
+        ],
+        online=True,
+        source=user_source,
+    )
+
+    # Apply and materialize
+    log.info("Applying Feast definitions...")
+    store.apply([user, user_stats])
+
+    log.info("Materializing user profiles to online store...")
+    store.materialize(
+        start_date=datetime(2018, 1, 1, tzinfo=timezone.utc),
+        end_date=datetime.now(timezone.utc),
+    )
+
+    # Re-apply with relative paths so the registry is portable across workers
+    portable_yaml = (
+        "project: fraud_detection\n"
+        "registry: registry.db\n"
+        "provider: local\n"
+        "online_store:\n"
+        "  type: sqlite\n"
+        "  path: online_store.db\n"
+        "offline_store:\n"
+        "  type: file\n"
+        "entity_key_serialization_version: 3\n"
+    )
+    with open(yaml_path, "w") as f:
+        f.write(portable_yaml)
+
+    # Re-apply with relative source path so get_historical_features works on other workers
+    store = FeatureStore(repo_path=feast_dir)
+    user_source = FileSource(
+        path="user_features.parquet",
+        timestamp_field="event_timestamp",
+    )
+    user_stats = FeatureView(
+        name="user_stats",
+        entities=[user],
+        ttl=timedelta(days=0),
+        schema=[
+            Field(name="txn_count", dtype=Int64),
+            Field(name="mean_amt", dtype=Float64),
+            Field(name="std_amt", dtype=Float64),
+            Field(name="max_amt", dtype=Float64),
+            Field(name="home_lat", dtype=Float64),
+            Field(name="home_long", dtype=Float64),
+            Field(name="age", dtype=Int64),
+        ],
+        online=True,
+        source=user_source,
+    )
+    store.apply([user, user_stats])
+
+    features = ["txn_count", "mean_amt", "std_amt", "max_amt", "home_lat", "home_long", "age"]
+    html = (
+        '<h2>Feature Store Materialized</h2>'
+        + rh.stat_grid([
+            ("user_stats", "Feature View"),
+            (str(len(features)), "Features"),
+            ("SQLite", "Online Store"),
+        ])
+        + '<h3>Materialized Features</h3>'
+        '<table>'
+        '<tr><th>Feature</th><th>Type</th><th>Description</th></tr>'
+        '<tr><td>txn_count</td><td><span class="badge badge-info">Int64</span></td><td>Total transactions</td></tr>'
+        '<tr><td>mean_amt</td><td><span class="badge badge-info">Float64</span></td><td>Average transaction amount</td></tr>'
+        '<tr><td>std_amt</td><td><span class="badge badge-info">Float64</span></td><td>Std dev of amounts</td></tr>'
+        '<tr><td>max_amt</td><td><span class="badge badge-info">Float64</span></td><td>Max transaction amount</td></tr>'
+        '<tr><td>home_lat</td><td><span class="badge badge-info">Float64</span></td><td>Home latitude (median)</td></tr>'
+        '<tr><td>home_long</td><td><span class="badge badge-info">Float64</span></td><td>Home longitude (median)</td></tr>'
+        '<tr><td>age</td><td><span class="badge badge-info">Int64</span></td><td>User age</td></tr>'
+        '</table>'
+        '<div class="note">User profiles are ready for real-time serving via the scoring app.</div>'
+    )
+    await flyte.report.replace.aio(rh.wrap(html))
+    await flyte.report.flush.aio()
+
+    return await flyte.io.Dir.from_local(feast_dir)
+
+# ------------------------------------------------------------------
+# Task 3: Train XGBoost model
 # ------------------------------------------------------------------
 
 @env.task(report=True)
 async def train_model(
     data_dir: flyte.io.Dir,
+    feast_dir: flyte.io.Dir,
     n_estimators: int = 300,
     max_depth: int = 6,
     learning_rate: float = 0.1,
     min_child_weight: int = 5,
     gamma: float = 1.0,
 ) -> flyte.io.File:
-    """Train an XGBoost classifier on the prepared dataset."""
+    """Train an XGBoost classifier using Feast for feature retrieval."""
+    from feast import FeatureStore
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
     from xgboost import XGBClassifier
 
     data_path = await data_dir.download()
+    feast_path = await feast_dir.download()
     txn_df = pd.read_parquet(os.path.join(data_path, "transactions.parquet"))
-    user_df = pd.read_parquet(os.path.join(data_path, "user_features.parquet"))
 
     with open(os.path.join(data_path, "category_mapping.json")) as f:
         category_mapping = json.load(f)
 
-    # Join user-level aggregates onto transactions
-    training_data = txn_df.merge(
-        user_df[["user_id"] + USER_FEATURE_COLS],
-        on="user_id",
-        how="left",
+    # Fetch user features from Feast (same path as serving)
+    store = FeatureStore(repo_path=feast_path)
+    entity_df = txn_df[["user_id", "event_timestamp"]].copy()
+
+    log.info("Fetching user features from Feast (get_historical_features)...")
+    training_data = store.get_historical_features(
+        entity_df=entity_df,
+        features=[
+            "user_stats:txn_count",
+            "user_stats:mean_amt",
+            "user_stats:std_amt",
+            "user_stats:max_amt",
+            "user_stats:home_lat",
+            "user_stats:home_long",
+            "user_stats:age",
+        ],
+    ).to_df()
+
+    # Merge back transaction features (Feast only returns user profile)
+    training_data = training_data.merge(
+        txn_df[["user_id", "event_timestamp", "amt", "amt_log", "category_encoded",
+                "merch_lat", "merch_long", "hour", "day_of_week", "is_fraud"]],
+        on=["user_id", "event_timestamp"],
+        how="inner",
     )
 
-    # Derived features — compare this transaction to the user's profile
+    # Derived features: compare this transaction to the user's profile
     training_data["amt_zscore"] = (
         (training_data["amt"] - training_data["mean_amt"])
         / training_data["std_amt"].replace(0, 1)
@@ -302,118 +462,11 @@ async def train_model(
     return await flyte.io.File.from_local(model_path)
 
 
-# ------------------------------------------------------------------
-# Task 3: Set up Feast and materialize user profiles to online store
-# ------------------------------------------------------------------
 
-@env.task(report=True)
-async def materialize_features(data_dir: flyte.io.Dir) -> flyte.io.Dir:
-    """Apply Feast definitions and materialize user profiles to SQLite online store."""
-    from feast import Entity, FeatureStore, FeatureView, Field, FileSource
-    from feast.types import Float64, Int64
-
-    data_path = await data_dir.download()
-
-    # Create a self-contained Feast repo in a temp directory
-    feast_dir = tempfile.mkdtemp()
-
-    # Write feature_store.yaml
-    yaml_content = (
-        "project: fraud_detection\n"
-        f"registry: {feast_dir}/registry.db\n"
-        "provider: local\n"
-        "online_store:\n"
-        "  type: sqlite\n"
-        f"  path: {feast_dir}/online_store.db\n"
-        "offline_store:\n"
-        "  type: file\n"
-        "entity_key_serialization_version: 3\n"
-    )
-    yaml_path = os.path.join(feast_dir, "feature_store.yaml")
-    with open(yaml_path, "w") as f:
-        f.write(yaml_content)
-
-    store = FeatureStore(repo_path=feast_dir)
-
-    # Define entity and feature view
-    user = Entity(name="user", join_keys=["user_id"], description="Credit card holder")
-
-    user_source = FileSource(
-        path=os.path.join(data_path, "user_features.parquet"),
-        timestamp_field="event_timestamp",
-    )
-
-    user_stats = FeatureView(
-        name="user_stats",
-        entities=[user],
-        ttl=timedelta(days=0),  # No expiry — workshop data has old timestamps
-        schema=[
-            Field(name="txn_count", dtype=Int64),
-            Field(name="mean_amt", dtype=Float64),
-            Field(name="std_amt", dtype=Float64),
-            Field(name="max_amt", dtype=Float64),
-            Field(name="home_lat", dtype=Float64),
-            Field(name="home_long", dtype=Float64),
-            Field(name="age", dtype=Int64),
-        ],
-        online=True,
-        source=user_source,
-    )
-
-    # Apply and materialize
-    log.info("Applying Feast definitions...")
-    store.apply([user, user_stats])
-
-    log.info("Materializing user profiles to online store...")
-    store.materialize(
-        start_date=datetime(2018, 1, 1, tzinfo=timezone.utc),
-        end_date=datetime.now(timezone.utc),
-    )
-
-    # Rewrite feature_store.yaml with relative paths for portability
-    portable_yaml = (
-        "project: fraud_detection\n"
-        "registry: registry.db\n"
-        "provider: local\n"
-        "online_store:\n"
-        "  type: sqlite\n"
-        "  path: online_store.db\n"
-        "offline_store:\n"
-        "  type: file\n"
-        "entity_key_serialization_version: 3\n"
-    )
-    with open(yaml_path, "w") as f:
-        f.write(portable_yaml)
-
-    features = ["txn_count", "mean_amt", "std_amt", "max_amt", "home_lat", "home_long", "age"]
-    html = (
-        '<h2>Feature Store Materialized</h2>'
-        + rh.stat_grid([
-            ("user_stats", "Feature View"),
-            (str(len(features)), "Features"),
-            ("SQLite", "Online Store"),
-        ])
-        + '<h3>Materialized Features</h3>'
-        '<table>'
-        '<tr><th>Feature</th><th>Type</th><th>Description</th></tr>'
-        '<tr><td>txn_count</td><td><span class="badge badge-info">Int64</span></td><td>Total transactions</td></tr>'
-        '<tr><td>mean_amt</td><td><span class="badge badge-info">Float64</span></td><td>Average transaction amount</td></tr>'
-        '<tr><td>std_amt</td><td><span class="badge badge-info">Float64</span></td><td>Std dev of amounts</td></tr>'
-        '<tr><td>max_amt</td><td><span class="badge badge-info">Float64</span></td><td>Max transaction amount</td></tr>'
-        '<tr><td>home_lat</td><td><span class="badge badge-info">Float64</span></td><td>Home latitude (median)</td></tr>'
-        '<tr><td>home_long</td><td><span class="badge badge-info">Float64</span></td><td>Home longitude (median)</td></tr>'
-        '<tr><td>age</td><td><span class="badge badge-info">Int64</span></td><td>User age</td></tr>'
-        '</table>'
-        '<div class="note">User profiles are ready for real-time serving via the scoring app.</div>'
-    )
-    await flyte.report.replace.aio(rh.wrap(html))
-    await flyte.report.flush.aio()
-
-    return await flyte.io.Dir.from_local(feast_dir)
 
 
 # ------------------------------------------------------------------
-# Orchestrator: prepare → train + materialize → done
+# Orchestrator: prepare → materialize → train
 # ------------------------------------------------------------------
 
 @env.task(report=True)
@@ -427,11 +480,12 @@ async def fraud_detection_pipeline(
     """
     Full fraud detection pipeline:
     1. Download and prepare data
-    2. Train model + materialize features (in parallel)
+    2. Materialize user profiles to Feast
+    3. Train model using Feast for feature retrieval
     Returns model file and Feast artifacts for serving.
     """
     log.info("Starting fraud detection pipeline")
-    steps = ["Prepare Data", "Train Model", "Materialize Features", "Done"]
+    steps = ["Prepare Data", "Materialize Features", "Train Model", "Done"]
 
     html = '<h2>Fraud Detection Pipeline</h2>' + rh.pipeline_step_indicator(0, steps)
     await flyte.report.replace.aio(rh.wrap(html))
@@ -443,17 +497,22 @@ async def fraud_detection_pipeline(
     await flyte.report.replace.aio(rh.wrap(html))
     await flyte.report.flush.aio()
 
-    # Train model and materialize features in parallel
-    model_file, feast_dir = await asyncio.gather(
-        train_model(
-            data_dir,
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            learning_rate=learning_rate,
-            min_child_weight=min_child_weight,
-            gamma=gamma,
-        ),
-        materialize_features(data_dir),
+    # Materialize features first so training can use Feast
+    feast_dir = await materialize_features(data_dir)
+
+    html = '<h2>Fraud Detection Pipeline</h2>' + rh.pipeline_step_indicator(2, steps)
+    await flyte.report.replace.aio(rh.wrap(html))
+    await flyte.report.flush.aio()
+
+    # Train model using Feast for user feature retrieval
+    model_file = await train_model(
+        data_dir,
+        feast_dir,
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        min_child_weight=min_child_weight,
+        gamma=gamma,
     )
 
     # Save copies to working directory for local app testing

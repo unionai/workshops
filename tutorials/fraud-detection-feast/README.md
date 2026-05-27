@@ -74,11 +74,11 @@ flyte run --local --tui workflow.py fraud_detection_pipeline
 
 1. **`prepare_data`** — Downloads the Sparkov credit card fraud dataset (~500K transactions), engineers features (amount log, category encoding, distance, user aggregates), saves as parquets.
 
-2. **`train_model`** — Joins transaction + user features, computes derived features (amount z-score, distance from home), trains XGBoost with `scale_pos_weight` for class imbalance. Reports AUC-ROC, confusion matrix, and feature importance. Outputs `model.joblib`.
+2. **`materialize_features`** — Creates a Feast feature store, materializes user spending profiles (avg amount, txn count, home location, age) to a SQLite online store. Outputs `feast_artifacts/`.
 
-3. **`materialize_features`** — Creates a Feast feature store, materializes user spending profiles (avg amount, txn count, home location, age) to a SQLite online store. Outputs `feast_artifacts/`.
+3. **`train_model`** — Fetches user features from Feast via `get_historical_features()` (the same features used at serving time), computes derived features (amount z-score, distance from home), trains XGBoost with `scale_pos_weight` for class imbalance. Reports AUC-ROC, confusion matrix, and feature importance. Outputs `model.joblib`.
 
-Steps 2 and 3 run **in parallel** since they both depend only on step 1.
+Features are materialized **before** training so the model trains on the same Feast features that the scoring app uses at serving time. This guarantees no training-serving skew.
 
 ---
 
