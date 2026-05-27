@@ -22,7 +22,7 @@ import uvicorn
 from fastapi import FastAPI
 
 import flyte
-from flyte.app import Parameter
+from flyte.app import AppEndpoint, Parameter
 from flyte.app.extras import FastAPIAppEnvironment
 
 logging.basicConfig(level=logging.INFO)
@@ -210,7 +210,7 @@ demo_env = FastAPIAppEnvironment(
     parameters=[
         Parameter(
             name="api_url",
-            value="https://sparkling-dew-5ccf3.apps.demo.hosted.unionai.cloud",
+            value=AppEndpoint(app_name="fraud-scorer"),
             env_var=API_URL_ENV,
         ),
     ],

@@ -6,7 +6,7 @@ joblib
 pandas
 pyarrow
 python-dotenv
-kagglehub
+kagglehub==0.3.12
 gradio
 unionai-reuse
 textual

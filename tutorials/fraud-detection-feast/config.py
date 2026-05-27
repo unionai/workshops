@@ -8,7 +8,7 @@ base_env = flyte.TaskEnvironment(
     image=flyte.Image.from_debian_base().with_pip_packages(
         "feast", "scikit-learn", "xgboost", "joblib",
         "pandas", "pyarrow", "python-dotenv",
-        "kagglehub",
+        "kagglehub==0.3.12",
     ),
     resources=flyte.Resources(cpu=2, memory="4Gi"),
 )

@@ -7,9 +7,11 @@ Simulates a real payment fraud detection flow:
   - All features are combined and scored by the trained XGBoost model
 
 Remote: flyte deploy app.py serving_env
+        flyte deploy app.py serving_env -- --run-name <run_name>
 Local:  python app.py  (requires running the pipeline first)
 """
 
+import argparse
 import math
 import os
 import logging
@@ -262,13 +264,23 @@ async def health() -> dict:
 
 
 if __name__ == "__main__":
-    # Local: skip RunOutput resolution — lifespan falls back to local paths
-    serving_env.parameters = []
+    parser = argparse.ArgumentParser(description="Fraud scoring app")
+    parser.add_argument("--run-name", help="Pin to a specific pipeline run (default: latest)")
+    args = parser.parse_args()
 
-    # Point to local artifacts (from running the pipeline locally)
-    if not os.environ.get(MODEL_PATH_ENV):
-        print("Note: Set MODEL_PATH and FEAST_DIR env vars, or run the pipeline first.")
-        print("Example: MODEL_PATH=model.joblib FEAST_DIR=feast_artifacts python app.py")
+    if args.run_name:
+        # Pin RunOutput to a specific pipeline run
+        for p in serving_env.parameters:
+            p.value = RunOutput(run_name=args.run_name, type=p.value.type, getter=p.value.getter)
+        print(f"Using artifacts from run: {args.run_name}")
+    else:
+        # Local: skip RunOutput resolution — lifespan falls back to local paths
+        serving_env.parameters = []
+
+        # Point to local artifacts (from running the pipeline locally)
+        if not os.environ.get(MODEL_PATH_ENV):
+            print("Note: Set MODEL_PATH and FEAST_DIR env vars, or run the pipeline first.")
+            print("Example: MODEL_PATH=model.joblib FEAST_DIR=feast_artifacts python app.py")
 
     serve_ctx = flyte.with_servecontext(mode="local")
     local_app = serve_ctx.serve(serving_env)

@@ -135,10 +135,14 @@ flyte run workflow.py fraud_detection_pipeline
 The app uses `RunOutput` to automatically pull the latest model and Feast artifacts from the pipeline:
 
 ```bash
+# Deploy with latest pipeline artifacts
 flyte deploy app.py serving_env
+
+# Pin to a specific pipeline run
+flyte deploy app.py serving_env -- --run-name <run_name>
 ```
 
-Every time you retrain (re-run the pipeline), redeploying the app picks up the new model automatically.
+Every time you retrain (re-run the pipeline), redeploying the app picks up the new model automatically. Pass `--run-name` to pin to a specific version (useful for rollbacks or A/B testing).
 
 ### Test the remote endpoint
 
