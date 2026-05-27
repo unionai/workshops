@@ -145,10 +145,10 @@ The app uses `RunOutput` to automatically pull the latest model and Feast artifa
 flyte deploy app.py serving_env
 
 # Pin to a specific pipeline run
-flyte deploy app.py serving_env -- --run-name <run_name>
+RUN_NAME=<run_name> flyte deploy app.py serving_env
 ```
 
-Every time you retrain (re-run the pipeline), redeploying the app picks up the new model automatically. Pass `--run-name` to pin to a specific version (useful for rollbacks or A/B testing).
+Every time you retrain (re-run the pipeline), redeploying the app picks up the new model automatically. Set `RUN_NAME` to pin to a specific version (useful for rollbacks or A/B testing).
 
 ### Test the remote endpoint
 
@@ -220,7 +220,7 @@ Parameter(
 )
 ```
 
-This means every time you retrain (re-run the pipeline), deploying the app picks up the new model automatically.
+This means every time you retrain (re-run the pipeline), deploying the app picks up the new model automatically. To pin to a specific run: `RUN_NAME=<run_name> flyte deploy app.py serving_env`.
 
 ### XGBoost Configuration
 

@@ -11,7 +11,6 @@ Remote: flyte deploy app.py serving_env
 Local:  python app.py  (requires running the pipeline first)
 """
 
-import argparse
 import math
 import os
 import logging
@@ -86,6 +85,19 @@ app = FastAPI(title="Fraud Scorer", lifespan=lifespan)
 # The task name follows the pattern: "{env_name}.{function_name}"
 PIPELINE_TASK = "fraud-detection-env.fraud_detection_pipeline"
 
+# Pin to a specific pipeline run via env var:
+#   RUN_NAME=r94jl7hxd7vxk6gdprwx flyte deploy app.py serving_env
+# Default: pull from the latest pipeline run
+_run_name = os.environ.get("RUN_NAME")
+
+if _run_name:
+    _model_output = RunOutput(run_name=_run_name, type="file", getter=(0,))
+    _feast_output = RunOutput(run_name=_run_name, type="directory", getter=(1,))
+    logger.info(f"Pinned to run: {_run_name}")
+else:
+    _model_output = RunOutput(task_name=PIPELINE_TASK, type="file", getter=(0,))
+    _feast_output = RunOutput(task_name=PIPELINE_TASK, type="directory", getter=(1,))
+
 serving_env = FastAPIAppEnvironment(
     name="fraud-scorer",
     app=app,
@@ -94,14 +106,14 @@ serving_env = FastAPIAppEnvironment(
         # Model file — output[0] from fraud_detection_pipeline
         Parameter(
             name="model",
-            value=RunOutput(task_name=PIPELINE_TASK, type="file", getter=(0,)),
+            value=_model_output,
             download=True,
             env_var=MODEL_PATH_ENV,
         ),
         # Feast artifacts directory — output[1] from fraud_detection_pipeline
         Parameter(
             name="feast_store",
-            value=RunOutput(task_name=PIPELINE_TASK, type="directory", getter=(1,)),
+            value=_feast_output,
             download=True,
             env_var=FEAST_DIR_ENV,
         ),
@@ -264,23 +276,12 @@ async def health() -> dict:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fraud scoring app")
-    parser.add_argument("--run-name", help="Pin to a specific pipeline run (default: latest)")
-    args = parser.parse_args()
+    # Local: skip RunOutput resolution, lifespan falls back to local paths
+    serving_env.parameters = []
 
-    if args.run_name:
-        # Pin RunOutput to a specific pipeline run
-        for p in serving_env.parameters:
-            p.value = RunOutput(run_name=args.run_name, type=p.value.type, getter=p.value.getter)
-        print(f"Using artifacts from run: {args.run_name}")
-    else:
-        # Local: skip RunOutput resolution — lifespan falls back to local paths
-        serving_env.parameters = []
-
-        # Point to local artifacts (from running the pipeline locally)
-        if not os.environ.get(MODEL_PATH_ENV):
-            print("Note: Set MODEL_PATH and FEAST_DIR env vars, or run the pipeline first.")
-            print("Example: MODEL_PATH=model.joblib FEAST_DIR=feast_artifacts python app.py")
+    if not os.environ.get(MODEL_PATH_ENV):
+        print("Note: Set MODEL_PATH and FEAST_DIR env vars, or run the pipeline first.")
+        print("Example: MODEL_PATH=model.joblib FEAST_DIR=feast_artifacts python app.py")
 
     serve_ctx = flyte.with_servecontext(mode="local")
     local_app = serve_ctx.serve(serving_env)

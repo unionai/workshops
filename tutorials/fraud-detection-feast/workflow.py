@@ -188,7 +188,14 @@ async def prepare_data() -> flyte.io.Dir:
 # ------------------------------------------------------------------
 
 @env.task(report=True)
-async def train_model(data_dir: flyte.io.Dir) -> flyte.io.File:
+async def train_model(
+    data_dir: flyte.io.Dir,
+    n_estimators: int = 300,
+    max_depth: int = 6,
+    learning_rate: float = 0.1,
+    min_child_weight: int = 5,
+    gamma: float = 1.0,
+) -> flyte.io.File:
     """Train an XGBoost classifier on the prepared dataset."""
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
@@ -235,12 +242,12 @@ async def train_model(data_dir: flyte.io.Dir) -> flyte.io.File:
     scale_pos_weight = n_legit / max(n_fraud, 1)
 
     model = XGBClassifier(
-        n_estimators=300,
-        max_depth=6,
-        learning_rate=0.1,
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
         scale_pos_weight=scale_pos_weight,
-        min_child_weight=5,
-        gamma=1,
+        min_child_weight=min_child_weight,
+        gamma=gamma,
         random_state=42,
         eval_metric="logloss",
     )
@@ -410,7 +417,13 @@ async def materialize_features(data_dir: flyte.io.Dir) -> flyte.io.Dir:
 # ------------------------------------------------------------------
 
 @env.task(report=True)
-async def fraud_detection_pipeline() -> tuple[flyte.io.File, flyte.io.Dir]:
+async def fraud_detection_pipeline(
+    n_estimators: int = 300,
+    max_depth: int = 6,
+    learning_rate: float = 0.1,
+    min_child_weight: int = 5,
+    gamma: float = 1.0,
+) -> tuple[flyte.io.File, flyte.io.Dir]:
     """
     Full fraud detection pipeline:
     1. Download and prepare data
@@ -432,7 +445,14 @@ async def fraud_detection_pipeline() -> tuple[flyte.io.File, flyte.io.Dir]:
 
     # Train model and materialize features in parallel
     model_file, feast_dir = await asyncio.gather(
-        train_model(data_dir),
+        train_model(
+            data_dir,
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            min_child_weight=min_child_weight,
+            gamma=gamma,
+        ),
         materialize_features(data_dir),
     )
 
