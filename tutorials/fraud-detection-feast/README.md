@@ -217,6 +217,39 @@ Parameter(
 
 This means every time you retrain (re-run the pipeline), deploying the app picks up the new model automatically.
 
+### XGBoost Configuration
+
+The model uses [XGBoost](https://xgboost.readthedocs.io/) — a gradient-boosted tree algorithm that's a go-to for tabular fraud detection. The key parameters:
+
+| Parameter | Value | Why |
+|-----------|-------|-----|
+| `n_estimators` | 300 | More trees = better separation between fraud/legit |
+| `max_depth` | 6 | Deep enough to learn complex patterns without overfitting |
+| `scale_pos_weight` | auto | Compensates for class imbalance (~0.6% fraud) by upweighting fraud samples |
+| `min_child_weight` | 5 | Prevents splits on tiny groups — reduces false positives |
+| `gamma` | 1 | Regularization that prunes weak splits — further reduces false positives |
+
+The `min_child_weight` and `gamma` parameters are the key tuning knobs for fraud precision. Without them, the model over-triggers on edge cases (33% precision). With them, precision jumps to ~62% while recall stays above 90%.
+
+Tree-based models like XGBoost can't extrapolate beyond their training data ranges, so the scoring app adds **rule overrides** for extreme cases (e.g., z-score > 10 + distance > 500mi). This is standard practice in production fraud systems.
+
+### Understanding the Metrics
+
+Fraud detection is an imbalanced classification problem — only ~0.6% of transactions are fraud. The standard metrics tell different parts of the story:
+
+| Metric | What it measures | Fraud detection context |
+|--------|-----------------|----------------------|
+| **Precision** | Of all transactions flagged as fraud, how many actually were? | Low precision = too many false alarms, frustrating legitimate customers |
+| **Recall** | Of all actual fraud, how much did we catch? | Low recall = fraud slipping through undetected |
+| **AUC-ROC** | Overall ability to distinguish fraud from legit across all thresholds | High AUC = the model has learned meaningful patterns |
+| **False Positives** | Legit transactions incorrectly flagged as fraud | Each one is a blocked card or a phone call to a confused customer |
+
+There's always a **precision-recall tradeoff** — catching more fraud (higher recall) means casting a wider net, which flags more legitimate transactions too (lower precision). The right balance depends on your business:
+
+- **Banks** tend to favor recall — missing fraud is expensive (chargebacks, liability, trust)
+- **E-commerce** may favor precision — blocking legitimate purchases costs revenue
+- **Rule overrides** in the scoring app act as a safety net for cases the model can't handle
+
 ### Feature Engineering
 
 The model uses three types of features:

@@ -235,10 +235,12 @@ async def train_model(data_dir: flyte.io.Dir) -> flyte.io.File:
     scale_pos_weight = n_legit / max(n_fraud, 1)
 
     model = XGBClassifier(
-        n_estimators=100,
+        n_estimators=300,
         max_depth=6,
         learning_rate=0.1,
         scale_pos_weight=scale_pos_weight,
+        min_child_weight=5,
+        gamma=1,
         random_state=42,
         eval_metric="logloss",
     )
