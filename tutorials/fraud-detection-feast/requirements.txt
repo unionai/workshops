@@ -1,12 +1,12 @@
-feast
+feast==0.63.0
 flyte[tui]>=2.0.0
-scikit-learn
-xgboost
+scikit-learn==1.8.0
+xgboost==3.2.0
 joblib
 pandas
 pyarrow
 python-dotenv
 kagglehub==0.3.12
-gradio
+gradio==6.15.0
 unionai-reuse
 textual

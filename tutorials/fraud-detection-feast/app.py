@@ -108,7 +108,7 @@ serving_env = FastAPIAppEnvironment(
     ],
     image=flyte.Image.from_debian_base().with_pip_packages(
         "fastapi", "uvicorn", "joblib",
-        "feast", "scikit-learn", "xgboost",
+        "feast==0.63.0", "scikit-learn==1.8.0", "xgboost==3.2.0",
         "pandas", "pyarrow",
     ),
     resources=flyte.Resources(cpu=2, memory="4Gi"),

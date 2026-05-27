@@ -218,7 +218,7 @@ dashboard_env = FastAPIAppEnvironment(
     # Factory pattern: uvicorn creates the full app (with Gradio) on the worker
     uvicorn_config=uvicorn.Config("dashboard:create_app", factory=True, port=8080),
     image=flyte.Image.from_debian_base().with_pip_packages(
-        "gradio", "requests", "fastapi", "uvicorn",
+        "gradio==6.15.0", "requests", "fastapi", "uvicorn",
     ),
     resources=flyte.Resources(cpu=1, memory="1Gi"),
     requires_auth=False,

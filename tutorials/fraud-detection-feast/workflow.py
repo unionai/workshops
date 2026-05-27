@@ -32,6 +32,7 @@ import flyte
 import flyte.io
 import flyte.report
 from config import base_env
+import report_helpers as rh
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -162,15 +163,21 @@ async def prepare_data() -> flyte.io.Dir:
     with open(os.path.join(data_dir, "user_mapping.json"), "w") as f:
         json.dump({str(k): v for k, v in cc_to_user.items()}, f)
 
+    n_fraud = int(df["is_fraud"].sum())
+    n_legit = len(df) - n_fraud
     fraud_pct = df["is_fraud"].mean() * 100
     html = (
-        f"<h2>Data Prepared</h2>"
-        f"<p><b>Transactions:</b> {len(df):,}</p>"
-        f"<p><b>Fraudulent:</b> {int(df['is_fraud'].sum()):,} ({fraud_pct:.2f}%)</p>"
-        f"<p><b>Users:</b> {user_stats['user_id'].nunique():,}</p>"
-        f"<p><b>Categories:</b> {len(categories)}</p>"
+        '<h2>Data Prepared</h2>'
+        + rh.stat_grid([
+            (f"{len(df):,}", "Transactions"),
+            (f"{n_fraud:,}", "Fraudulent"),
+            (f"{fraud_pct:.2f}%", "Fraud Rate"),
+            (f"{user_stats['user_id'].nunique():,}", "Users"),
+            (f"{len(categories)}", "Categories"),
+        ])
+        + rh.class_distribution_bar(n_legit, n_fraud)
     )
-    await flyte.report.replace.aio(html)
+    await flyte.report.replace.aio(rh.wrap(html))
     await flyte.report.flush.aio()
 
     return await flyte.io.Dir.from_local(data_dir)
@@ -248,27 +255,30 @@ async def train_model(data_dir: flyte.io.Dir) -> flyte.io.File:
     log.info(f"\n{report}")
 
     # Report
+    precision_fraud = cm[1][1] / max(cm[1][1] + cm[0][1], 1) * 100
+    recall_fraud = cm[1][1] / max(cm[1][1] + cm[1][0], 1) * 100
+
     html = (
-        f"<h2>Model Performance</h2>"
-        f"<p><b>AUC-ROC:</b> {auc:.4f}</p>"
-        f"<h3>Confusion Matrix</h3>"
-        f"<table border='1' cellpadding='8'>"
-        f"<tr><th></th><th>Predicted Legit</th><th>Predicted Fraud</th></tr>"
-        f"<tr><td><b>Actual Legit</b></td><td>{cm[0][0]:,}</td><td>{cm[0][1]:,}</td></tr>"
-        f"<tr><td><b>Actual Fraud</b></td><td>{cm[1][0]:,}</td><td>{cm[1][1]:,}</td></tr>"
-        f"</table>"
-        f"<h3>Classification Report</h3>"
-        f"<pre>{report}</pre>"
+        '<h2>Model Performance</h2>'
+        + rh.stat_grid([
+            (f"{auc:.4f}", "AUC-ROC"),
+            (f"{len(X_train):,}", "Training Samples"),
+            (f"{len(X_test):,}", "Test Samples"),
+            (f"{precision_fraud:.1f}%", "Fraud Precision"),
+            (f"{recall_fraud:.1f}%", "Fraud Recall"),
+        ])
+        + rh.confusion_matrix_html(cm)
     )
 
+    # Feature importance bar chart
     importance = model.feature_importances_
     top_idx = np.argsort(importance)[::-1]
-    html += "<h3>Feature Importance</h3><ol>"
-    for i in top_idx:
-        html += f"<li>{ALL_FEATURE_COLS[i]}: {importance[i]:.4f}</li>"
-    html += "</ol>"
+    top_labels = [ALL_FEATURE_COLS[i] for i in top_idx]
+    top_values = [float(importance[i]) for i in top_idx]
+    html += '<h3>Feature Importance</h3>'
+    html += f'<div class="card">{rh.horizontal_bar_chart(top_labels, top_values)}</div>'
 
-    await flyte.report.replace.aio(html)
+    await flyte.report.replace.aio(rh.wrap(html))
     await flyte.report.flush.aio()
 
     # Save model + metadata
@@ -366,13 +376,28 @@ async def materialize_features(data_dir: flyte.io.Dir) -> flyte.io.Dir:
     with open(yaml_path, "w") as f:
         f.write(portable_yaml)
 
+    features = ["txn_count", "mean_amt", "std_amt", "max_amt", "home_lat", "home_long", "age"]
     html = (
-        f"<h2>Feature Store Materialized</h2>"
-        f"<p><b>Feature view:</b> user_stats (spending profile + location + age)</p>"
-        f"<p><b>Online store:</b> SQLite</p>"
-        f"<p>User profiles are ready for real-time serving.</p>"
+        '<h2>Feature Store Materialized</h2>'
+        + rh.stat_grid([
+            ("user_stats", "Feature View"),
+            (str(len(features)), "Features"),
+            ("SQLite", "Online Store"),
+        ])
+        + '<h3>Materialized Features</h3>'
+        '<table>'
+        '<tr><th>Feature</th><th>Type</th><th>Description</th></tr>'
+        '<tr><td>txn_count</td><td><span class="badge badge-info">Int64</span></td><td>Total transactions</td></tr>'
+        '<tr><td>mean_amt</td><td><span class="badge badge-info">Float64</span></td><td>Average transaction amount</td></tr>'
+        '<tr><td>std_amt</td><td><span class="badge badge-info">Float64</span></td><td>Std dev of amounts</td></tr>'
+        '<tr><td>max_amt</td><td><span class="badge badge-info">Float64</span></td><td>Max transaction amount</td></tr>'
+        '<tr><td>home_lat</td><td><span class="badge badge-info">Float64</span></td><td>Home latitude (median)</td></tr>'
+        '<tr><td>home_long</td><td><span class="badge badge-info">Float64</span></td><td>Home longitude (median)</td></tr>'
+        '<tr><td>age</td><td><span class="badge badge-info">Int64</span></td><td>User age</td></tr>'
+        '</table>'
+        '<div class="note">User profiles are ready for real-time serving via the scoring app.</div>'
     )
-    await flyte.report.replace.aio(html)
+    await flyte.report.replace.aio(rh.wrap(html))
     await flyte.report.flush.aio()
 
     return await flyte.io.Dir.from_local(feast_dir)
@@ -391,13 +416,16 @@ async def fraud_detection_pipeline() -> tuple[flyte.io.File, flyte.io.Dir]:
     Returns model file and Feast artifacts for serving.
     """
     log.info("Starting fraud detection pipeline")
+    steps = ["Prepare Data", "Train Model", "Materialize Features", "Done"]
 
-    await flyte.report.replace.aio("<h2>Fraud Detection Pipeline</h2><p>Preparing data...</p>")
+    html = '<h2>Fraud Detection Pipeline</h2>' + rh.pipeline_step_indicator(0, steps)
+    await flyte.report.replace.aio(rh.wrap(html))
     await flyte.report.flush.aio()
 
     data_dir = await prepare_data()
 
-    await flyte.report.replace.aio("<h2>Fraud Detection Pipeline</h2><p>Training model + materializing features...</p>")
+    html = '<h2>Fraud Detection Pipeline</h2>' + rh.pipeline_step_indicator(1, steps)
+    await flyte.report.replace.aio(rh.wrap(html))
     await flyte.report.flush.aio()
 
     # Train model and materialize features in parallel
@@ -415,12 +443,20 @@ async def fraud_detection_pipeline() -> tuple[flyte.io.File, flyte.io.Dir]:
     shutil.copytree(feast_local, "feast_artifacts")
     log.info("Saved local copies: model.joblib, feast_artifacts/")
 
-    await flyte.report.replace.aio(
-        f"<h2>Pipeline Complete</h2>"
-        f"<p>Model and feature store artifacts are ready for serving.</p>"
-        f"<p><b>Local:</b> <code>python app.py</code></p>"
-        f"<p><b>Remote:</b> <code>flyte deploy app.py serving_env</code></p>"
+    html = (
+        '<h2>Fraud Detection Pipeline</h2>'
+        + rh.pipeline_step_indicator(4, steps)
+        + '<div class="card">'
+        '<div style="font-weight:600;color:#155724;font-size:1.1em;margin-bottom:8px;">Pipeline Complete</div>'
+        '<p>Model and feature store artifacts are ready for serving.</p>'
+        '<table>'
+        '<tr><th>Next Step</th><th>Command</th></tr>'
+        '<tr><td>Run locally</td><td><code>python app.py</code></td></tr>'
+        '<tr><td>Deploy scoring app</td><td><code>flyte deploy app.py serving_env</code></td></tr>'
+        '<tr><td>Deploy dashboard</td><td><code>flyte deploy dashboard.py dashboard_env</code></td></tr>'
+        '</table></div>'
     )
+    await flyte.report.replace.aio(rh.wrap(html))
     await flyte.report.flush.aio()
 
     log.info("Pipeline complete")

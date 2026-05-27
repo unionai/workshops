@@ -26,6 +26,7 @@ fraud-detection-feast/
 ├── config.py               # Flyte environment config
 ├── prep.py                 # Standalone data prep (optional, for local dev)
 ├── workflow.py             # Flyte tasks: prepare, train, materialize
+├── report_helpers.py       # Styled HTML report components
 ├── app.py                  # FastAPI scoring app (consumes pipeline artifacts)
 └── dashboard.py            # Gradio dashboard for interactive fraud scoring
 ```
