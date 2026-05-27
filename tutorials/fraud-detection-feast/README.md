@@ -2,6 +2,11 @@
 
 A fraud detection ML pipeline that uses **Feast** as a feature store and **Flyte** for orchestration. Uses the Sparkov simulated credit card transactions dataset — real merchant categories, locations, amounts, and user profiles.
 
+<a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/fraud-detection-feast/ml-fraud-tutorial.ipynb">
+  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
+</a>
+
+
 ```
 fraud_detection_pipeline (orchestrator)
   ├── prepare_data           → download dataset, engineer features
