@@ -10,8 +10,8 @@ A fraud detection ML pipeline that uses **Feast** as a feature store and **Flyte
 ```
 fraud_detection_pipeline (orchestrator)
   ├── prepare_data           → download dataset, engineer features
-  ├── train_model            → XGBoost classifier ──────────────→ model.joblib
-  └── materialize_features   → feast apply + materialize ───────→ feast_artifacts/
+  ├── materialize_features   → Feast apply + materialize ───────→ feast_artifacts/
+  └── train_model            → fetch from Feast, train XGBoost ─→ model.joblib
 
 fraud-scorer (app)
   ├── loads model + feast artifacts from pipeline (RunOutput)
