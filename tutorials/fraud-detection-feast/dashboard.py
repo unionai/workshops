@@ -1,19 +1,20 @@
-"""Gradio frontend for the fraud scoring API.
+"""Fraud detection dashboard — interactive UI for the scoring API.
 
 Connects to the deployed scoring endpoint (or local app.py) and provides
-an interactive UI for testing transactions.
+an interactive UI for reviewing and testing transactions.
 
 Usage:
     # Local (run `python app.py` in another terminal first)
-    python demo.py
+    python dashboard.py
 
     # Against remote scoring API
-    API_URL=https://sparkling-dew-5ccf3.apps.demo.hosted.unionai.cloud python demo.py
+    API_URL=https://<app-url> python dashboard.py
 
     # Deploy to Flyte
-    flyte deploy demo.py demo_env
+    flyte deploy dashboard.py dashboard_env
 """
 
+import argparse
 import os
 import logging
 import requests
@@ -117,8 +118,8 @@ def score_transaction(user_id, amt, category, merch_lat, merch_long, hour, day_o
 
 def build_gradio_app():
     """Build the Gradio Blocks app."""
-    with gr.Blocks(title="Fraud Detector", theme=gr.themes.Soft()) as blocks:
-        gr.Markdown("# Fraud Detection Demo\nScore transactions against the ML model + Feast feature store.")
+    with gr.Blocks(title="Fraud Detection Dashboard", theme=gr.themes.Soft()) as blocks:
+        gr.Markdown("# Fraud Detection Dashboard\nScore transactions against the ML model + Feast feature store.")
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -179,7 +180,7 @@ def build_gradio_app():
 
 def create_app():
     """Build the full FastAPI + Gradio app. Called fresh on the worker."""
-    fastapi_app = FastAPI(title="Fraud Detection Demo")
+    fastapi_app = FastAPI(title="Fraud Detection Dashboard")
 
     @fastapi_app.get("/health")
     async def health():
@@ -201,12 +202,12 @@ def create_app():
 # ------------------------------------------------------------------
 
 # Bare FastAPI app (no Gradio) — this is what Flyte pickles
-_bare_app = FastAPI(title="Fraud Detection Demo")
+_bare_app = FastAPI(title="Fraud Detection Dashboard")
 
-demo_env = FastAPIAppEnvironment(
-    name="fraud-demo",
+dashboard_env = FastAPIAppEnvironment(
+    name="fraud-dashboard",
     app=_bare_app,
-    description="Interactive Gradio UI for fraud detection scoring",
+    description="Interactive dashboard for fraud detection scoring",
     parameters=[
         Parameter(
             name="api_url",
@@ -215,7 +216,7 @@ demo_env = FastAPIAppEnvironment(
         ),
     ],
     # Factory pattern: uvicorn creates the full app (with Gradio) on the worker
-    uvicorn_config=uvicorn.Config("demo:create_app", factory=True, port=8080),
+    uvicorn_config=uvicorn.Config("dashboard:create_app", factory=True, port=8080),
     image=flyte.Image.from_debian_base().with_pip_packages(
         "gradio", "requests", "fastapi", "uvicorn",
     ),
@@ -225,6 +226,17 @@ demo_env = FastAPIAppEnvironment(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Fraud detection dashboard")
+    parser.add_argument("--api-url", help="Override scoring API URL (default: auto-discover fraud-scorer app)")
+    args = parser.parse_args()
+
+    if args.api_url:
+        # Override AppEndpoint with explicit URL for deploy
+        dashboard_env.parameters = [
+            Parameter(name="api_url", value=args.api_url, env_var=API_URL_ENV),
+        ]
+        print(f"Using scoring API: {args.api_url}")
+
     # Local: launch Gradio directly
     api_url = os.environ.get(API_URL_ENV, "http://localhost:8080")
     print(f"Scoring API: {api_url}")

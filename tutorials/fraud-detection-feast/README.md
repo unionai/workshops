@@ -27,7 +27,7 @@ fraud-detection-feast/
 ├── prep.py                 # Standalone data prep (optional, for local dev)
 ├── workflow.py             # Flyte tasks: prepare, train, materialize
 ├── app.py                  # FastAPI scoring app (consumes pipeline artifacts)
-└── demo.py                 # Gradio UI for interactive fraud scoring
+└── dashboard.py            # Gradio dashboard for interactive fraud scoring
 ```
 
 ---
@@ -152,27 +152,35 @@ curl "https://<app-url>/score?user_id=42&amt=500.00&category=grocery_pos&merch_l
 
 ---
 
-## Step 4: Gradio Demo UI
+## Step 4: Fraud Dashboard
 
-An interactive Gradio UI that calls the scoring API. Works locally and deployed.
+An interactive dashboard that calls the scoring API. Works locally and deployed.
 
 ### Run locally
 
 ```bash
 # Against local app (run `python app.py` in another terminal first)
-python demo.py
+python dashboard.py
 
 # Against remote scoring API
-API_URL=https://<app-url> python demo.py
+API_URL=https://<app-url> python dashboard.py
 ```
 
 ### Deploy to Flyte
 
+The dashboard uses `AppEndpoint` to auto-discover the scoring app URL by name — no hardcoded URLs needed:
+
 ```bash
-flyte deploy demo.py demo_env
+# Auto-discover the fraud-scorer app endpoint
+flyte deploy dashboard.py dashboard_env
+
+# Or point at a specific scoring URL
+flyte deploy dashboard.py dashboard_env -- --api-url https://<app-url>
 ```
 
-The demo uses a uvicorn factory pattern to avoid Gradio pickle issues — Flyte pickles a bare FastAPI app, but uvicorn builds the full Gradio app fresh on the worker.
+Under the hood, `AppEndpoint(app_name="fraud-scorer")` resolves the deployed scoring app's endpoint automatically. Pass `--api-url` to override (e.g., if you have multiple scoring app versions deployed).
+
+The dashboard uses a uvicorn factory pattern to avoid Gradio pickle issues — Flyte pickles a bare FastAPI app, but uvicorn builds the full Gradio app fresh on the worker.
 
 Opens a browser UI where you can adjust user ID, amount, category, and merchant location — then see the fraud prediction, risk signals, and user profile in real time.
 
