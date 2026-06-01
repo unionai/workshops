@@ -42,9 +42,48 @@ HuggingFace released [Carbon](https://github.com/huggingface/carbon) (May 2026) 
 
 | Tutorial Idea | What it does | Visuals |
 |--------------|-------------|---------|
-| **Variant Effect Prediction** (building this) | Score clinically relevant mutations (BRCA2, TP53, CFTR) as pathogenic vs benign using Carbon's zero-shot log-likelihood scoring | Mutation impact heatmaps, gene diagrams, pathogenicity classification charts |
-| **DNA Sequence Generation & Analysis** | Generate DNA with Carbon, then analyze GC content, codon usage, open reading frames, compare to real genes | Codon frequency wheels, ORF track diagrams, GC content sparklines, generated vs real sequence comparisons |
-| **Gene Comparison Across Species + DNA-to-Structure** | Embed/score homologous genes across species with Carbon, visualize evolutionary relationships, then translate to protein and fold both ref and mutant with ESMFold to show structural impact of cross-species divergence | Phylogenetic dendrograms, cross-species similarity heatmaps, embedding UMAP projections, side-by-side 3D protein structures with pLDDT coloring |
+| **Variant Effect Prediction** (done) | Score clinically relevant mutations (BRCA2, TP53, CFTR) as pathogenic vs benign using Carbon's zero-shot log-likelihood scoring | Mutation impact heatmaps, gene diagrams, pathogenicity classification charts |
+| **DNA Sequence Generation & Analysis** (done) | Generate DNA with Carbon, then analyze GC content, codon usage, open reading frames, compare to real genes | Codon frequency wheels, ORF track diagrams, GC content sparklines, generated vs real sequence comparisons |
+| **Gene Comparison Across Species + DNA-to-Structure** (done) | Embed/score homologous genes across species with Carbon, visualize evolutionary relationships, then translate to protein and fold both ref and mutant with ESMFold to show structural impact of cross-species divergence | Phylogenetic dendrograms, cross-species similarity heatmaps, embedding UMAP projections, side-by-side 3D protein structures with pLDDT coloring |
+
+## Healthcare AI Tutorials
+
+Ideas for healthcare/clinical AI demos with strong visual reports.
+
+### Medical Imaging
+
+| Tutorial Idea | Dataset | Visuals |
+|--------------|---------|---------|
+| **Chest X-Ray Triage** | CheXpert or NIH ChestX-ray14 (open) | GradCAM heatmap overlays on X-rays, multi-label classification report, per-pathology ROC curves |
+| **Retinal Disease Detection** | APTOS 2019 or Messidor (diabetic retinopathy grading) | Fundus images with severity grading (0-4), confusion matrices, confidence calibration plots |
+| **Skin Lesion Classification** | HAM10000 (dermoscopy) | Lesion images with predicted vs actual labels, melanoma vs benign ROC, GradCAM attention maps |
+
+### Clinical NLP
+
+| Tutorial Idea | Dataset | Visuals |
+|--------------|---------|---------|
+| **Medical Note Summarization** | MIMIC discharge summaries (or synthetic) | Side-by-side original vs structured extraction (diagnoses, meds, procedures), entity highlighting |
+| **Adverse Drug Event Detection** | ADE corpus or i2b2 | NER entity spans highlighted on clinical text, drug-event relation graphs |
+
+### Time Series / Signals
+
+| Tutorial Idea | Dataset | Visuals |
+|--------------|---------|---------|
+| **ECG Arrhythmia Detection** | PTB-XL (21k 12-lead ECGs, open) | 12-lead waveform SVGs, rhythm classification confusion matrix, per-lead attention heatmaps |
+| **ICU Patient Deterioration** | MIMIC vitals time series | Sparkline dashboards of vitals, real-time risk score evolution, alert threshold visualizations |
+
+### Drug & Molecular
+
+| Tutorial Idea | Dataset | Visuals |
+|--------------|---------|---------|
+| **Drug-Drug Interaction Prediction** | DrugBank or TWOSIDES | Molecule pair cards, interaction severity heatmaps, drug interaction network graphs |
+| **Drug Repurposing with Embeddings** | DrugBank + disease ontologies | UMAP projections colored by therapeutic area, nearest-neighbor candidate tables, embedding similarity heatmaps |
+
+### Top 3 Picks (visual impact + demo value)
+
+1. **Chest X-Ray Triage** — Universally recognized, GradCAM heatmaps are gorgeous, CheXpert is open
+2. **ECG Arrhythmia Detection** — Signal waveforms look amazing in SVG, PTB-XL is open, everyone knows an ECG
+3. **Retinal Disease Detection** — Fundus images are visually striking, clear grading scale, real screening use case
 
 ## Notes
 

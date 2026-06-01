@@ -6,7 +6,10 @@ load_dotenv()
 
 base_env = flyte.TaskEnvironment(
     name="research-pipeline-env",
-    image=flyte.Image.from_debian_base().with_requirements("requirements.txt"),
+    image=flyte.Image.from_debian_base(
+        registry="localhost:30000"
+    ).with_requirements("requirements.txt"),
+    
     secrets=[
         flyte.Secret(key="OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
         flyte.Secret(key="TAVILY_API_KEY", as_env_var="TAVILY_API_KEY"),
