@@ -163,4 +163,4 @@ langgraph_agent_research/
 
 Every pipeline step is a visible Flyte task with its own compute, live report, and logs. The LangGraph graph nodes are thin wrappers — state in, task call, state out — while all LLM calls live in the tasks themselves.
 
-See the [blog post](blog.md) for the full walkthrough.
+See the [blog post](https://www.union.ai/blog-post/langgraph-on-flyte-orchestrate-the-logic-scale-the-compute) for the full walkthrough.
