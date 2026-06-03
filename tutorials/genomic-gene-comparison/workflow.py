@@ -1,5 +1,5 @@
 """
-Gene Comparison Across Species — Compare homologous genes with Carbon + ESMFold.
+Gene Comparison Across Species - Compare homologous genes with Carbon + ESMFold.
 
 Pipeline: load homologous gene sequences from different species, score with
 Carbon-3B to measure sequence likelihood, compute cross-species similarity,
@@ -38,98 +38,98 @@ log.setLevel(logging.INFO)
 
 
 # ------------------------------------------------------------------
-# Homologous gene sets — same gene across species
+# Homologous gene sets - same gene across species
 # ------------------------------------------------------------------
 # Real coding sequences (truncated to ~150-300bp for tractable folding).
 
 GENE_SETS = {
     "insulin": {
         "gene_name": "Insulin",
-        "description": "Insulin regulates blood sugar in all vertebrates. Highly conserved across 500M+ years of evolution — even fish insulin can lower blood sugar in humans. Comparing across species reveals which regions are functionally essential (conserved) vs free to drift.",
+        "description": "Insulin regulates blood sugar in all vertebrates. Highly conserved across 500M+ years of evolution - even fish insulin can lower blood sugar in humans. Comparing across species reveals which regions are functionally essential (conserved) vs free to drift.",
         "sequences": {
             "Human": {
                 "dna": "ATGGCCCTGTGGATGCGCCTCCTGCCCCTGCTGGCGCTGCTGGCCCTCTGGGGACCTGACCCAGCCGCAGCCTTTGTGAACCAACACCTGTGCGGCTCACACCTGGTGGAAGCTCTCTACCTAGTGTGCGGGGAACGAGGCTTCTTCTACACACCCAAGACCCGCCGGGAGGCAGAGGACCTGCAGGTGGGGCAGGTGGAGCTGGGCGGGGGCCCTGGTGCAGGCAGCCTGCAGCCCTTGGCCCTGGAG",
                 "common_name": "Homo sapiens",
             },
             "Mouse": {
-                "dna": "ATGGCCCTGTTGGTGCGCCTCCTGCCCCTGCTGGCCCTGCTGGCCCTCTGGGGACCTGACCCAGCCGCAGCCTTTGTGAACCAGCACCTGTGCGGCTCCCACCTGGTGGAAGCTCTCTACCTAGTGTGCGGGGAACGAGGCTTCTTCTACACACCCAAGGCCCGCCGGGAGGCAGAGGACCTGCAGATGGGGCAGGTGGAGCTGGGCGGGGGCCCTGGTGCAGGCAGCCTGCAGCCCTTGGCCCTGGAG",
+                "dna": "ATGGCCCTGTGGATGCGCTTCCTGCCCCTGCTGGCCCTGCTCTTCCTCTGGGAGTCCCACCCCACCCAGGCTTTTGTCAAGCAGCACCTTTGTGGTTCCCACCTGGTGGAGGCTCTCTACCTGGTGTGTGGGGAGCGTGGCTTCTTCTACACACCCATGTCCCGCCGTGAAGTGGAGGACCCACAAGTGGCACAACTGGAGCTGGGTGGAGGCCCGGGAGCAGGTGACCTTCAGACCTTGGCACTGGAG",
                 "common_name": "Mus musculus",
             },
             "Chicken": {
-                "dna": "ATGGCTCTATGGATGCGCTTCCTGCCCCTGCTGGCCCTCCTGGCCCTCTGGGGACCCAAGCCAGCCGCCGCCATCGTGAACCAGCACCTGTGCGGCTCCCACCTGGTGGAAGCCCTGTACCTAGTGTGCGGGGAGCGCGGCTTCTTCTACACCCCAAAGACCAGCCGGGAGGCCGAGGATCTGCAGGTGGGACAGGTGGAGCTGGGCGGGGGCCCCGGGGCCGGCAGCCTGCAGCCCTTGGCCCTGGAG",
+                "dna": "ATGGCTCTCTGGATCCGATCACTGCCTCTTCTGGCTCTCCTTGTCTTTTCTGGCCCTGGAACCAGCTATGCAGCTGCCAACCAGCACCTCTGTGGCTCCCACTTGGTGGAGGCTCTCTACCTGGTGTGTGGAGAGCGTGGCTTCTTCTACTCCCCCAAAGCCCGACGGGATGTCGAGCAGCCCCTAGTGAGCAGTCCCTTGCGTGGCGAGGCAGGAGTGCTGCCTTTCCAGCAGGAGGAATACGAGAAA",
                 "common_name": "Gallus gallus",
             },
             "Zebrafish": {
-                "dna": "ATGGCAGTGTGGAACCGTCTTCTGCTCTTCTTGGCGTTTTCAGCCTCCTGGGGACCAGACCCAGCTGCAGCCTTCGTCAACCAGCACCTGTGTGGCTCCCACCTGGTGGAAGCCCTGTACCTTGTGTGCGGCGAGCGCGGTTTCTTCTACACCCCAAAGACCCGTCGAGATGCCGTGGACCTGCAAGTTGGACAGGTGGAGCTGGGCGGGGGCCCCGGCGCCGGCAGCCTGCAGCCCTTGGCACTGGAG",
+                "dna": "ATGGCAGTGTGGCTTCAGGCTGGTGCTCTGTTGGTCCTGTTGGTCGTGTCCAGTGTAAGCACTAACCCAGGCACACCGCAGCACCTGTGTGGATCTCATCTGGTCGATGCCCTTTATCTGGTCTGTGGCCCAACAGGCTTCTTCTACAACCCCAAGAGAGACGTTGAGCCCCTTCTGGGTTTCCTTCCTCCTAAATCTGCCCAGGAAACTGAGGTGGCTGACTTTGCATTTAAAGATCATGCCGAGCTG",
                 "common_name": "Danio rerio",
             },
             "Frog": {
-                "dna": "ATGGCTCTATGGATGCGCTTCCTGCTCCTCCTGGCCCTCTTGGCCCTCTGGAGACCCAAACCAGCCGCCGCCATTGTGAACCAGCACCTGTGCGGCTCACATCTGGTGGAAGCTCTCTACCTAGTGTGTGGGGAGCGAGGCTTCTTCTACACACCAAAGACCCGCCGTGACGCCGAGGATCTGCAGGTGGGACAGATAGAGTTGGGCGGGGGCCCTGGAGCCGGCAGCCTGCAGCCCTTGGCTCTGGAA",
+                "dna": "ATGGCTCTATGGATGCAGTGTCTGCCCCTGGTTCTTGTCCTCTTTTTCTCTACACCCAACACCGAAGCTCTAGTTAACCAGCACTTGTGTGGGTCTCACCTGGTAGAAGCCCTGTACTTAGTATGTGGGGATCGAGGCTTCTTCTACTACCCTAAGGTCAAACGGGACATGGAACAAGCACTTGTCAGTGGACCCCAGGATAATGAGTTGGATGGAATGCAGCTCCAGCCTCAGGAGTATCAGAAAATG",
                 "common_name": "Xenopus laevis",
             },
             "Cow": {
-                "dna": "ATGGCCCTGTGGATGCGCCTCCTGCCCCTGCTGGCGCTGCTGGCCCTCTGGGGACCTGACCCAGCCGCAGCCTTTGTGAACCAACACCTGTGCGGCTCACACCTGGTGGAAGCTCTCTACCTAGTGTGCGGGGAACGAGGCTTCTTCTACACACCCAAGGCCCGCCGGGAGGCAGAGGACCTGCAGGTGGGGCAGGTGGAGCTGGGCGGGGGCCCTGGTGCAGGCAGCCTGCAGCCCTTGGCCCTGGAG",
+                "dna": "ATGGCCCTGTGGACACGCCTGGCGCCCCTGCTGGCCCTGCTGGCGCTCTGGGCCCCCGCCCCGGCCCGCGCCTTCGTCAACCAGCATCTGTGTGGCTCCCACCTGGTGGAGGCGCTGTACCTGGTGTGCGGAGAGCGCGGCTTCTTCTACACGCCCAAGGCCCGCCGGGAGGTGGAGGGCCCCCAGGTGGGGGCGCTGGAGCTGGCCGGAGGCCCGGGCGCGGGCGGCCTGGAGGGGCCCCCGCAGAAG",
                 "common_name": "Bos taurus",
             },
         },
     },
     "hemoglobin": {
         "gene_name": "Hemoglobin Beta",
-        "description": "Beta-globin carries oxygen from lungs to tissues. The most studied gene in molecular evolution — sequence differences power the 'molecular clock' hypothesis. Sickle cell mutation (E6V) in humans shows how a single base change creates devastating disease.",
+        "description": "Beta-globin carries oxygen from lungs to tissues. The most studied gene in molecular evolution - sequence differences power the 'molecular clock' hypothesis. Sickle cell mutation (E6V) in humans shows how a single base change creates devastating disease.",
         "sequences": {
             "Human": {
                 "dna": "ATGGTGCATCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTGGTCTACCCTTGGACCCAGAGGTTCTTTGAGTCCTTTGGGGATCTGTCCACTCCTGATGCTGTTATGGGCAACCCTAAGGTGAAGGCTCATGGCAAGAAAGTGCTCGGTGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAG",
                 "common_name": "Homo sapiens",
             },
             "Mouse": {
-                "dna": "ATGGTGCACCTGACTGATGCTGAGAAGGCTGCTGTTAATGGCCTGTGGGGAAAGGTGAACGCCGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTTGTCTACCCTTGGACCCAGAGGTACTTTGATAGCTTTGGGGACCTGTCCTCTGCAGATGCTGTTATGGGCAACCCTAAGGTGAAGGCCCATGGCAAGAAAGTGATAGGTGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAG",
+                "dna": "ATGGTGCACCTGACTGATGCTGAGAAGGCTGCTGTCTCTGGCCTGTGGGGAAAGGTGAACGCCGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTTGTCTACCCTTGGACCCAGCGGTACTTTGATAGCTTTGGAGACCTATCCTCTGCCTCTGCTATCATGGGTAATGCCAAAGTGAAGGCCCATGGCAAGAAAGTGATAACTGCCTTTAACGATGGCCTGAATCACTTGGACAGCCTCAAG",
                 "common_name": "Mus musculus",
             },
             "Chicken": {
-                "dna": "ATGGTGCACTGGACTGCTGAGGAGAAGCAGCTCATCACCGGCCTCTGGGGCAAGGTCAATGTGGCCGAATGTGGCGGTGAGGCCCTGGGCAGGCTGCTGATCGTCTACCCCTGGACTCAGAGGTTCTTTGATTCCTTTGGGGACCTGTCCTCTGCCGATGCTGTTATGAGCAACCCTAAGGTCAAGGCCCATGGCAAGAAAGTGCTGGGTGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAG",
+                "dna": "ATGGTGCACTGGACTGCTGAGGAGAAGCAGCTCATCACCGGCCTCTGGGGCAAGGTCAATGTGGCCGAATGTGGGGCTGAAGCCCTGGCCAGGCTGCTGATCGTCTACCCCTGGACCCAGAGGTTCTTTGCGTCCTTTGGGAACCTCTCCAGCCCCACTGCCATCCTTGGCAACCCCATGGTCCGCGCCCATGGCAAGAAAGTGCTCACCTCCTTTGGGGATGCTGTGAAGAACCTGGACAACATCAAG",
                 "common_name": "Gallus gallus",
             },
             "Zebrafish": {
-                "dna": "ATGGTGCATCTGACTGCTGAGGAGAAGGCCGCCGTCACTGGCCTGTGGGGCAAAGTGAATGTGGACGAGTTTGGCGGTGAGGCCCTGGGCAGGCTGCTAATTGTCTATCCCTGGACCCAGAGATTCTTTGAGTCCTTTGGGGACCTGTCCACCACCGATGCCGTCATGGGCAACCCTAAGGTCAAGGCCCATGGCAAGAAAGTCCTGGCTGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAG",
+                "dna": "ATGGTTGAGTGGACAGATGCCGAGCGCACAGCCATCCTTGGCCTGTGGGGAAAGCTCAATATCGATGAAATCGGACCTCAGGCCCTATCCAGATGTCTGATCGTGTATCCCTGGACTCAGAGATATTTCGCCACATTCGGCAACCTGTCAAGCCCCGCTGCGATCATGGGTAACCCCAAAGTGGCAGCTCATGGGAGGACTGTGATGGGAGGTCTTGAGAGAGCCATCAAGAACATGGACAACGTCAAG",
                 "common_name": "Danio rerio",
             },
             "Frog": {
-                "dna": "ATGGTGCATCTGTCCAGTGAGGAGAAGTCTGCGGTCACTGCCCTGTGGGGCAAGGTGAATGTGGAAGAAGTTGGCGGTGAGGCCCTGGGCAGGCTGCTGATTGTTTACCCTTGGACCCAGAGGTTCTTTGAATCTTTTGGGGACCTGTCATCCGCAGACGCTGTCATGGGCAACCCCAAGGTGAAGGCTCATGGCAAGAAAGTTCTCGGTGCTTTGAGTGATGGCCTGGCTCACCTGGACAACCTCAAG",
+                "dna": "ATGGTTCATTGGACAGCTGAAGAGAAGGCCGCCATCACCTCTGTGTGGCAGGAGGTCAACCAGGAGCAAGATGGCCATGATGCACTCACAAGGCTGCTGGTTGTGTACCCCTGGACCCAGAGATACTTCAGCAGTTTTGGAAATCTCGGTAATGCCACAGCTATTGCTGGAAATGTCAAGGTGCGTGCCCATGGCAAGAAGGTTCTTTCAGCTGTTGGTGATGCCATCGCCCATCTTGACAACGTGAAG",
                 "common_name": "Xenopus laevis",
             },
             "Cow": {
-                "dna": "ATGCTGACTGCTGAGGAGAAGGCTGCCGTCACCGGCTTCTGGGGCAAGGTGAAAGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTCGTCTACCCCTGGACTCAGAGGTTCTTTGAGACCTTCGGGGACCTGTCCACTGCAGATGCTGTTATGGGCAACCCTAAGGTCAAGGCCCATGGCAAGAAAGTGCTGAGTGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAGATGGTGCATCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGG",
+                "dna": "ATGCTGACTGCTGAGGAGAAGGCTGCCGTCACCGCCTTTTGGGGCAAGGTGAAAGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTTGTCTACCCCTGGACTCAGAGGTTCTTTGAGTCCTTTGGGGACTTGTCCACTGCTGATGCTGTTATGAACAACCCTAAGGTGAAGGCCCATGGCAAGAAGGTGCTAGATTCCTTTAGTAATGGCATGAAGCATCTCGATGACCTCAAGGGCACC",
                 "common_name": "Bos taurus",
             },
         },
     },
     "p53": {
         "gene_name": "p53 (TP53)",
-        "description": "The 'guardian of the genome' — p53 detects DNA damage and triggers repair or cell death. Mutated in >50% of human cancers. Elephants have 20 copies of p53 (humans have 1), which may explain their extremely low cancer rates despite their size (Peto's paradox).",
+        "description": "The 'guardian of the genome' - p53 detects DNA damage and triggers repair or cell death. Mutated in >50% of human cancers. Elephants have 20 copies of p53 (humans have 1), which may explain their extremely low cancer rates despite their size (Peto's paradox).",
         "sequences": {
             "Human": {
-                "dna": "ATGGAGGAGCCGCAGTCAGATCCTAGCGTGAGTTTGCACCCTTCAGAGACAGAAACCACTGGATTGGAGACTACTTCCTGAAACAACGTTCTGTCCCCCTTGCCGTCCCAAGCAATGGATGATTTGATGCTGTCCCCGGACGATATTGAACAATGGTTCACTGAAGACCCAGGTCCAGATGAAGCTCCCAGAATGCCAGAGGCTGCTCCCCCCGTGGCCCCTGCACCAGCAGCTCCTACACCGGCGGCC",
+                "dna": "ATGGAGGAGCCGCAGTCAGATCCTAGCGTCGAGCCCCCTCTGAGTCAGGAAACATTTTCAGACCTATGGAAACTACTTCCTGAAAACAACGTTCTGTCCCCCTTGCCGTCCCAAGCAATGGATGATTTGATGCTGTCCCCGGACGATATTGAACAATGGTTCACTGAAGACCCAGGTCCAGATGAAGCTCCCAGAATGCCAGAGGCTGCTCCCCCCGTGGCCCCTGCACCAGCAGCTCCTACACCGGCG",
                 "common_name": "Homo sapiens",
             },
             "Mouse": {
-                "dna": "ATGGAGGAGCCGCAGTCAGAACCTAGCGAGAGTTTGCACCCTTCAGAGACACAAACCCTGGAACTGGAGACTTCTTCCAGAAACAACGTTCTGTCCCCCTTGCTGTCCCAAGCAATGGATGATTTGATGCTGTCCCCGGACGATATTGAACAATGGTTCACTGAAGACCCAGGTCCAGATGAAGATCCCAGAATGCCAGAGGCTGCTCCCCCCGTGGCCCCCGCACCAGCAGCTCCCACACCGGCAGCC",
+                "dna": "ATGACTGCCATGGAGGAGTCACAGTCGGATATCAGCCTCGAGCTCCCTCTGAGCCAGGAGACATTTTCAGGCTTATGGAAACTACTTCCTCCAGAAGATATCCTGCCATCACCTCACTGCATGGACGATCTGTTGCTGCCCCAGGATGTTGAGGAGTTTTTTGAAGGCCCAAGTGAAGCCCTCCGAGTGTCAGGAGCTCCTGCAGCACAGGACCCTGTCACCGAGACCCCTGGGCCAGTGGCCCCTGCC",
                 "common_name": "Mus musculus",
             },
             "Chicken": {
-                "dna": "ATGGAAGATCCGCAGTCAGACCCTAGCGTAAGTTTGCACCCTTCAGAAACAGAGACCCTGGATTTGGAGACTTCTTCCTGGAAACAACGTTCTGTCCCCCTTGCCGTCCCAAGCAATGGATGATTTGATGCTGTCCCCGGACGATATTGAACAATGGTTCACTGAAGACCCAGGTCCAGATGAAGCTCCCAGAATGCCAGAGGCTGCTCCCCCCGTGGCCCCTGCACCAGCCGCTCCTACACCGGCGGCC",
+                "dna": "ATGGCGGAGGAGATGGAACCATTGCTGGAACCCACTGAGGTCTTCATGGACCTCTGGAGCATGCTCCCCTATAGCATGCAACAGCTGCCCCTCCCTGAGGATCACAGCAACTGGCAGGAGCTGAGCCCCCTGGAACCCAGCGACCCCCCCCCACCACCGCCACCACCACCTCTGCCATTGGCCGCCGCCGCCCCCCCCCCATTAAACCCCCCCACCCCCCCCCCGCGCTGCCCCCTCCCCGGTGGTCCC",
                 "common_name": "Gallus gallus",
             },
             "Zebrafish": {
-                "dna": "ATGGCCCAGTCAGACCCAAGCGTAAGTCTACACCCTTCAGAAACAGAGACCACGGATTCGGAGACTTCTTCCTGGAAACAGCGCTCCGTGCCCCTTGCTGTCCCAAGCAATGGATGATTTGATGCTGTCCCCGGACAACATTGAACAATGGTTCACTGAAGACCCAGGTCCAGATGAAGCCCCCAGAATGCCAGAGGCTGCCCCCCCTGTGGCCCCTGCACCAGCTGCTCCAACACCGGCGGCCAGCACT",
+                "dna": "ATGGCGCAAAACGACAGCCAAGAGTTCGCGGAGCTCTGGGAGAAGAATTTGATTATTCAGCCCCCAGGTGGTGGCTCTTGCTGGGACATCATTAATGATGAGGAGTACTTGCCGGGATCGTTTGACCCCAATTTTTTTGAAAATGTGCTTGAAGAACAGCCTCAGCCATCCACTCTCCCACCAACATCCACTGTTCCGGAGACAAGCGACTATCCCGGCGATCATGGATTTAGGCTCAGGTTCCCGCAG",
                 "common_name": "Danio rerio",
             },
             "Elephant": {
-                "dna": "ATGGAGGAGCCGCAGTCAGATCCTAGCGTGAGTTTGCATCCTTCAGAGACAGAAACCACTGGATTGGAGACTTCTTCCTGAAACAACGTTCTGTCCCCCTTGCCGTCCCAAGCAATGGATGATTTGATGCTGTCCCCGGACGATATTGAACAATGGTTCACTGAAGACCCAGGTCCAGATGAAGCTCCCAGAATGCCAGAGGCTGCTCCCCCCGTGGCCCCTGCACCAGCAGCTCCTACACCGGCGGCC",
+                "dna": "ATGGAGGAGCCCCAGTCAGATCTCAGCACCGAGCTCCCTCTGAGTCAAGAGACGTTTTCATACTTATGGGAACTCCTTCCTGAGAATCCGGTTCTGTCCCCCACACTACCCCCGGCAGTGGAGGTCATGGACGATCTGCTACTCTCAGAAGACACTGCAAACTGGCTAGAAAGCCAAGTTGAGGCTCAGGGAATGTCCACAACCCCTGCACCAGCCACCCCTACACCGGTGGCCCCCGCACCAGCCACC",
                 "common_name": "Loxodonta africana",
             },
             "Dog": {
-                "dna": "ATGGAGGAACCGCAGTCAGATCCTAGCGTGAGTTTGCACCCTTCAGAGACAGAAACCACTGGATTGGAGACTTCTTCCTGGAACAACGTTCTGTCCCCCTTGCCGTCCCAAGCAATGGATGATTTGATGCTGTCCCCGGACGATATTGAACAATGGTTCACTGAAGACCCAGGTCCAGATGAAGCTCCCAGAATGCCAGAGGCTGCTCCCCCCGTGGCCCCTGCACCAGCAGCTCCTACACCGGCGGCC",
-                "common_name": "Canis familiaris",
+                "dna": "ATGGAGGAGTCGCAGTCAGAGCTCAATATCGACCCCCCTCTGAGCCAGGAGACATTTTCAGAATTGTGGAACCTGCTTCCTGAAAACAATGTTCTGTCTTCGGAGCTGTGCCCAGCAGTGGATGAGCTGCTGCTCCCAGAGAGCGTCGTGAACTGGCTAGACGAAGACTCAGATGATGCTCCCAGGATGCCAGCCACTTCTGCCCCCACAGCCCCTGGACCGGCCCCCTCGTGGCCCCTATCATCCTCT",
+                "common_name": "Canis lupus familiaris",
             },
         },
     },
@@ -173,12 +173,22 @@ def _gc_content(seq: str) -> float:
 
 
 def _sequence_identity(seq1: str, seq2: str) -> float:
-    """Compute simple percent identity (same position, same base)."""
-    min_len = min(len(seq1), len(seq2))
-    if min_len == 0:
+    """Percent identity with best ungapped offset (handles small indels)."""
+    if not seq1 or not seq2:
         return 0.0
-    matches = sum(1 for a, b in zip(seq1[:min_len], seq2[:min_len]) if a == b)
-    return matches / min_len
+    max_shift = min(10, min(len(seq1), len(seq2)) // 4)
+    best = 0.0
+    for shift in range(-max_shift, max_shift + 1):
+        if shift >= 0:
+            s1, s2 = seq1[shift:], seq2
+        else:
+            s1, s2 = seq1, seq2[-shift:]
+        overlap = min(len(s1), len(s2))
+        if overlap == 0:
+            continue
+        matches = sum(1 for a, b in zip(s1[:overlap], s2[:overlap]) if a == b)
+        best = max(best, matches / overlap)
+    return best
 
 
 # ------------------------------------------------------------------
@@ -206,7 +216,7 @@ REPORT_CSS = """
   .report .badge-info { background: #dbeafe; color: #1e40af; }
   .report .chart-container { background: #fff; border: 1px solid #dbeafe; border-radius: 8px; padding: 16px; margin: 16px 0; }
   .report .note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 10px 14px; border-radius: 4px; margin: 12px 0; font-size: 0.9em; }
-  .report .structure-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin: 12px 0; }
+  .report .structure-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; margin: 12px 0; }
 </style>
 """
 
@@ -276,7 +286,7 @@ def _make_heatmap(
 
     for j, label in enumerate(col_labels):
         cx = ml + j * cell_w + cell_w / 2
-        svg.append(f'<text x="{cx:.1f}" y="{mt - 8}" text-anchor="end" font-size="10" fill="#374151" transform="rotate(-45, {cx:.1f}, {mt - 8})">{label}</text>')
+        svg.append(f'<text x="{cx:.1f}" y="{mt - 8}" text-anchor="start" font-size="10" fill="#374151" transform="rotate(-45, {cx:.1f}, {mt - 8})">{label}</text>')
 
     for i, row_label in enumerate(row_labels):
         ry = mt + i * cell_h + cell_h / 2
@@ -348,7 +358,8 @@ def _make_dendrogram(
 
     root = clusters[active[0]]
 
-    ml, mr, mt, mb = 30, 30, 40, 80
+    max_label_len = max((len(n) for n in names), default=0)
+    ml, mr, mt, mb = max(50, max_label_len * 5 + 10), 30, 40, 80
     cw = width - ml - mr
     ch = height - mt - mb
     max_h = root["height"] or 1
@@ -410,8 +421,8 @@ def _make_dendrogram(
     for idx, pos in leaf_positions.items():
         x = ml + pos * leaf_spacing
         svg.append(
-            f'<text x="{x:.1f}" y="{mt + ch + 14}" text-anchor="end" font-size="10" fill="#374151" '
-            f'transform="rotate(-40, {x:.1f}, {mt + ch + 14})">{names[idx]}</text>'
+            f'<text x="{x:.1f}" y="{mt + ch + 14}" text-anchor="start" font-size="10" fill="#374151" '
+            f'transform="rotate(40, {x:.1f}, {mt + ch + 14})">{names[idx]}</text>'
         )
 
     for i in range(5):
@@ -444,8 +455,15 @@ def _make_bar_chart(
     ch = height - mt - mb
 
     all_vals = [v for vals in series.values() for v in vals]
+    y_min = min(all_vals) if all_vals else 0
     y_max = max(all_vals) if all_vals else 1
-    y_max_plot = y_max * 1.15 or 1
+    if y_min >= 0:
+        y_min_plot = 0
+        y_max_plot = y_max * 1.15 or 1
+    else:
+        y_range = y_max - y_min or 1
+        y_min_plot = y_min - y_range * 0.05
+        y_max_plot = y_max + y_range * 0.15
 
     n_groups = len(labels)
     n_series = len(series)
@@ -454,7 +472,7 @@ def _make_bar_chart(
     gap = group_width * 0.15
 
     def sy(v):
-        return mt + ch - (v / y_max_plot) * ch
+        return mt + ch - ((v - y_min_plot) / (y_max_plot - y_min_plot)) * ch
 
     svg = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
@@ -463,7 +481,7 @@ def _make_bar_chart(
     ]
 
     for i in range(6):
-        y_tick = y_max_plot * i / 5
+        y_tick = y_min_plot + (y_max_plot - y_min_plot) * i / 5
         py = sy(y_tick)
         svg.append(f'<line x1="{ml}" y1="{py:.1f}" x2="{ml + cw}" y2="{py:.1f}" stroke="#e9ecef" stroke-width="1"/>')
         svg.append(f'<text x="{ml - 8}" y="{py + 4:.1f}" text-anchor="end" font-size="11" fill="#6c757d">{y_tick:{value_format}}</text>')
@@ -479,7 +497,7 @@ def _make_bar_chart(
             svg.append(f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_width - 1:.1f}" height="{max(0, bh):.1f}" fill="{color}" rx="2"/>')
             svg.append(f'<text x="{bx + bar_width / 2:.1f}" y="{by - 4:.1f}" text-anchor="middle" font-size="9" fill="#1a1a2e">{val:{value_format}}</text>')
         lx = gx + n_series * bar_width / 2
-        svg.append(f'<text x="{lx:.1f}" y="{mt + ch + 14}" text-anchor="end" font-size="10" fill="#6c757d" transform="rotate(-35, {lx:.1f}, {mt + ch + 14})">{label}</text>')
+        svg.append(f'<text x="{lx:.1f}" y="{mt + ch + 14}" text-anchor="start" font-size="10" fill="#6c757d" transform="rotate(35, {lx:.1f}, {mt + ch + 14})">{label}</text>')
 
     if title:
         svg.append(f'<text x="{width / 2}" y="22" text-anchor="middle" font-size="14" font-weight="600" fill="#1a1a2e">{title}</text>')
@@ -572,7 +590,7 @@ def _outputs_to_pdb(outputs, sequence: str) -> str:
 # Task 1: Load gene set
 # ------------------------------------------------------------------
 
-@cpu_env.task(cache="auto")
+@cpu_env.task()
 async def load_genes(
     gene_set: str = "insulin",
     custom_json: str = "",
@@ -586,7 +604,7 @@ async def load_genes(
         available = ", ".join(GENE_SETS.keys())
         raise ValueError(f"Unknown gene set '{gene_set}'. Available: {available}")
 
-    log.info(f"Loaded gene set: {data['gene_name']} — {len(data['sequences'])} species")
+    log.info(f"Loaded gene set: {data['gene_name']} - {len(data['sequences'])} species")
 
     out_dir = tempfile.mkdtemp(prefix="gene_compare_")
     with open(os.path.join(out_dir, "genes.json"), "w") as f:
@@ -684,7 +702,7 @@ async def score_and_compare(
 
     # Report
     html_parts = [
-        f"<h2>{data['gene_name']} — Cross-Species Comparison</h2>",
+        f"<h2>{data['gene_name']} - Cross-Species Comparison</h2>",
         f'<div class="note">{data["description"]}</div>',
         '<div class="stat-grid">',
         f'<div class="stat"><div class="value">{n}</div><div class="label">Species</div></div>',
@@ -731,7 +749,7 @@ async def score_and_compare(
     html_parts.append('<div class="chart-container">')
     html_parts.append(_make_dendrogram(
         species_names, identity_matrix,
-        title=f"{data['gene_name']} — Phylogenetic Tree (DNA Identity)",
+        title=f"{data['gene_name']} - Phylogenetic Tree (DNA Identity)",
     ))
     html_parts.append("</div>")
 
@@ -799,7 +817,7 @@ async def fold_proteins(
 
         log.info(f"ESMFold [{idx + 1}/{n}]: {species} ({len(protein)} aa)")
         await flyte.report.replace.aio(_wrap_report(
-            f"<h2>ESMFold — 3D Structure Prediction</h2>"
+            f"<h2>ESMFold - 3D Structure Prediction</h2>"
             f"<p>Folding {species} ({idx + 1}/{n}): {len(protein)} residues...</p>"
         ), do_flush=True)
 
@@ -833,7 +851,7 @@ async def fold_proteins(
     threeDmol_script = '<script src="https://3dmol.csb.pitt.edu/build/3Dmol-min.js"></script>'
 
     stats_html = f"""
-    <h2>ESMFold — Cross-Species Structure Comparison</h2>
+    <h2>ESMFold - Cross-Species Structure Comparison</h2>
     <div class="note">
       <b>ESMFold</b> predicts 3D structure directly from amino acid sequence.
       Comparing structures across species reveals which parts of the protein are
@@ -860,7 +878,7 @@ async def fold_proteins(
         else:
             badge = '<span class="badge badge-danger">Disordered</span>'
 
-        plddt_sparkline = _make_plddt_sparkline(sdata["plddt_per_residue"], width=350)
+        plddt_sparkline = _make_plddt_sparkline(sdata["plddt_per_residue"], width=300)
         pdb_escaped = sdata["pdb_str"].replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
         viewer_id = f"viewer_{hash(species) & 0xFFFFFF:06x}"
 
@@ -871,7 +889,7 @@ async def fold_proteins(
             {badge}
           </h3>
           <p style="font-size:0.85em;color:#6c757d;margin:2px 0 8px;"><i>{common}</i></p>
-          <div id="{viewer_id}" style="width:400px;height:350px;border:1px solid #dbeafe;border-radius:8px;position:relative;"></div>
+          <div id="{viewer_id}" style="width:100%;max-width:320px;height:280px;border:1px solid #dbeafe;border-radius:8px;position:relative;"></div>
           <div style="margin-top:8px;">
             <b>Mean pLDDT:</b> {plddt_val:.1f} / 100
             <div style="margin-top:4px;">{plddt_sparkline}</div>
@@ -943,7 +961,7 @@ async def generate_summary(
     protein_matrix = comparison["protein_identity_matrix"]
 
     html_parts = [
-        f"<h2>{gene_name} — Cross-Species Evolution Summary</h2>",
+        f"<h2>{gene_name} - Cross-Species Evolution Summary</h2>",
         f'<div class="note">{comparison["description"]}</div>',
     ]
 
@@ -967,11 +985,11 @@ async def generate_summary(
     # DNA vs Protein conservation insight
     conservation_ratio = avg_protein_id / avg_dna_id if avg_dna_id > 0 else 0
     if conservation_ratio > 1.05:
-        insight = "Protein is more conserved than DNA — synonymous mutations are accumulating while the protein function is preserved. This is classic purifying selection."
+        insight = "Protein is more conserved than DNA - synonymous mutations are accumulating while the protein function is preserved. This is classic purifying selection."
     elif conservation_ratio < 0.95:
-        insight = "DNA is more conserved than protein — unusual, may indicate regulatory constraints on the DNA sequence itself."
+        insight = "DNA is more conserved than protein - many nucleotide changes are non-synonymous, altering the protein. This can occur when signal peptides or pro-domains diverge faster than the mature functional core."
     else:
-        insight = "DNA and protein conservation are similar — changes at the DNA level are directly reflected in protein changes."
+        insight = "DNA and protein conservation are similar - changes at the DNA level are directly reflected in protein changes."
 
     html_parts.append(f'<div class="note"><b>Evolutionary insight:</b> {insight}</div>')
 
@@ -1016,14 +1034,14 @@ async def generate_summary(
     html_parts.append('<div class="chart-container">')
     html_parts.append(_make_dendrogram(
         species, dna_matrix,
-        title=f"{gene_name} — DNA Phylogenetic Tree",
+        title=f"{gene_name} - DNA Phylogenetic Tree",
     ))
     html_parts.append("</div>")
 
     html_parts.append('<div class="chart-container">')
     html_parts.append(_make_dendrogram(
         species, protein_matrix,
-        title=f"{gene_name} — Protein Phylogenetic Tree",
+        title=f"{gene_name} - Protein Phylogenetic Tree",
         color="#059669",
     ))
     html_parts.append("</div>")
@@ -1036,7 +1054,7 @@ async def generate_summary(
         "protein level, translated to amino acid sequences, and folded with ESMFold for 3D structure "
         "comparison. Phylogenetic trees were built using UPGMA on identity matrices.<br><br>"
         "<b>Key question:</b> Does sequence divergence translate to structural divergence? "
-        "Proteins with high sequence identity typically share 3D fold — but even distant homologs "
+        "Proteins with high sequence identity typically share 3D fold - but even distant homologs "
         "(30-40% identity) often maintain the same overall structure, because structure is more "
         "conserved than sequence in evolution."
         "</div>"

@@ -78,7 +78,7 @@ uv pip install -r requirements.txt
 flyte run --local --tui workflow.py pipeline
 
 # Hemoglobin comparison
-flyte run --local --tui workflow.py pipeline --gene_set "hemoglobin"
+flyte run workflow.py pipeline --gene_set "hemoglobin"
 
 # p53 — includes elephant!
 flyte run --local --tui workflow.py pipeline --gene_set "p53"
