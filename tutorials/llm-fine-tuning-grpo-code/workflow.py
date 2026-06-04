@@ -34,7 +34,6 @@ import tempfile
 import flyte
 import flyte.io
 import flyte.report
-import markdown
 from config import cpu_env, gpu_env, HF_TOKEN
 from report_helpers import make_bar_chart, make_line_chart, pipeline_step_indicator, wrap_report
 
@@ -43,234 +42,47 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
 
-def md_to_html(text: str) -> str:
-    return markdown.markdown(text, extensions=["tables", "fenced_code"])
+MBPP_DATASET = "google-research-datasets/mbpp"
 
 
-# ------------------------------------------------------------------
-# Coding problems — simple Python functions with test cases
-# ------------------------------------------------------------------
+async def run_tests_sandboxed(
+    sbx, code: str, test_list: list[str],
+) -> tuple[bool, int, int]:
+    """Run test cases against generated code inside a sandbox.
 
-PROBLEMS = [
-    {
-        "prompt": "Write a Python function called `double` that takes a number and returns it multiplied by 2.\n\ndef double(x):",
-        "tests": "assert double(3) == 6\nassert double(0) == 0\nassert double(-5) == -10",
-        "name": "double",
-    },
-    {
-        "prompt": "Write a Python function called `is_even` that returns True if a number is even, False otherwise.\n\ndef is_even(n):",
-        "tests": "assert is_even(4) == True\nassert is_even(7) == False\nassert is_even(0) == True",
-        "name": "is_even",
-    },
-    {
-        "prompt": "Write a Python function called `add` that takes two numbers and returns their sum.\n\ndef add(a, b):",
-        "tests": "assert add(2, 3) == 5\nassert add(-1, 1) == 0\nassert add(0, 0) == 0",
-        "name": "add",
-    },
-    {
-        "prompt": "Write a Python function called `max_of_two` that returns the larger of two numbers.\n\ndef max_of_two(a, b):",
-        "tests": "assert max_of_two(3, 5) == 5\nassert max_of_two(10, 2) == 10\nassert max_of_two(4, 4) == 4",
-        "name": "max_of_two",
-    },
-    {
-        "prompt": "Write a Python function called `absolute` that returns the absolute value of a number.\n\ndef absolute(x):",
-        "tests": "assert absolute(-5) == 5\nassert absolute(3) == 3\nassert absolute(0) == 0",
-        "name": "absolute",
-    },
-    {
-        "prompt": "Write a Python function called `square` that returns the square of a number.\n\ndef square(x):",
-        "tests": "assert square(3) == 9\nassert square(0) == 0\nassert square(-4) == 16",
-        "name": "square",
-    },
-    {
-        "prompt": "Write a Python function called `is_positive` that returns True if a number is greater than 0.\n\ndef is_positive(n):",
-        "tests": "assert is_positive(5) == True\nassert is_positive(-3) == False\nassert is_positive(0) == False",
-        "name": "is_positive",
-    },
-    {
-        "prompt": "Write a Python function called `celsius_to_fahrenheit` that converts Celsius to Fahrenheit.\n\ndef celsius_to_fahrenheit(c):",
-        "tests": "assert celsius_to_fahrenheit(0) == 32\nassert celsius_to_fahrenheit(100) == 212\nassert celsius_to_fahrenheit(-40) == -40",
-        "name": "celsius_to_fahrenheit",
-    },
-    {
-        "prompt": "Write a Python function called `reverse_string` that reverses a string.\n\ndef reverse_string(s):",
-        "tests": "assert reverse_string('hello') == 'olleh'\nassert reverse_string('') == ''\nassert reverse_string('a') == 'a'",
-        "name": "reverse_string",
-    },
-    {
-        "prompt": "Write a Python function called `string_length` that returns the length of a string.\n\ndef string_length(s):",
-        "tests": "assert string_length('hello') == 5\nassert string_length('') == 0\nassert string_length('abc') == 3",
-        "name": "string_length",
-    },
-    {
-        "prompt": "Write a Python function called `first_element` that returns the first element of a list.\n\ndef first_element(lst):",
-        "tests": "assert first_element([1, 2, 3]) == 1\nassert first_element(['a', 'b']) == 'a'\nassert first_element([42]) == 42",
-        "name": "first_element",
-    },
-    {
-        "prompt": "Write a Python function called `last_element` that returns the last element of a list.\n\ndef last_element(lst):",
-        "tests": "assert last_element([1, 2, 3]) == 3\nassert last_element(['a', 'b']) == 'b'\nassert last_element([42]) == 42",
-        "name": "last_element",
-    },
-    {
-        "prompt": "Write a Python function called `list_sum` that returns the sum of all numbers in a list.\n\ndef list_sum(lst):",
-        "tests": "assert list_sum([1, 2, 3]) == 6\nassert list_sum([]) == 0\nassert list_sum([-1, 1]) == 0",
-        "name": "list_sum",
-    },
-    {
-        "prompt": "Write a Python function called `count_items` that returns the number of items in a list.\n\ndef count_items(lst):",
-        "tests": "assert count_items([1, 2, 3]) == 3\nassert count_items([]) == 0\nassert count_items(['a']) == 1",
-        "name": "count_items",
-    },
-    {
-        "prompt": "Write a Python function called `to_upper` that converts a string to uppercase.\n\ndef to_upper(s):",
-        "tests": "assert to_upper('hello') == 'HELLO'\nassert to_upper('') == ''\nassert to_upper('ABC') == 'ABC'",
-        "name": "to_upper",
-    },
-    {
-        "prompt": "Write a Python function called `to_lower` that converts a string to lowercase.\n\ndef to_lower(s):",
-        "tests": "assert to_lower('HELLO') == 'hello'\nassert to_lower('') == ''\nassert to_lower('abc') == 'abc'",
-        "name": "to_lower",
-    },
-    {
-        "prompt": "Write a Python function called `multiply` that takes two numbers and returns their product.\n\ndef multiply(a, b):",
-        "tests": "assert multiply(3, 4) == 12\nassert multiply(0, 5) == 0\nassert multiply(-2, 3) == -6",
-        "name": "multiply",
-    },
-    {
-        "prompt": "Write a Python function called `is_empty` that returns True if a list is empty.\n\ndef is_empty(lst):",
-        "tests": "assert is_empty([]) == True\nassert is_empty([1]) == False\nassert is_empty([1, 2, 3]) == False",
-        "name": "is_empty",
-    },
-    {
-        "prompt": "Write a Python function called `clamp` that clamps a number between a minimum and maximum value.\n\ndef clamp(x, low, high):",
-        "tests": "assert clamp(5, 0, 10) == 5\nassert clamp(-5, 0, 10) == 0\nassert clamp(15, 0, 10) == 10",
-        "name": "clamp",
-    },
-    {
-        "prompt": "Write a Python function called `contains` that returns True if an item is in a list.\n\ndef contains(lst, item):",
-        "tests": "assert contains([1, 2, 3], 2) == True\nassert contains([1, 2, 3], 4) == False\nassert contains([], 1) == False",
-        "name": "contains",
-    },
-    {
-        "prompt": "Write a Python function called `factorial` that returns the factorial of a non-negative integer.\n\ndef factorial(n):",
-        "tests": "assert factorial(0) == 1\nassert factorial(1) == 1\nassert factorial(5) == 120",
-        "name": "factorial",
-    },
-    {
-        "prompt": "Write a Python function called `power` that returns base raised to the exponent.\n\ndef power(base, exp):",
-        "tests": "assert power(2, 3) == 8\nassert power(5, 0) == 1\nassert power(3, 2) == 9",
-        "name": "power",
-    },
-    {
-        "prompt": "Write a Python function called `min_of_list` that returns the smallest number in a list.\n\ndef min_of_list(lst):",
-        "tests": "assert min_of_list([3, 1, 2]) == 1\nassert min_of_list([5]) == 5\nassert min_of_list([-1, -5, 0]) == -5",
-        "name": "min_of_list",
-    },
-    {
-        "prompt": "Write a Python function called `max_of_list` that returns the largest number in a list.\n\ndef max_of_list(lst):",
-        "tests": "assert max_of_list([3, 1, 2]) == 3\nassert max_of_list([5]) == 5\nassert max_of_list([-1, -5, 0]) == 0",
-        "name": "max_of_list",
-    },
-    {
-        "prompt": "Write a Python function called `remove_duplicates` that returns a list with duplicates removed, preserving order.\n\ndef remove_duplicates(lst):",
-        "tests": "assert remove_duplicates([1, 2, 2, 3]) == [1, 2, 3]\nassert remove_duplicates([]) == []\nassert remove_duplicates([1, 1, 1]) == [1]",
-        "name": "remove_duplicates",
-    },
-    {
-        "prompt": "Write a Python function called `flatten` that flattens a list of lists into a single list.\n\ndef flatten(lst):",
-        "tests": "assert flatten([[1, 2], [3, 4]]) == [1, 2, 3, 4]\nassert flatten([[], [1]]) == [1]\nassert flatten([]) == []",
-        "name": "flatten",
-    },
-    {
-        "prompt": "Write a Python function called `is_palindrome` that returns True if a string reads the same forwards and backwards.\n\ndef is_palindrome(s):",
-        "tests": "assert is_palindrome('racecar') == True\nassert is_palindrome('hello') == False\nassert is_palindrome('') == True",
-        "name": "is_palindrome",
-    },
-    {
-        "prompt": "Write a Python function called `count_vowels` that returns the number of vowels (a, e, i, o, u) in a string.\n\ndef count_vowels(s):",
-        "tests": "assert count_vowels('hello') == 2\nassert count_vowels('xyz') == 0\nassert count_vowels('aeiou') == 5",
-        "name": "count_vowels",
-    },
-    {
-        "prompt": "Write a Python function called `fibonacci` that returns the nth Fibonacci number (0-indexed).\n\ndef fibonacci(n):",
-        "tests": "assert fibonacci(0) == 0\nassert fibonacci(1) == 1\nassert fibonacci(6) == 8",
-        "name": "fibonacci",
-    },
-    {
-        "prompt": "Write a Python function called `intersection` that returns elements common to two lists.\n\ndef intersection(a, b):",
-        "tests": "assert sorted(intersection([1, 2, 3], [2, 3, 4])) == [2, 3]\nassert intersection([1, 2], [3, 4]) == []\nassert sorted(intersection([1, 1, 2], [1, 2, 2])) == [1, 2]",
-        "name": "intersection",
-    },
-]
+    Uses union.sandbox to execute untrusted LLM-generated code in an isolated
+    environment with no network access. Each test assertion is checked
+    individually so we can report partial credit (passed/total).
 
+    Args:
+        sbx: An open sandbox session.
+        code: The complete generated code (full function definition).
+        test_list: List of assert strings to run against the code.
+    """
+    total = len(test_list)
 
-def extract_function_body(completion: str, func_name: str) -> str | None:
-    """Extract just the indented function body from the model's completion."""
-    lines = completion.split("\n")
-    body_lines = []
-    found_body = False
+    # Build a script that runs each test and prints PASS/FAIL per line
+    test_script = code + "\n\n"
+    for i, test in enumerate(test_list):
+        test_script += (
+            f"try:\n"
+            f"    {test}\n"
+            f"    print('PASS:{i}')\n"
+            f"except Exception:\n"
+            f"    print('FAIL:{i}')\n"
+        )
 
-    for line in lines:
-        # Empty lines within the body are ok
-        if not line.strip():
-            if found_body:
-                body_lines.append(line)
-            continue
+    proc = await sbx.run(
+        test_script,
+        script_type="python",
+        stdout=True,
+        stderr=True,
+        network_mode="blocked",
+        timeout_s=5.0,
+    )
+    out, _ = await proc.communicate_text()
 
-        # Indented lines are part of the function body
-        if line.startswith("    ") or line.startswith("\t"):
-            found_body = True
-            body_lines.append(line)
-        elif found_body:
-            # First non-indented, non-empty line = end of function body
-            break
-
-    # Strip trailing empty lines
-    while body_lines and not body_lines[-1].strip():
-        body_lines.pop()
-
-    body = "\n".join(body_lines)
-    if not body.strip():
-        return None
-    return body
-
-
-def run_tests(func_def: str, func_body: str, tests: str, timeout: float = 2.0) -> tuple[bool, int, int]:
-    """Run test cases against generated code. Returns (all_passed, passed_count, total_count)."""
-    import signal
-
-    # Build the full function
-    code = func_def + "\n" + func_body
-
-    test_lines = [t.strip() for t in tests.strip().split("\n") if t.strip().startswith("assert")]
-    total = len(test_lines)
-    passed = 0
-
-    # Set up timeout
-    def timeout_handler(signum, frame):
-        raise TimeoutError()
-
-    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-
-    try:
-        signal.alarm(int(timeout))
-        namespace = {}
-        exec(code, namespace)
-
-        for test in test_lines:
-            try:
-                exec(test, namespace)
-                passed += 1
-            except Exception:
-                pass
-
-        signal.alarm(0)
-    except (TimeoutError, Exception):
-        signal.alarm(0)
-    finally:
-        signal.signal(signal.SIGALRM, old_handler)
-
+    passed = out.count("PASS:") if out else 0
     return passed == total, passed, total
 
 
@@ -283,40 +95,76 @@ async def prepare_data(
     max_train_samples: int = 200,
     max_eval_samples: int = 50,
 ) -> flyte.io.Dir:
-    """Create coding problem dataset by repeating and shuffling the problem set."""
-    import random
-    from datasets import Dataset, DatasetDict
+    """Load MBPP coding problems and prepare train/eval splits.
 
-    log.info(f"Preparing {max_train_samples + max_eval_samples} coding problems...")
+    MBPP columns: text (problem description), code (solution), test_list (assert strings).
+    We build a prompt that includes the problem description and the function signature
+    extracted from the reference solution, then let the model complete the body.
+    """
+    from datasets import Dataset, DatasetDict, load_dataset
 
-    rng = random.Random(42)
+    log.info(f"Loading MBPP dataset...")
 
-    # Repeat problems to fill the requested size
-    all_examples = []
-    while len(all_examples) < max_train_samples + max_eval_samples:
-        for p in PROBLEMS:
-            all_examples.append({
-                "prompt": p["prompt"],
-                "func_prompt": p["prompt"],  # duplicate — "prompt" is reserved by GRPOTrainer
-                "tests": p["tests"],
-                "name": p["name"],
+    # MBPP has train (374), test (500), validation (90), prompt (10)
+    mbpp = load_dataset(MBPP_DATASET, "full")
+
+    # Combine train + validation + test for a larger pool, then re-split
+    all_rows = []
+    for split in ["train", "validation", "test"]:
+        for row in mbpp[split]:
+            # Extract function name from first test assertion
+            # e.g. "assert min_cost(...)" -> "min_cost"
+            first_test = row["test_list"][0]
+            match = re.search(r"assert\s+(\w+)\s*\(", first_test)
+            if not match:
+                continue
+            func_name = match.group(1)
+
+            # Extract the function signature from the reference solution
+            func_sig = None
+            for line in row["code"].split("\n"):
+                if line.strip().startswith(f"def {func_name}"):
+                    func_sig = line.rstrip()
+                    break
+
+            if not func_sig:
+                continue
+
+            # Build prompt: problem description + function signature for the model to complete
+            prompt_text = f"{row['text']}\n\n{func_sig}"
+
+            # Join test_list + challenge_test_list into a single newline-separated string
+            tests = "\n".join(row["test_list"])
+
+            # Setup code (some problems need imports like `import math`)
+            setup = row.get("test_setup_code", "").strip()
+
+            all_rows.append({
+                "prompt": prompt_text,
+                "func_prompt": prompt_text,  # duplicate — "prompt" is reserved by GRPOTrainer
+                "tests": tests,
+                "setup_code": setup,
+                "name": func_name,
             })
-            if len(all_examples) >= max_train_samples + max_eval_samples:
-                break
 
-    rng.shuffle(all_examples)
+    log.info(f"Loaded {len(all_rows)} valid MBPP problems")
 
-    train_examples = all_examples[:max_train_samples]
-    eval_examples = all_examples[max_train_samples:max_train_samples + max_eval_samples]
+    # Shuffle and split
+    import random
+    rng = random.Random(42)
+    rng.shuffle(all_rows)
+
+    n_train = min(max_train_samples, len(all_rows) - max_eval_samples)
+    n_eval = min(max_eval_samples, len(all_rows) - n_train)
 
     processed = DatasetDict({
-        "train": Dataset.from_list(train_examples),
-        "eval": Dataset.from_list(eval_examples),
+        "train": Dataset.from_list(all_rows[:n_train]),
+        "eval": Dataset.from_list(all_rows[n_train:n_train + n_eval]),
     })
 
     output_dir = os.path.join(tempfile.mkdtemp(), "dataset")
     processed.save_to_disk(output_dir)
-    log.info(f"Dataset ready: {len(train_examples)} train, {len(eval_examples)} eval ({len(PROBLEMS)} unique problems)")
+    log.info(f"Dataset ready: {n_train} train, {n_eval} eval")
 
     return await flyte.io.Dir.from_local(output_dir)
 
@@ -329,6 +177,7 @@ async def prepare_data(
 async def train(
     model_name: str,
     data_dir: flyte.io.Dir,
+    method: str = "lora",
     epochs: int = 3,
     lr: float = 5e-5,
     batch_size: int = 4,
@@ -337,26 +186,35 @@ async def train(
     lora_r: int = 16,
     lora_alpha: int = 32,
 ) -> flyte.io.Dir:
-    """Fine-tune a model with GRPO — reward = do the tests pass?"""
+    """Fine-tune a model with GRPO — reward = do the tests pass?
+
+    Args:
+        method: "lora" for LoRA adapters (default), "full" for full fine-tuning.
+    """
     import torch
     from datasets import load_from_disk
-    from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
     from trl import GRPOConfig, GRPOTrainer
+    from union import sandbox as sb
 
-    log.info(f"GRPO Code Training: model={model_name}")
+    log.info(f"GRPO Code Training: model={model_name}, method={method}")
 
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
         log.info(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
 
+    method_badge = (
+        '<span class="badge badge-info">GRPO + LoRA</span>' if method == "lora"
+        else '<span class="badge badge-danger">GRPO + Full Fine-Tune</span>'
+    )
+
     await flyte.report.replace.aio(
         wrap_report(
             f"<h2>Loading Model...</h2>"
             f"<h3>{model_name}</h3>"
             f'<div class="card">'
-            f"<p><b>Method:</b> <span class=\"badge badge-info\">GRPO + LoRA</span></p>"
+            f"<p><b>Method:</b> {method_badge}</p>"
             f"<p>Setting up code generation training...</p>"
             f"</div>"
         ),
@@ -381,15 +239,19 @@ async def train(
         device_map="auto",
     )
 
-    # -- LoRA --
-    peft_config = LoraConfig(
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
+    # -- LoRA (optional) --
+    peft_config = None
+    if method == "lora":
+        from peft import LoraConfig
+
+        peft_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
 
     # -- Metrics tracking --
     training_log: list[dict] = []
@@ -404,7 +266,7 @@ async def train(
         <h2>GRPO Training in Progress...</h2>
         <h3>{model_name}</h3>
         <div class="stat-grid">
-          <div class="stat"><div class="value">GRPO</div><div class="label">Method</div></div>
+          <div class="stat"><div class="value">GRPO + {method.upper()}</div><div class="label">Method</div></div>
           <div class="stat"><div class="value">{len(dataset['train']):,}</div><div class="label">Train Examples</div></div>
           <div class="stat"><div class="value">{epochs}</div><div class="label">Epochs</div></div>
           <div class="stat"><div class="value">{lr}</div><div class="label">Learning Rate</div></div>
@@ -518,107 +380,129 @@ async def train(
                 loop,
             )
 
-    # -- Reward function --
-    def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], name: list[str], **kwargs) -> list[float]:
-        """Reward = fraction of test cases passed. All pass = 1.0."""
-        rewards = []
-        batch_passes = 0
+    # -- Sandbox session for safe code execution --
+    # Opens an isolated sandbox where LLM-generated code runs with no network
+    # access. The session persists across reward function calls so we don't pay
+    # setup cost per evaluation. The reward function (sync, in trainer thread)
+    # uses run_coroutine_threadsafe to call into the async sandbox.
+    async with sb.local.session(network_mode="blocked") as sbx:
 
-        for completion, p, t, n in zip(completions, func_prompt, tests, name):
-            func_body = extract_function_body(completion, n)
-            if func_body is None:
-                rewards.append(0.0)
+        # -- Reward function --
+        def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], setup_code: list[str], **kwargs) -> list[float]:
+            """Reward = fraction of test cases passed. All pass = 1.0."""
+            rewards = []
+            batch_passes = 0
+
+            for completion, p, t, setup in zip(completions, func_prompt, tests, setup_code):
+                # The prompt ends with "def func_name(...):", completion is the body.
+                # Combine them into full code for the sandbox.
+                func_def = p.strip().split("\n")[-1]  # "def func_name(...):"
+                full_code = func_def + "\n" + completion
+
+                # Prepend any setup code (e.g. "import math")
+                if setup:
+                    full_code = setup + "\n" + full_code
+
+                test_list = [l.strip() for l in t.strip().split("\n") if l.strip().startswith("assert")]
+
+                # Run tests in sandbox from trainer thread
+                future = asyncio.run_coroutine_threadsafe(
+                    run_tests_sandboxed(sbx, full_code, test_list),
+                    loop,
+                )
+                try:
+                    all_passed, passed, total = future.result(timeout=10)
+                except Exception:
+                    all_passed, passed, total = False, 0, len(test_list)
+
+                reward = passed / total if total > 0 else 0.0
+                rewards.append(reward)
+
+                if all_passed:
+                    reward_stats["all_pass"] += 1
+                    batch_passes += 1
                 reward_stats["total"] += 1
-                continue
 
-            # Build the full function def line from the prompt
-            func_def = p.strip().split("\n")[-1]  # "def func_name(...):"
-            all_passed, passed, total = run_tests(func_def, func_body, t)
+            reward_stats["calls"] += 1
+            reward_stats["total_reward"] += sum(rewards)
 
-            reward = passed / total if total > 0 else 0.0
-            rewards.append(reward)
+            # Track metrics
+            batch_avg = sum(rewards) / len(rewards)
+            batch_pass_pct = batch_passes / len(completions) * 100
+            running_avg = reward_stats["total_reward"] / reward_stats["total"]
+            running_pass = reward_stats["all_pass"] / reward_stats["total"] * 100
 
-            if all_passed:
-                reward_stats["all_pass"] += 1
-                batch_passes += 1
-            reward_stats["total"] += 1
+            reward_log.append({
+                "batch": reward_stats["calls"],
+                "avg_reward": round(running_avg, 4),
+                "pass_rate": round(running_pass, 2),
+                "batch_reward": round(batch_avg, 4),
+                "batch_pass_rate": round(batch_pass_pct, 2),
+            })
 
-        reward_stats["calls"] += 1
-        reward_stats["total_reward"] += sum(rewards)
+            if reward_stats["calls"] % 5 == 0:
+                log.info(
+                    f"[Reward] batch {reward_stats['calls']}: "
+                    f"avg_reward={running_avg:.3f}, pass_rate={running_pass:.1f}%, "
+                    f"batch_reward={batch_avg:.3f}"
+                )
+                # Push report update from trainer thread
+                asyncio.run_coroutine_threadsafe(
+                    flyte.report.replace.aio(
+                        _build_training_report(train_state["max_steps"]),
+                        do_flush=True,
+                    ),
+                    loop,
+                )
 
-        # Track metrics
-        batch_avg = sum(rewards) / len(rewards)
-        batch_pass_pct = batch_passes / len(completions) * 100
-        running_avg = reward_stats["total_reward"] / reward_stats["total"]
-        running_pass = reward_stats["all_pass"] / reward_stats["total"] * 100
+            return rewards
 
-        reward_log.append({
-            "batch": reward_stats["calls"],
-            "avg_reward": round(running_avg, 4),
-            "pass_rate": round(running_pass, 2),
-            "batch_reward": round(batch_avg, 4),
-            "batch_pass_rate": round(batch_pass_pct, 2),
-        })
+        # -- GRPO config --
+        output_dir = os.path.join(tempfile.mkdtemp(), "checkpoints")
+        grpo_config = GRPOConfig(
+            output_dir=output_dir,
+            num_train_epochs=epochs,
+            per_device_train_batch_size=batch_size,
+            learning_rate=lr,
+            num_generations=num_generations,
+            max_completion_length=max_completion_length,
+            logging_steps=5,
+            save_strategy="epoch",
+            bf16=use_bf16,
+            report_to="none",
+        )
 
-        if reward_stats["calls"] % 5 == 0:
-            log.info(
-                f"[Reward] batch {reward_stats['calls']}: "
-                f"avg_reward={running_avg:.3f}, pass_rate={running_pass:.1f}%, "
-                f"batch_reward={batch_avg:.3f}"
-            )
-            # Push report update from trainer thread
-            asyncio.run_coroutine_threadsafe(
-                flyte.report.replace.aio(
-                    _build_training_report(train_state["max_steps"]),
-                    do_flush=True,
-                ),
-                loop,
-            )
+        trainer = GRPOTrainer(
+            model=model,
+            args=grpo_config,
+            train_dataset=dataset["train"],
+            reward_funcs=code_reward,
+            peft_config=peft_config,
+            processing_class=tokenizer,
+            callbacks=[MetricsCallback()],
+        )
 
-        return rewards
+        log.info(f"Starting GRPO training (num_generations={num_generations})...")
+        await flyte.report.replace.aio(
+            _build_training_report(trainer.state.max_steps or 0),
+            do_flush=True,
+        )
 
-    # -- GRPO config --
-    output_dir = os.path.join(tempfile.mkdtemp(), "checkpoints")
-    grpo_config = GRPOConfig(
-        output_dir=output_dir,
-        num_train_epochs=epochs,
-        per_device_train_batch_size=batch_size,
-        learning_rate=lr,
-        num_generations=num_generations,
-        max_completion_length=max_completion_length,
-        logging_steps=5,
-        save_strategy="epoch",
-        bf16=use_bf16,
-        report_to="none",
-    )
-
-    trainer = GRPOTrainer(
-        model=model,
-        args=grpo_config,
-        train_dataset=dataset["train"],
-        reward_funcs=code_reward,
-        peft_config=peft_config,
-        processing_class=tokenizer,
-        callbacks=[MetricsCallback()],
-    )
-
-    log.info(f"Starting GRPO training (num_generations={num_generations})...")
-    await flyte.report.replace.aio(
-        _build_training_report(trainer.state.max_steps or 0),
-        do_flush=True,
-    )
-
-    trainer.train()
+        trainer.train()
 
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
     final_pass = reward_stats["all_pass"] / max(reward_stats["total"], 1) * 100
     log.info(f"GRPO training complete. Avg reward: {final_avg:.3f}, pass rate: {final_pass:.1f}%")
 
-    # -- Merge LoRA and save --
+    # -- Save model --
     save_dir = os.path.join(tempfile.mkdtemp(), "grpo_model")
-    log.info("Merging LoRA weights...")
-    merged_model = trainer.model.merge_and_unload()
-    merged_model.save_pretrained(save_dir)
+    if method == "lora":
+        log.info("Merging LoRA weights...")
+        merged_model = trainer.model.merge_and_unload()
+        merged_model.save_pretrained(save_dir)
+    else:
+        log.info("Saving full model...")
+        trainer.model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
 
     # -- Final report --
@@ -696,6 +580,7 @@ async def evaluate(
     import torch
     from datasets import load_from_disk
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from union import sandbox as sb
 
     log.info("Starting evaluation...")
     await flyte.report.replace.aio(
@@ -709,6 +594,7 @@ async def evaluate(
 
     prompts = eval_ds["prompt"]
     tests_list = eval_ds["tests"]
+    setup_codes = eval_ds["setup_code"]
     names = eval_ds["name"]
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
@@ -757,7 +643,7 @@ async def evaluate(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # -- Score --
+    # -- Score (sandboxed) --
     base_pass = 0
     ft_pass = 0
     base_total_tests = 0
@@ -766,42 +652,49 @@ async def evaluate(
     ft_passed_tests = 0
     comparisons = []
 
-    for i in range(len(prompts)):
-        func_def = prompts[i].strip().split("\n")[-1]
+    async with sb.local.session(network_mode="blocked") as sbx:
+        for i in range(len(prompts)):
+            func_def = prompts[i].strip().split("\n")[-1]
+            setup = setup_codes[i] if setup_codes[i] else ""
+            test_list = [l.strip() for l in tests_list[i].strip().split("\n") if l.strip().startswith("assert")]
 
-        base_body = extract_function_body(base_results[i], names[i])
-        ft_body = extract_function_body(ft_results[i], names[i])
+            # Build full code: setup + func_def + model completion
+            base_code = func_def + "\n" + base_results[i]
+            ft_code = func_def + "\n" + ft_results[i]
+            if setup:
+                base_code = setup + "\n" + base_code
+                ft_code = setup + "\n" + ft_code
 
-        base_all = False
-        base_p = 0
-        base_t = 0
-        if base_body:
-            base_all, base_p, base_t = run_tests(func_def, base_body, tests_list[i])
-        if base_all:
-            base_pass += 1
-        base_total_tests += base_t
-        base_passed_tests += base_p
+            base_all = False
+            base_p = 0
+            base_t = 0
+            if base_results[i].strip():
+                base_all, base_p, base_t = await run_tests_sandboxed(sbx, base_code, test_list)
+            if base_all:
+                base_pass += 1
+            base_total_tests += base_t
+            base_passed_tests += base_p
 
-        ft_all = False
-        ft_p = 0
-        ft_t = 0
-        if ft_body:
-            ft_all, ft_p, ft_t = run_tests(func_def, ft_body, tests_list[i])
-        if ft_all:
-            ft_pass += 1
-        ft_total_tests += ft_t
-        ft_passed_tests += ft_p
+            ft_all = False
+            ft_p = 0
+            ft_t = 0
+            if ft_results[i].strip():
+                ft_all, ft_p, ft_t = await run_tests_sandboxed(sbx, ft_code, test_list)
+            if ft_all:
+                ft_pass += 1
+            ft_total_tests += ft_t
+            ft_passed_tests += ft_p
 
-        comparisons.append({
-            "name": names[i],
-            "prompt": prompts[i][:200],
-            "base_code": base_results[i][:300],
-            "grpo_code": ft_results[i][:300],
-            "base_passed": f"{base_p}/{base_t}",
-            "grpo_passed": f"{ft_p}/{ft_t}",
-            "base_all_pass": base_all,
-            "grpo_all_pass": ft_all,
-        })
+            comparisons.append({
+                "name": names[i],
+                "prompt": prompts[i][:200],
+                "base_code": base_results[i][:300],
+                "grpo_code": ft_results[i][:300],
+                "base_passed": f"{base_p}/{base_t}",
+                "grpo_passed": f"{ft_p}/{ft_t}",
+                "base_all_pass": base_all,
+                "grpo_all_pass": ft_all,
+            })
 
     total = len(prompts)
     base_rate = base_pass / total * 100
@@ -877,6 +770,7 @@ async def evaluate(
 @cpu_env.task(report=True)
 async def pipeline(
     model_name: str = "HuggingFaceTB/SmolLM2-135M",
+    method: str = "lora",
     epochs: int = 3,
     lr: float = 5e-5,
     batch_size: int = 4,
@@ -890,6 +784,9 @@ async def pipeline(
 ) -> str:
     """
     GRPO fine-tuning pipeline — teach a model to write correct Python.
+
+    Args:
+        method: "lora" for LoRA adapters (default), "full" for full fine-tuning.
 
     1. Generate coding problems with test cases
     2. Train with GRPO — reward = fraction of tests passed
@@ -921,7 +818,7 @@ async def pipeline(
     )
 
     finetuned_dir = await train(
-        model_name, data_dir, epochs, lr, batch_size,
+        model_name, data_dir, method, epochs, lr, batch_size,
         num_generations, max_completion_length, lora_r, lora_alpha,
     )
 
