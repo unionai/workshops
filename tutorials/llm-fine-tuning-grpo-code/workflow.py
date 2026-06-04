@@ -501,14 +501,23 @@ async def train(
     await asyncio.to_thread(trainer.train)
     log.info("Training loop finished.")
 
-    # Close sandbox session — all run() calls had communicate_text() awaited,
-    # so self._tasks should be empty. Use a timeout just in case.
+    # Close sandbox session. The updated sandbox library kills child
+    # processes on task cancellation, so close() should complete.
     log.info("Closing sandbox session...")
     try:
-        await asyncio.wait_for(sbx.__aexit__(None, None, None), timeout=10.0)
+        await asyncio.wait_for(sbx.__aexit__(None, None, None), timeout=15.0)
         log.info("Sandbox session closed.")
     except (asyncio.TimeoutError, Exception) as e:
-        log.warning(f"Sandbox close issue: {e}, continuing...")
+        log.warning(f"Sandbox close timeout ({e}), force cleaning up...")
+        # Nuclear fallback: shut down thread pool and cancel all tasks
+        executor = loop._default_executor
+        if executor:
+            executor.shutdown(wait=False, cancel_futures=True)
+        for task in asyncio.all_tasks():
+            if task is not asyncio.current_task():
+                task.cancel()
+        await asyncio.sleep(1)
+        log.info("Force cleanup done.")
 
     log.info("Saving model...")
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
