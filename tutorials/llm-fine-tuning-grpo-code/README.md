@@ -33,12 +33,13 @@ The workflow runs three steps:
 │ Prepare Data │────▶│   GRPO Training   │────▶│  Evaluate  │
 │  (CPU task)  │     │   (GPU task)      │     │ (GPU task) │
 └──────────────┘     └──────────────────┘     └────────────┘
- 30 Python problems   LoRA + GRPO with         Base vs fine-tuned
- with test cases      sandboxed code exec      pass rate comparison
+ MBPP problems        GRPO with sandboxed      Base vs fine-tuned
+ from HuggingFace     code execution           sandboxed comparison
+                      (LoRA or full)
 ```
 
-1. **Prepare data** — Generates a dataset of Python function problems (e.g., `double`, `fibonacci`, `flatten`) each with 3 test assertions.
-2. **Train with GRPO** — Fine-tunes a model using LoRA. For each prompt, generates multiple completions, executes them in a [sandbox](#sandboxed-code-execution), and rewards based on test pass rate.
+1. **Prepare data** — Downloads the MBPP dataset from HuggingFace and builds prompts with function signatures extracted from reference solutions.
+2. **Train with GRPO** — Fine-tunes a model (LoRA by default, or full with `--method full`). For each prompt, generates multiple completions, executes them in a [sandbox](#sandboxed-code-execution), and rewards based on test pass rate.
 3. **Evaluate** — Runs the same problems through both the base and fine-tuned model, comparing pass rates side by side.
 
 ## Files
