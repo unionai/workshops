@@ -383,14 +383,18 @@ async def train(
                 loop,
             )
 
-    # -- Sandbox helper: opens a fresh session per batch to avoid process buildup --
-    async def _run_batch_sandboxed(items: list[tuple[str, list[str]]]) -> list[tuple[bool, int, int]]:
-        """Run a batch of code+tests in a fresh sandbox session."""
-        results = []
-        async with sb.local.session(network_mode="blocked") as sbx:
-            for full_code, test_list in items:
-                results.append(await run_tests_sandboxed(sbx, full_code, test_list))
-        return results
+    # -- Sandbox session for safe code execution --
+    # One persistent session for the entire training run. Each run() call is
+    # always followed by communicate_text(), which ensures the process completes
+    # and the internal task is removed from the session's task set.
+    sbx = await sb.local.session(network_mode="blocked").__aenter__()
+
+    async def _run_single_sandboxed(full_code: str, test_list: list[str]) -> tuple[bool, int, int]:
+        """Run a single test in the sandbox, always completing the process."""
+        try:
+            return await run_tests_sandboxed(sbx, full_code, test_list)
+        except Exception:
+            return False, 0, len(test_list)
 
     # -- Reward function --
     def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], setup_code: list[str], **kwargs) -> list[float]:
@@ -398,29 +402,29 @@ async def train(
         rewards = []
         batch_passes = 0
 
-        # Build all code+test pairs for this batch
-        batch_items: list[tuple[str, list[str]] | None] = []
         for completion, p, t, setup in zip(completions, func_prompt, tests, setup_code):
             func_def = p.strip().split("\n")[-1]
             full_code = func_def + "\n" + completion
             if setup:
                 full_code = setup + "\n" + full_code
             test_list = [l.strip() for l in t.strip().split("\n") if l.strip().startswith("assert")]
-            batch_items.append((full_code, test_list))
 
-        # Run all tests in a fresh sandbox session
-        future = asyncio.run_coroutine_threadsafe(
-            _run_batch_sandboxed(batch_items),
-            loop,
-        )
-        try:
-            batch_results = future.result(timeout=30)
-        except Exception as e:
-            log.warning(f"[Sandbox] batch error: {type(e).__name__}: {e}")
-            future.cancel()  # Cancel the coroutine so the sandbox session gets cleaned up
-            batch_results = [(False, 0, len(item[1])) for item in batch_items]
-
-        for (all_passed, passed, total) in batch_results:
+            # Run in sandbox with timeout. If it times out, we still wait for
+            # the coroutine to finish (sandbox timeout_s=5.0 will kill it) so
+            # that self._tasks stays clean. We just return 0 reward.
+            future = asyncio.run_coroutine_threadsafe(
+                _run_single_sandboxed(full_code, test_list),
+                loop,
+            )
+            try:
+                all_passed, passed, total = future.result(timeout=10)
+            except TimeoutError:
+                log.warning(f"[Sandbox] timeout, waiting for cleanup...")
+                try:
+                    future.result(timeout=20)  # give sandbox time to kill process
+                except Exception:
+                    pass
+                all_passed, passed, total = False, 0, len(test_list)
             reward = passed / total if total > 0 else 0.0
             rewards.append(reward)
 
@@ -497,12 +501,15 @@ async def train(
     await asyncio.to_thread(trainer.train)
     log.info("Training loop finished.")
 
-    # Cancel any lingering sandbox coroutines from timed-out batches
-    for task in asyncio.all_tasks(loop):
-        if task is not asyncio.current_task() and not task.done():
-            task.cancel()
-    # Give cancelled tasks a moment to clean up
-    await asyncio.sleep(1)
+    # Close sandbox session — all run() calls had communicate_text() awaited,
+    # so self._tasks should be empty. Use a timeout just in case.
+    log.info("Closing sandbox session...")
+    try:
+        await asyncio.wait_for(sbx.__aexit__(None, None, None), timeout=10.0)
+        log.info("Sandbox session closed.")
+    except (asyncio.TimeoutError, Exception) as e:
+        log.warning(f"Sandbox close issue: {e}, continuing...")
+
     log.info("Saving model...")
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
     final_pass = reward_stats["all_pass"] / max(reward_stats["total"], 1) * 100
