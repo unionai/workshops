@@ -24,6 +24,7 @@ Usage:
     flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B"
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -31,9 +32,11 @@ import re
 import tempfile
 
 import flyte
+import flyte.io
 import flyte.report
 import markdown
 from config import cpu_env, gpu_env, HF_TOKEN
+from report_helpers import make_bar_chart, make_line_chart, pipeline_step_indicator, wrap_report
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -338,7 +341,7 @@ async def train(
     import torch
     from datasets import load_from_disk
     from peft import LoraConfig
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
     from trl import GRPOConfig, GRPOTrainer
 
     log.info(f"GRPO Code Training: model={model_name}")
@@ -348,8 +351,17 @@ async def train(
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
         log.info(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
 
-    await flyte.report.replace.aio(f"<h2>Loading model: {model_name}</h2><p>Setting up GRPO for code gen...</p>")
-    await flyte.report.flush.aio()
+    await flyte.report.replace.aio(
+        wrap_report(
+            f"<h2>Loading Model...</h2>"
+            f"<h3>{model_name}</h3>"
+            f'<div class="card">'
+            f"<p><b>Method:</b> <span class=\"badge badge-info\">GRPO + LoRA</span></p>"
+            f"<p>Setting up code generation training...</p>"
+            f"</div>"
+        ),
+        do_flush=True,
+    )
 
     # -- Load data --
     data_path = await data_dir.download()
@@ -380,67 +392,131 @@ async def train(
     )
 
     # -- Metrics tracking --
-    metrics_history = {
-        "batch": [], "avg_reward": [], "pass_rate": [],
-        "batch_reward": [], "batch_pass_rate": [],
-    }
+    training_log: list[dict] = []
+    reward_log: list[dict] = []
     reward_stats = {"calls": 0, "total_reward": 0, "all_pass": 0, "total": 0}
+    train_state = {"max_steps": 0}  # updated by callback, read by reward fn
+    loop = asyncio.get_running_loop()
 
-    def build_charts() -> str:
-        import base64
-        import io
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
+    def _build_training_report(max_steps: int) -> str:
+        """Build the live training report HTML from current metrics."""
+        stats_html = f"""
+        <h2>GRPO Training in Progress...</h2>
+        <h3>{model_name}</h3>
+        <div class="stat-grid">
+          <div class="stat"><div class="value">GRPO</div><div class="label">Method</div></div>
+          <div class="stat"><div class="value">{len(dataset['train']):,}</div><div class="label">Train Examples</div></div>
+          <div class="stat"><div class="value">{epochs}</div><div class="label">Epochs</div></div>
+          <div class="stat"><div class="value">{lr}</div><div class="label">Learning Rate</div></div>
+          <div class="stat"><div class="value">{num_generations}</div><div class="label">Generations</div></div>
+          <div class="stat"><div class="value">{batch_size}</div><div class="label">Batch Size</div></div>
+        </div>
+        """
 
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        charts_html = ""
 
-        axes[0].plot(metrics_history["batch"], metrics_history["avg_reward"], "b-", linewidth=1.5, label="Running avg")
-        axes[0].plot(metrics_history["batch"], metrics_history["batch_reward"], "b.", alpha=0.3, markersize=4, label="Per batch")
-        axes[0].set_xlabel("Batch")
-        axes[0].set_ylabel("Avg Reward")
-        axes[0].set_title("Reward (Tests Passed)")
-        axes[0].set_ylim(0, 1.05)
-        axes[0].legend(fontsize=8)
-        axes[0].grid(True, alpha=0.3)
+        # Progress bar from trainer logs
+        if training_log:
+            current = training_log[-1]
+            progress_pct = current["step"] / max_steps * 100 if max_steps else 0
+            loss_display = f"Loss: <span class=\"highlight\">{current['loss']:.4f}</span>" if current.get("loss") else ""
+            charts_html += f"""
+            <div class="card">
+              <b>Step {current['step']}/{max_steps}</b>
+              ({progress_pct:.0f}%) |
+              Epoch {current['epoch']:.2f}/{epochs}
+              {f' | {loss_display}' if loss_display else ''}
+              <div style="background:#e9ecef;border-radius:4px;height:8px;margin-top:8px;">
+                <div style="background:#0f3460;width:{progress_pct:.1f}%;height:100%;border-radius:4px;"></div>
+              </div>
+            </div>
+            """
 
-        axes[1].plot(metrics_history["batch"], metrics_history["pass_rate"], "g-", linewidth=1.5, label="Running avg")
-        axes[1].plot(metrics_history["batch"], metrics_history["batch_pass_rate"], "g.", alpha=0.3, markersize=4, label="Per batch")
-        axes[1].set_xlabel("Batch")
-        axes[1].set_ylabel("All Tests Pass %")
-        axes[1].set_title("Pass Rate")
-        axes[1].set_ylim(0, 105)
-        axes[1].legend(fontsize=8)
-        axes[1].grid(True, alpha=0.3)
+            # Training loss chart
+            loss_entries = [e for e in training_log if "loss" in e]
+            if len(loss_entries) >= 2:
+                loss_chart = make_line_chart(
+                    data=loss_entries,
+                    x_key="epoch",
+                    y_keys=["loss"],
+                    title="Training Loss",
+                    x_label="Epoch",
+                    y_label="Loss",
+                    colors=["#5a7db5"],
+                )
+                charts_html += f'<div class="chart-container">{loss_chart}</div>'
 
-        plt.tight_layout()
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=100)
-        plt.close(fig)
-        buf.seek(0)
-        return base64.b64encode(buf.read()).decode()
+        # Reward charts from reward function
+        if len(reward_log) >= 2:
+            avg_reward = reward_stats["total_reward"] / max(reward_stats["total"], 1)
+            pass_rate = reward_stats["all_pass"] / max(reward_stats["total"], 1) * 100
 
-    def update_report():
-        avg_reward = reward_stats["total_reward"] / max(reward_stats["total"], 1)
-        pass_rate = reward_stats["all_pass"] / max(reward_stats["total"], 1) * 100
+            charts_html += f"""
+            <div class="stat-grid" style="margin-top:16px;">
+              <div class="stat"><div class="value">{avg_reward:.3f}</div><div class="label">Avg Reward</div></div>
+              <div class="stat"><div class="value">{pass_rate:.1f}%</div><div class="label">Pass Rate</div></div>
+              <div class="stat"><div class="value">{reward_stats['total']}</div><div class="label">Samples Scored</div></div>
+            </div>
+            """
 
-        chart_html = ""
-        if len(metrics_history["batch"]) >= 2:
-            chart_b64 = build_charts()
-            chart_html = f'<img src="data:image/png;base64,{chart_b64}" style="width:100%;max-width:800px;" />'
+            reward_chart = make_line_chart(
+                data=reward_log,
+                x_key="batch",
+                y_keys=["avg_reward", "batch_reward"],
+                title="Reward (Tests Passed)",
+                x_label="Reward Batch",
+                y_label="Reward",
+                colors=["#0f3460", "#5a7db5"],
+                y_max_cap=1.05,
+                y_display_names={"avg_reward": "Running Avg", "batch_reward": "Per Batch"},
+            )
+            charts_html += f'<div class="chart-container">{reward_chart}</div>'
 
-        flyte.report.replace(
-            f"<h2>GRPO Code Training — {model_name}</h2>"
-            f"<table>"
-            f"<tr><th>Metric</th><th>Value</th></tr>"
-            f"<tr><td>Batches</td><td>{reward_stats['calls']}</td></tr>"
-            f"<tr><td>Avg Reward</td><td>{avg_reward:.3f}</td></tr>"
-            f"<tr><td>All Tests Pass</td><td>{pass_rate:.1f}%</td></tr>"
-            f"<tr><td>Total Samples</td><td>{reward_stats['total']}</td></tr>"
-            f"</table>"
-            f"{chart_html}"
-        )
-        flyte.report.flush()
+            pass_chart = make_line_chart(
+                data=reward_log,
+                x_key="batch",
+                y_keys=["pass_rate", "batch_pass_rate"],
+                title="All Tests Pass Rate",
+                x_label="Reward Batch",
+                y_label="Pass %",
+                colors=["#06d6a0", "#5a7db5"],
+                y_max_cap=105.0,
+                y_display_names={"pass_rate": "Running Avg", "batch_pass_rate": "Per Batch"},
+            )
+            charts_html += f'<div class="chart-container">{pass_chart}</div>'
+
+        return wrap_report(stats_html + charts_html)
+
+    # -- Trainer callback for loss/progress updates --
+    class MetricsCallback(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if not logs:
+                return
+            train_state["max_steps"] = state.max_steps
+            entry = {
+                "step": state.global_step,
+                "epoch": round(logs.get("epoch", 0), 2),
+            }
+            if "loss" in logs:
+                entry["loss"] = round(logs["loss"], 4)
+            if "learning_rate" in logs:
+                entry["lr"] = logs["learning_rate"]
+            if "grad_norm" in logs:
+                entry["grad_norm"] = round(float(logs["grad_norm"]), 4)
+            training_log.append(entry)
+            log.info(
+                f"step={state.global_step}/{state.max_steps} "
+                f"epoch={entry['epoch']:.2f}"
+                + (f" loss={entry['loss']:.4f}" if "loss" in entry else "")
+            )
+
+            asyncio.run_coroutine_threadsafe(
+                flyte.report.replace.aio(
+                    _build_training_report(state.max_steps),
+                    do_flush=True,
+                ),
+                loop,
+            )
 
     # -- Reward function --
     def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], name: list[str], **kwargs) -> list[float]:
@@ -476,11 +552,13 @@ async def train(
         running_avg = reward_stats["total_reward"] / reward_stats["total"]
         running_pass = reward_stats["all_pass"] / reward_stats["total"] * 100
 
-        metrics_history["batch"].append(reward_stats["calls"])
-        metrics_history["avg_reward"].append(running_avg)
-        metrics_history["pass_rate"].append(running_pass)
-        metrics_history["batch_reward"].append(batch_avg)
-        metrics_history["batch_pass_rate"].append(batch_pass_pct)
+        reward_log.append({
+            "batch": reward_stats["calls"],
+            "avg_reward": round(running_avg, 4),
+            "pass_rate": round(running_pass, 2),
+            "batch_reward": round(batch_avg, 4),
+            "batch_pass_rate": round(batch_pass_pct, 2),
+        })
 
         if reward_stats["calls"] % 5 == 0:
             log.info(
@@ -488,7 +566,14 @@ async def train(
                 f"avg_reward={running_avg:.3f}, pass_rate={running_pass:.1f}%, "
                 f"batch_reward={batch_avg:.3f}"
             )
-            update_report()
+            # Push report update from trainer thread
+            asyncio.run_coroutine_threadsafe(
+                flyte.report.replace.aio(
+                    _build_training_report(train_state["max_steps"]),
+                    do_flush=True,
+                ),
+                loop,
+            )
 
         return rewards
 
@@ -514,17 +599,20 @@ async def train(
         reward_funcs=code_reward,
         peft_config=peft_config,
         processing_class=tokenizer,
+        callbacks=[MetricsCallback()],
     )
 
     log.info(f"Starting GRPO training (num_generations={num_generations})...")
-    update_report()
+    await flyte.report.replace.aio(
+        _build_training_report(trainer.state.max_steps or 0),
+        do_flush=True,
+    )
 
     trainer.train()
 
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
     final_pass = reward_stats["all_pass"] / max(reward_stats["total"], 1) * 100
     log.info(f"GRPO training complete. Avg reward: {final_avg:.3f}, pass rate: {final_pass:.1f}%")
-    update_report()
 
     # -- Merge LoRA and save --
     save_dir = os.path.join(tempfile.mkdtemp(), "grpo_model")
@@ -533,18 +621,62 @@ async def train(
     merged_model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
 
-    chart_html = ""
-    if len(metrics_history["batch"]) >= 2:
-        chart_b64 = build_charts()
-        chart_html = f'<img src="data:image/png;base64,{chart_b64}" style="width:100%;max-width:800px;" />'
+    # -- Final report --
+    final_charts = ""
+    loss_entries = [e for e in training_log if "loss" in e]
+    if len(loss_entries) >= 2:
+        loss_chart = make_line_chart(
+            data=loss_entries,
+            x_key="epoch",
+            y_keys=["loss"],
+            title="Training Loss",
+            x_label="Epoch",
+            y_label="Loss",
+            colors=["#5a7db5"],
+        )
+        final_charts += f'<div class="chart-container">{loss_chart}</div>'
+
+    if len(reward_log) >= 2:
+        reward_chart = make_line_chart(
+            data=reward_log,
+            x_key="batch",
+            y_keys=["avg_reward", "batch_reward"],
+            title="Reward (Tests Passed)",
+            x_label="Reward Batch",
+            y_label="Reward",
+            colors=["#0f3460", "#5a7db5"],
+            y_max_cap=1.05,
+            y_display_names={"avg_reward": "Running Avg", "batch_reward": "Per Batch"},
+        )
+        final_charts += f'<div class="chart-container">{reward_chart}</div>'
+
+        pass_chart = make_line_chart(
+            data=reward_log,
+            x_key="batch",
+            y_keys=["pass_rate", "batch_pass_rate"],
+            title="All Tests Pass Rate",
+            x_label="Reward Batch",
+            y_label="Pass %",
+            colors=["#06d6a0", "#5a7db5"],
+            y_max_cap=105.0,
+            y_display_names={"pass_rate": "Running Avg", "batch_pass_rate": "Per Batch"},
+        )
+        final_charts += f'<div class="chart-container">{pass_chart}</div>'
 
     await flyte.report.replace.aio(
-        f"<h2>GRPO Training Complete — {model_name}</h2>"
-        f"<p><b>Epochs:</b> {epochs} | <b>LR:</b> {lr}</p>"
-        f"<p><b>Avg reward:</b> {final_avg:.3f} | <b>Pass rate:</b> {final_pass:.1f}%</p>"
-        f"{chart_html}"
+        wrap_report(
+            f"<h2>GRPO Training Complete</h2>"
+            f"<h3>{model_name}</h3>"
+            f'<div class="stat-grid">'
+            f'  <div class="stat"><div class="value">{final_avg:.3f}</div><div class="label">Avg Reward</div></div>'
+            f'  <div class="stat"><div class="value">{final_pass:.1f}%</div><div class="label">Pass Rate</div></div>'
+            f'  <div class="stat"><div class="value">{epochs}</div><div class="label">Epochs</div></div>'
+            f'  <div class="stat"><div class="value">{lr}</div><div class="label">Learning Rate</div></div>'
+            f'</div>'
+            f"{final_charts}"
+        ),
+        do_flush=True,
     )
-    await flyte.report.flush.aio()
 
     return await flyte.io.Dir.from_local(save_dir)
 
@@ -566,8 +698,10 @@ async def evaluate(
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     log.info("Starting evaluation...")
-    await flyte.report.replace.aio("<h2>Evaluation</h2><p>Loading models...</p>")
-    await flyte.report.flush.aio()
+    await flyte.report.replace.aio(
+        wrap_report("<h2>Evaluation</h2><p>Loading models...</p>"),
+        do_flush=True,
+    )
 
     data_path = await data_dir.download()
     dataset = load_from_disk(data_path)
@@ -598,8 +732,10 @@ async def evaluate(
 
     # -- Base model --
     log.info(f"Loading base model: {model_name}")
-    await flyte.report.replace.aio("<h2>Evaluation</h2><p>Running base model...</p>")
-    await flyte.report.flush.aio()
+    await flyte.report.replace.aio(
+        wrap_report("<h2>Evaluation</h2><p>Running base model...</p>"),
+        do_flush=True,
+    )
 
     base_model = AutoModelForCausalLM.from_pretrained(model_name, token=HF_TOKEN, dtype=dtype, device_map="auto")
     base_results = generate_code(base_model, prompts)
@@ -609,8 +745,10 @@ async def evaluate(
 
     # -- GRPO model --
     log.info("Loading GRPO-trained model...")
-    await flyte.report.replace.aio("<h2>Evaluation</h2><p>Running GRPO-trained model...</p>")
-    await flyte.report.flush.aio()
+    await flyte.report.replace.aio(
+        wrap_report("<h2>Evaluation</h2><p>Running GRPO-trained model...</p>"),
+        do_flush=True,
+    )
 
     ft_path = await finetuned_dir.download()
     ft_model = AutoModelForCausalLM.from_pretrained(ft_path, dtype=dtype, device_map="auto")
@@ -673,30 +811,53 @@ async def evaluate(
     log.info(f"GRPO model: {ft_rate:.1f}% all-pass ({ft_pass}/{total})")
 
     # -- Report --
+    improvement = ft_rate - base_rate
+    imp_badge = "badge-success" if improvement > 0 else "badge-danger" if improvement < 0 else "badge-info"
+
+    bar_chart = make_bar_chart(
+        labels=["All Tests Pass", "Individual Tests"],
+        series={
+            "Base": [base_rate, base_passed_tests / max(base_total_tests, 1) * 100],
+            "GRPO": [ft_rate, ft_passed_tests / max(ft_total_tests, 1) * 100],
+        },
+        title="Base vs GRPO — Code Generation",
+        colors=["#adb5bd", "#0f3460"],
+        y_max_cap=105.0,
+    )
+
     examples_html = ""
     for c in comparisons[:15]:
-        base_color = "green" if c["base_all_pass"] else "red"
-        ft_color = "green" if c["grpo_all_pass"] else "red"
+        base_badge = "badge-success" if c["base_all_pass"] else "badge-danger"
+        ft_badge = "badge-success" if c["grpo_all_pass"] else "badge-danger"
         examples_html += f"""
-<div style="border:1px solid #ddd; padding:12px; margin:8px 0; border-radius:4px;">
-<p><b>{c['name']}</b> — Tests: base <span style="color:{base_color};">{c['base_passed']}</span> | GRPO <span style="color:{ft_color};">{c['grpo_passed']}</span></p>
-<p><b>Base:</b><pre style="background:#f5f5f5;padding:8px;font-size:0.85em;">{c['base_code'][:200]}</pre></p>
-<p><b>GRPO:</b><pre style="background:#f0fff0;padding:8px;font-size:0.85em;">{c['grpo_code'][:200]}</pre></p>
+<div class="card">
+<p><b>{c['name']}</b> —
+  Base: <span class="badge {base_badge}">{c['base_passed']}</span> |
+  GRPO: <span class="badge {ft_badge}">{c['grpo_passed']}</span></p>
+<p><b>Base:</b><pre style="background:#f5f5f5;padding:8px;font-size:0.85em;border-radius:4px;">{c['base_code'][:200]}</pre></p>
+<p><b>GRPO:</b><pre style="background:#f0fff0;padding:8px;font-size:0.85em;border-radius:4px;">{c['grpo_code'][:200]}</pre></p>
 </div>"""
 
-    await flyte.report.replace.aio(f"""
-<h2>Evaluation Results — Code Generation</h2>
-<table>
-<tr><th></th><th>All Tests Pass</th><th>Individual Tests</th></tr>
-<tr><td><b>Base model</b></td><td>{base_rate:.1f}% ({base_pass}/{total})</td><td>{base_passed_tests}/{base_total_tests}</td></tr>
-<tr><td><b>GRPO-trained</b></td><td>{ft_rate:.1f}% ({ft_pass}/{total})</td><td>{ft_passed_tests}/{ft_total_tests}</td></tr>
-</table>
-<p><b>Improvement:</b> {ft_rate - base_rate:+.1f} percentage points</p>
-<hr/>
-<h3>Examples</h3>
-{examples_html}
-""")
-    await flyte.report.flush.aio()
+    await flyte.report.replace.aio(
+        wrap_report(
+            f"<h2>Evaluation Results — Code Generation</h2>"
+            f'<div class="stat-grid">'
+            f'  <div class="stat"><div class="value">{base_rate:.1f}%</div><div class="label">Base Pass Rate</div></div>'
+            f'  <div class="stat"><div class="value">{ft_rate:.1f}%</div><div class="label">GRPO Pass Rate</div></div>'
+            f'  <div class="stat"><div class="value"><span class="badge {imp_badge}">{improvement:+.1f}pp</span></div><div class="label">Improvement</div></div>'
+            f'  <div class="stat"><div class="value">{total}</div><div class="label">Problems Tested</div></div>'
+            f'</div>'
+            f'<div class="chart-container">{bar_chart}</div>'
+            f"<table>"
+            f"<tr><th></th><th>All Tests Pass</th><th>Individual Tests</th></tr>"
+            f"<tr><td><b>Base model</b></td><td>{base_rate:.1f}% ({base_pass}/{total})</td><td>{base_passed_tests}/{base_total_tests}</td></tr>"
+            f"<tr><td><b>GRPO-trained</b></td><td>{ft_rate:.1f}% ({ft_pass}/{total})</td><td>{ft_passed_tests}/{ft_total_tests}</td></tr>"
+            f"</table>"
+            f"<h3>Examples</h3>"
+            f"{examples_html}"
+        ),
+        do_flush=True,
+    )
 
     return json.dumps({
         "base_pass_rate": round(base_rate, 1),
@@ -735,22 +896,29 @@ async def pipeline(
     3. Evaluate: pass rate before/after
     """
     log.info(f"Pipeline: {model_name} | GRPO code generation")
+    steps = ["Prepare Data", "GRPO Train", "Evaluate"]
 
     await flyte.report.replace.aio(
-        f"<h2>GRPO Code Pipeline</h2>"
-        f"<p><b>Model:</b> {model_name}</p>"
-        f"<p>Step 1/3: Preparing problems...</p>"
+        wrap_report(
+            f"<h2>GRPO Code Pipeline</h2>"
+            f"<h3>{model_name}</h3>"
+            f"{pipeline_step_indicator(0, steps)}"
+            f'<div class="card"><p>Preparing coding problems...</p></div>'
+        ),
+        do_flush=True,
     )
-    await flyte.report.flush.aio()
 
     data_dir = await prepare_data(max_train_samples, max_eval_samples)
 
     await flyte.report.replace.aio(
-        f"<h2>GRPO Code Pipeline</h2>"
-        f"<p><b>Model:</b> {model_name}</p>"
-        f"<p>Step 2/3: GRPO training (reward = tests pass)...</p>"
+        wrap_report(
+            f"<h2>GRPO Code Pipeline</h2>"
+            f"<h3>{model_name}</h3>"
+            f"{pipeline_step_indicator(1, steps)}"
+            f'<div class="card"><p>GRPO training — reward = tests pass...</p></div>'
+        ),
+        do_flush=True,
     )
-    await flyte.report.flush.aio()
 
     finetuned_dir = await train(
         model_name, data_dir, epochs, lr, batch_size,
@@ -758,23 +926,34 @@ async def pipeline(
     )
 
     await flyte.report.replace.aio(
-        f"<h2>GRPO Code Pipeline</h2>"
-        f"<p><b>Model:</b> {model_name}</p>"
-        f"<p>Step 3/3: Evaluating...</p>"
+        wrap_report(
+            f"<h2>GRPO Code Pipeline</h2>"
+            f"<h3>{model_name}</h3>"
+            f"{pipeline_step_indicator(2, steps)}"
+            f'<div class="card"><p>Evaluating base vs GRPO model...</p></div>'
+        ),
+        do_flush=True,
     )
-    await flyte.report.flush.aio()
 
     result = await evaluate(model_name, finetuned_dir, data_dir, num_eval_examples)
     metrics = json.loads(result)
 
-    await flyte.report.replace.aio(
-        f"<h2>GRPO Code Pipeline Complete</h2>"
-        f"<p><b>Model:</b> {model_name}</p>"
-        f"<p><b>Base pass rate:</b> {metrics['base_pass_rate']}%</p>"
-        f"<p><b>GRPO pass rate:</b> {metrics['grpo_pass_rate']}%</p>"
-        f"<p><b>Improvement:</b> {metrics['improvement']:+.1f} percentage points</p>"
-    )
-    await flyte.report.flush.aio()
+    improvement = metrics["improvement"]
+    imp_badge = "badge-success" if improvement > 0 else "badge-danger" if improvement < 0 else "badge-info"
 
-    log.info(f"Pipeline complete. Improvement: {metrics['improvement']:+.1f}pp")
+    await flyte.report.replace.aio(
+        wrap_report(
+            f"<h2>GRPO Code Pipeline Complete</h2>"
+            f"<h3>{model_name}</h3>"
+            f"{pipeline_step_indicator(3, steps)}"
+            f'<div class="stat-grid">'
+            f'  <div class="stat"><div class="value">{metrics["base_pass_rate"]}%</div><div class="label">Base Pass Rate</div></div>'
+            f'  <div class="stat"><div class="value">{metrics["grpo_pass_rate"]}%</div><div class="label">GRPO Pass Rate</div></div>'
+            f'  <div class="stat"><div class="value"><span class="badge {imp_badge}">{improvement:+.1f}pp</span></div><div class="label">Improvement</div></div>'
+            f'</div>'
+        ),
+        do_flush=True,
+    )
+
+    log.info(f"Pipeline complete. Improvement: {improvement:+.1f}pp")
     return result
