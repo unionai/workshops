@@ -388,8 +388,9 @@ async def train(
     # access. The session persists across reward function calls so we don't pay
     # setup cost per evaluation. The reward function (sync, in trainer thread)
     # uses run_coroutine_threadsafe to call into the async sandbox.
-    async with sb.local.session(network_mode="blocked") as sbx:
+    sbx = await sb.local.session(network_mode="blocked").__aenter__()
 
+    try:
         # -- Reward function --
         def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], setup_code: list[str], **kwargs) -> list[float]:
             """Reward = fraction of test cases passed. All pass = 1.0."""
@@ -492,8 +493,10 @@ async def train(
             do_flush=True,
         )
 
-        await loop.run_in_executor(None, trainer.train)
-
+        await asyncio.to_thread(trainer.train)
+    finally:
+        log.info("Training loop finished, skipping sandbox close (known hang).")
+    log.info("Saving model...")
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
     final_pass = reward_stats["all_pass"] / max(reward_stats["total"], 1) * 100
     log.info(f"GRPO training complete. Avg reward: {final_avg:.3f}, pass rate: {final_pass:.1f}%")
@@ -508,6 +511,7 @@ async def train(
         log.info("Saving full model...")
         trainer.model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
+    log.info("Model saved.")
 
     # -- Final report --
     final_charts = ""
@@ -656,7 +660,8 @@ async def evaluate(
     ft_passed_tests = 0
     comparisons = []
 
-    async with sb.local.session(network_mode="blocked") as sbx:
+    sbx = await sb.local.session(network_mode="blocked").__aenter__()
+    try:
         for i in range(len(prompts)):
             func_def = prompts[i].strip().split("\n")[-1]
             setup = setup_codes[i] if setup_codes[i] else ""
@@ -699,6 +704,8 @@ async def evaluate(
                 "base_all_pass": base_all,
                 "grpo_all_pass": ft_all,
             })
+    finally:
+        pass  # Skip sandbox close (known hang issue with local sessions)
 
     total = len(prompts)
     base_rate = base_pass / total * 100

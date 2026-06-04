@@ -67,7 +67,7 @@ def make_line_chart(
     y_min = min(all_y) if all_y else 0
     y_max = max(all_y) if all_y else 1
     y_pad = (y_max - y_min) * 0.1 or 0.1
-    y_min_plot = max(0, y_min - y_pad)
+    y_min_plot = y_min - y_pad
     y_max_plot = y_max + y_pad
     if y_max_cap is not None:
         y_max_plot = min(y_max_plot, y_max_cap)
