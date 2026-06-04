@@ -80,7 +80,10 @@ async def run_tests_sandboxed(
         network_mode="blocked",
         timeout_s=5.0,
     )
-    out, _ = await proc.communicate_text()
+    out, err = await proc.communicate_text()
+
+    if not out or proc.returncode != 0:
+        log.warning(f"[Sandbox] returncode={proc.returncode} stdout={repr(out[:100]) if out else 'None'} stderr={err[:200] if err else 'None'}")
 
     passed = out.count("PASS:") if out else 0
     return passed == total, passed, total
@@ -412,7 +415,8 @@ async def train(
                 )
                 try:
                     all_passed, passed, total = future.result(timeout=10)
-                except Exception:
+                except Exception as e:
+                    log.warning(f"[Sandbox] error: {type(e).__name__}: {e}")
                     all_passed, passed, total = False, 0, len(test_list)
 
                 reward = passed / total if total > 0 else 0.0
@@ -488,7 +492,7 @@ async def train(
             do_flush=True,
         )
 
-        trainer.train()
+        await loop.run_in_executor(None, trainer.train)
 
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
     final_pass = reward_stats["all_pass"] / max(reward_stats["total"], 1) * 100
