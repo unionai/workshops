@@ -504,11 +504,14 @@ async def train(
     await asyncio.to_thread(trainer.train)
     log.info("Training loop finished.")
 
-    # Stop the sandbox event loop — all its pending tasks die with it.
-    # The daemon thread exits automatically.
+    # Stop the sandbox event loop and its thread pool workers.
     log.info("Stopping sandbox...")
     sandbox_loop.call_soon_threadsafe(sandbox_loop.stop)
     sandbox_thread.join(timeout=5)
+    # Shut down the sandbox loop's thread pool so wait_and_collect
+    # threads don't keep the process alive after Flyte completes.
+    if hasattr(sandbox_loop, '_default_executor') and sandbox_loop._default_executor:
+        sandbox_loop._default_executor.shutdown(wait=False, cancel_futures=True)
     log.info("Sandbox stopped.")
 
     log.info("Saving model...")
