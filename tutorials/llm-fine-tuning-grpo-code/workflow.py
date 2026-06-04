@@ -383,16 +383,33 @@ async def train(
                 loop,
             )
 
-    # -- Sandbox session for safe code execution --
-    # One persistent session for the entire training run. Each run() call is
-    # always followed by communicate_text(), which ensures the process completes
-    # and the internal task is removed from the session's task set.
-    sbx = await sb.local.session(network_mode="blocked").__aenter__()
+    # -- Sandbox on a dedicated event loop --
+    # We run the sandbox on its own event loop in a daemon thread so that
+    # any zombie tasks from timed-out calls don't pollute Flyte's main
+    # event loop. When training finishes, we just stop the loop and the
+    # daemon thread dies — clean shutdown, no hangs.
+    import threading
 
-    async def _run_single_sandboxed(full_code: str, test_list: list[str]) -> tuple[bool, int, int]:
-        """Run a single test in the sandbox, always completing the process."""
+    sandbox_loop = asyncio.new_event_loop()
+    sandbox_thread = threading.Thread(
+        target=sandbox_loop.run_forever, daemon=True, name="sandbox-loop"
+    )
+    sandbox_thread.start()
+
+    # Open sandbox session on the sandbox loop
+    sbx = asyncio.run_coroutine_threadsafe(
+        sb.local.session(network_mode="blocked").__aenter__(),
+        sandbox_loop,
+    ).result()
+
+    def _run_sandboxed_sync(full_code: str, test_list: list[str]) -> tuple[bool, int, int]:
+        """Run a single test in the sandbox. Called from trainer thread."""
+        future = asyncio.run_coroutine_threadsafe(
+            run_tests_sandboxed(sbx, full_code, test_list),
+            sandbox_loop,
+        )
         try:
-            return await run_tests_sandboxed(sbx, full_code, test_list)
+            return future.result(timeout=10)
         except Exception:
             return False, 0, len(test_list)
 
@@ -409,22 +426,8 @@ async def train(
                 full_code = setup + "\n" + full_code
             test_list = [l.strip() for l in t.strip().split("\n") if l.strip().startswith("assert")]
 
-            # Run in sandbox with timeout. If it times out, we still wait for
-            # the coroutine to finish (sandbox timeout_s=5.0 will kill it) so
-            # that self._tasks stays clean. We just return 0 reward.
-            future = asyncio.run_coroutine_threadsafe(
-                _run_single_sandboxed(full_code, test_list),
-                loop,
-            )
-            try:
-                all_passed, passed, total = future.result(timeout=10)
-            except TimeoutError:
-                log.warning(f"[Sandbox] timeout, waiting for cleanup...")
-                try:
-                    future.result(timeout=20)  # give sandbox time to kill process
-                except Exception:
-                    pass
-                all_passed, passed, total = False, 0, len(test_list)
+            # Run in sandbox (uses dedicated sandbox event loop, not Flyte's)
+            all_passed, passed, total = _run_sandboxed_sync(full_code, test_list)
             reward = passed / total if total > 0 else 0.0
             rewards.append(reward)
 
@@ -501,23 +504,12 @@ async def train(
     await asyncio.to_thread(trainer.train)
     log.info("Training loop finished.")
 
-    # Close sandbox session. The updated sandbox library kills child
-    # processes on task cancellation, so close() should complete.
-    log.info("Closing sandbox session...")
-    try:
-        await asyncio.wait_for(sbx.__aexit__(None, None, None), timeout=15.0)
-        log.info("Sandbox session closed.")
-    except (asyncio.TimeoutError, Exception) as e:
-        log.warning(f"Sandbox close timeout ({e}), force cleaning up...")
-        # Nuclear fallback: shut down thread pool and cancel all tasks
-        executor = loop._default_executor
-        if executor:
-            executor.shutdown(wait=False, cancel_futures=True)
-        for task in asyncio.all_tasks():
-            if task is not asyncio.current_task():
-                task.cancel()
-        await asyncio.sleep(1)
-        log.info("Force cleanup done.")
+    # Stop the sandbox event loop — all its pending tasks die with it.
+    # The daemon thread exits automatically.
+    log.info("Stopping sandbox...")
+    sandbox_loop.call_soon_threadsafe(sandbox_loop.stop)
+    sandbox_thread.join(timeout=5)
+    log.info("Sandbox stopped.")
 
     log.info("Saving model...")
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
