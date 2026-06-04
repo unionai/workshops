@@ -40,7 +40,7 @@ log.setLevel(logging.INFO)
 # ------------------------------------------------------------------
 # Homologous gene sets - same gene across species
 # ------------------------------------------------------------------
-# Real coding sequences (truncated to ~150-300bp for tractable folding).
+# Full-length coding sequences from NCBI RefSeq (stop codon excluded).
 
 GENE_SETS = {
     "insulin": {
@@ -48,27 +48,27 @@ GENE_SETS = {
         "description": "Insulin regulates blood sugar in all vertebrates. Highly conserved across 500M+ years of evolution - even fish insulin can lower blood sugar in humans. Comparing across species reveals which regions are functionally essential (conserved) vs free to drift.",
         "sequences": {
             "Human": {
-                "dna": "ATGGCCCTGTGGATGCGCCTCCTGCCCCTGCTGGCGCTGCTGGCCCTCTGGGGACCTGACCCAGCCGCAGCCTTTGTGAACCAACACCTGTGCGGCTCACACCTGGTGGAAGCTCTCTACCTAGTGTGCGGGGAACGAGGCTTCTTCTACACACCCAAGACCCGCCGGGAGGCAGAGGACCTGCAGGTGGGGCAGGTGGAGCTGGGCGGGGGCCCTGGTGCAGGCAGCCTGCAGCCCTTGGCCCTGGAG",
+                "dna": "ATGGCCCTGTGGATGCGCCTCCTGCCCCTGCTGGCGCTGCTGGCCCTCTGGGGACCTGACCCAGCCGCAGCCTTTGTGAACCAACACCTGTGCGGCTCACACCTGGTGGAAGCTCTCTACCTAGTGTGCGGGGAACGAGGCTTCTTCTACACACCCAAGACCCGCCGGGAGGCAGAGGACCTGCAGGTGGGGCAGGTGGAGCTGGGCGGGGGCCCTGGTGCAGGCAGCCTGCAGCCCTTGGCCCTGGAGGGGTCCCTGCAGAAGCGTGGCATTGTGGAACAATGCTGTACCAGCATCTGCTCCCTCTACCAGCTGGAGAACTACTGCAAC",
                 "common_name": "Homo sapiens",
             },
             "Mouse": {
-                "dna": "ATGGCCCTGTGGATGCGCTTCCTGCCCCTGCTGGCCCTGCTCTTCCTCTGGGAGTCCCACCCCACCCAGGCTTTTGTCAAGCAGCACCTTTGTGGTTCCCACCTGGTGGAGGCTCTCTACCTGGTGTGTGGGGAGCGTGGCTTCTTCTACACACCCATGTCCCGCCGTGAAGTGGAGGACCCACAAGTGGCACAACTGGAGCTGGGTGGAGGCCCGGGAGCAGGTGACCTTCAGACCTTGGCACTGGAG",
+                "dna": "ATGGCCCTGTGGATGCGCTTCCTGCCCCTGCTGGCCCTGCTCTTCCTCTGGGAGTCCCACCCCACCCAGGCTTTTGTCAAGCAGCACCTTTGTGGTTCCCACCTGGTGGAGGCTCTCTACCTGGTGTGTGGGGAGCGTGGCTTCTTCTACACACCCATGTCCCGCCGTGAAGTGGAGGACCCACAAGTGGCACAACTGGAGCTGGGTGGAGGCCCGGGAGCAGGTGACCTTCAGACCTTGGCACTGGAGGTGGCCCAGCAGAAGCGTGGCATTGTAGATCAGTGCTGCACCAGCATCTGCTCCCTCTACCAGCTGGAGAACTACTGCAAC",
                 "common_name": "Mus musculus",
             },
             "Chicken": {
-                "dna": "ATGGCTCTCTGGATCCGATCACTGCCTCTTCTGGCTCTCCTTGTCTTTTCTGGCCCTGGAACCAGCTATGCAGCTGCCAACCAGCACCTCTGTGGCTCCCACTTGGTGGAGGCTCTCTACCTGGTGTGTGGAGAGCGTGGCTTCTTCTACTCCCCCAAAGCCCGACGGGATGTCGAGCAGCCCCTAGTGAGCAGTCCCTTGCGTGGCGAGGCAGGAGTGCTGCCTTTCCAGCAGGAGGAATACGAGAAA",
+                "dna": "ATGGCTCTCTGGATCCGATCACTGCCTCTTCTGGCTCTCCTTGTCTTTTCTGGCCCTGGAACCAGCTATGCAGCTGCCAACCAGCACCTCTGTGGCTCCCACTTGGTGGAGGCTCTCTACCTGGTGTGTGGAGAGCGTGGCTTCTTCTACTCCCCCAAAGCCCGACGGGATGTCGAGCAGCCCCTAGTGAGCAGTCCCTTGCGTGGCGAGGCAGGAGTGCTGCCTTTCCAGCAGGAGGAATACGAGAAAGTCAAGCGAGGGATTGTTGAGCAATGCTGCCATAACACGTGTTCCCTCTACCAACTGGAGAACTACTGCAAC",
                 "common_name": "Gallus gallus",
             },
             "Zebrafish": {
-                "dna": "ATGGCAGTGTGGCTTCAGGCTGGTGCTCTGTTGGTCCTGTTGGTCGTGTCCAGTGTAAGCACTAACCCAGGCACACCGCAGCACCTGTGTGGATCTCATCTGGTCGATGCCCTTTATCTGGTCTGTGGCCCAACAGGCTTCTTCTACAACCCCAAGAGAGACGTTGAGCCCCTTCTGGGTTTCCTTCCTCCTAAATCTGCCCAGGAAACTGAGGTGGCTGACTTTGCATTTAAAGATCATGCCGAGCTG",
+                "dna": "ATGGCAGTGTGGCTTCAGGCTGGTGCTCTGTTGGTCCTGTTGGTCGTGTCCAGTGTAAGCACTAACCCAGGCACACCGCAGCACCTGTGTGGATCTCATCTGGTCGATGCCCTTTATCTGGTCTGTGGCCCAACAGGCTTCTTCTACAACCCCAAGAGAGACGTTGAGCCCCTTCTGGGTTTCCTTCCTCCTAAATCTGCCCAGGAAACTGAGGTGGCTGACTTTGCATTTAAAGATCATGCCGAGCTGATAAGGAAGAGAGGCATTGTAGAGCAGTGCTGCCACAAACCCTGCAGCATCTTTGAGCTGCAGAACTACTGTAAC",
                 "common_name": "Danio rerio",
             },
             "Frog": {
-                "dna": "ATGGCTCTATGGATGCAGTGTCTGCCCCTGGTTCTTGTCCTCTTTTTCTCTACACCCAACACCGAAGCTCTAGTTAACCAGCACTTGTGTGGGTCTCACCTGGTAGAAGCCCTGTACTTAGTATGTGGGGATCGAGGCTTCTTCTACTACCCTAAGGTCAAACGGGACATGGAACAAGCACTTGTCAGTGGACCCCAGGATAATGAGTTGGATGGAATGCAGCTCCAGCCTCAGGAGTATCAGAAAATG",
+                "dna": "ATGGCTCTATGGATGCAGTGTCTGCCCCTGGTTCTTGTCCTCTTTTTCTCTACACCCAACACCGAAGCTCTAGTTAACCAGCACTTGTGTGGGTCTCACCTGGTAGAAGCCCTGTACTTAGTATGTGGGGATCGAGGCTTCTTCTACTACCCTAAGGTCAAACGGGACATGGAACAAGCACTTGTCAGTGGACCCCAGGATAATGAGTTGGATGGAATGCAGCTCCAGCCTCAGGAGTATCAGAAAATGAAGAGGGGGATTGTGGAGCAATGTTGCCACAGCACATGTTCTCTCTTCCAGCTGGAGAGTTACTGCAAC",
                 "common_name": "Xenopus laevis",
             },
             "Cow": {
-                "dna": "ATGGCCCTGTGGACACGCCTGGCGCCCCTGCTGGCCCTGCTGGCGCTCTGGGCCCCCGCCCCGGCCCGCGCCTTCGTCAACCAGCATCTGTGTGGCTCCCACCTGGTGGAGGCGCTGTACCTGGTGTGCGGAGAGCGCGGCTTCTTCTACACGCCCAAGGCCCGCCGGGAGGTGGAGGGCCCCCAGGTGGGGGCGCTGGAGCTGGCCGGAGGCCCGGGCGCGGGCGGCCTGGAGGGGCCCCCGCAGAAG",
+                "dna": "ATGGCCCTGTGGACACGCCTGGCGCCCCTGCTGGCCCTGCTGGCGCTCTGGGCCCCCGCCCCGGCCCGCGCCTTCGTCAACCAGCATCTGTGTGGCTCCCACCTGGTGGAGGCGCTGTACCTGGTGTGCGGAGAGCGCGGCTTCTTCTACACGCCCAAGGCCCGCCGGGAGGTGGAGGGCCCCCAGGTGGGGGCGCTGGAGCTGGCCGGAGGCCCGGGCGCGGGCGGCCTGGAGGGGCCCCCGCAGAAGCGTGGCATCGTGGAGCAGTGCTGTGCCAGCGTCTGCTCGCTCTACCAGCTGGAGAACTACTGTAAC",
                 "common_name": "Bos taurus",
             },
         },
@@ -78,27 +78,27 @@ GENE_SETS = {
         "description": "Beta-globin carries oxygen from lungs to tissues. The most studied gene in molecular evolution - sequence differences power the 'molecular clock' hypothesis. Sickle cell mutation (E6V) in humans shows how a single base change creates devastating disease.",
         "sequences": {
             "Human": {
-                "dna": "ATGGTGCATCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTGGTCTACCCTTGGACCCAGAGGTTCTTTGAGTCCTTTGGGGATCTGTCCACTCCTGATGCTGTTATGGGCAACCCTAAGGTGAAGGCTCATGGCAAGAAAGTGCTCGGTGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAG",
+                "dna": "ATGGTGCATCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTGGTCTACCCTTGGACCCAGAGGTTCTTTGAGTCCTTTGGGGATCTGTCCACTCCTGATGCTGTTATGGGCAACCCTAAGGTGAAGGCTCATGGCAAGAAAGTGCTCGGTGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAGGGCACCTTTGCCACACTGAGTGAGCTGCACTGTGACAAGCTGCACGTGGATCCTGAGAACTTCAGGCTCCTGGGCAACGTGCTGGTCTGTGTGCTGGCCCATCACTTTGGCAAAGAATTCACCCCACCAGTGCAGGCTGCCTATCAGAAAGTGGTGGCTGGTGTGGCTAATGCCCTGGCCCACAAGTATCAC",
                 "common_name": "Homo sapiens",
             },
             "Mouse": {
-                "dna": "ATGGTGCACCTGACTGATGCTGAGAAGGCTGCTGTCTCTGGCCTGTGGGGAAAGGTGAACGCCGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTTGTCTACCCTTGGACCCAGCGGTACTTTGATAGCTTTGGAGACCTATCCTCTGCCTCTGCTATCATGGGTAATGCCAAAGTGAAGGCCCATGGCAAGAAAGTGATAACTGCCTTTAACGATGGCCTGAATCACTTGGACAGCCTCAAG",
+                "dna": "ATGGTGCACCTGACTGATGCTGAGAAGGCTGCTGTCTCTGGCCTGTGGGGAAAGGTGAACGCCGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTTGTCTACCCTTGGACCCAGCGGTACTTTGATAGCTTTGGAGACCTATCCTCTGCCTCTGCTATCATGGGTAATGCCAAAGTGAAGGCCCATGGCAAGAAAGTGATAACTGCCTTTAACGATGGCCTGAATCACTTGGACAGCCTCAAGGGCACCTTTGCCAGCCTCAGTGAGCTCCACTGTGACAAGCTGCATGTGGATCCTGAGAACTTCAGGCTCCTGGGCAATATGATCGTGATTGTGCTGGGCCACCACCTGGGCAAGGATTTCACCCCCGCTGCACAGGCTGCCTTCCAGAAGGTGGTGGCTGGAGTGGCTGCTGCCCTGGCTCACAAGTACCAC",
                 "common_name": "Mus musculus",
             },
             "Chicken": {
-                "dna": "ATGGTGCACTGGACTGCTGAGGAGAAGCAGCTCATCACCGGCCTCTGGGGCAAGGTCAATGTGGCCGAATGTGGGGCTGAAGCCCTGGCCAGGCTGCTGATCGTCTACCCCTGGACCCAGAGGTTCTTTGCGTCCTTTGGGAACCTCTCCAGCCCCACTGCCATCCTTGGCAACCCCATGGTCCGCGCCCATGGCAAGAAAGTGCTCACCTCCTTTGGGGATGCTGTGAAGAACCTGGACAACATCAAG",
+                "dna": "ATGGTGCACTGGACTGCTGAGGAGAAGCAGCTCATCACCGGCCTCTGGGGCAAGGTCAATGTGGCCGAATGTGGGGCTGAAGCCCTGGCCAGGCTGCTGATCGTCTACCCCTGGACCCAGAGGTTCTTTGCGTCCTTTGGGAACCTCTCCAGCCCCACTGCCATCCTTGGCAACCCCATGGTCCGCGCCCATGGCAAGAAAGTGCTCACCTCCTTTGGGGATGCTGTGAAGAACCTGGACAACATCAAGAACACCTTCTCCCAACTGTCCGAACTGCATTGTGACAAGCTGCATGTGGACCCCGAGAACTTCAGGCTCCTGGGTGACATCCTCATCATTGTCCTGGCCGCCCACTTCAGCAAGGACTTCACTCCTGAATGCCAGGCTGCCTGGCAGAAGCTGGTCCGCGTGGTGGCCCATGCCCTGGCTCGCAAGTACCAC",
                 "common_name": "Gallus gallus",
             },
             "Zebrafish": {
-                "dna": "ATGGTTGAGTGGACAGATGCCGAGCGCACAGCCATCCTTGGCCTGTGGGGAAAGCTCAATATCGATGAAATCGGACCTCAGGCCCTATCCAGATGTCTGATCGTGTATCCCTGGACTCAGAGATATTTCGCCACATTCGGCAACCTGTCAAGCCCCGCTGCGATCATGGGTAACCCCAAAGTGGCAGCTCATGGGAGGACTGTGATGGGAGGTCTTGAGAGAGCCATCAAGAACATGGACAACGTCAAG",
+                "dna": "ATGGTTGAGTGGACAGATGCCGAGCGCACAGCCATCCTTGGCCTGTGGGGAAAGCTCAATATCGATGAAATCGGACCTCAGGCCCTATCCAGATGTCTGATCGTGTATCCCTGGACTCAGAGATATTTCGCCACATTCGGCAACCTGTCAAGCCCCGCTGCGATCATGGGTAACCCCAAAGTGGCAGCTCATGGGAGGACTGTGATGGGAGGTCTTGAGAGAGCCATCAAGAACATGGACAACGTCAAGAACACCTATGCCGCCCTCAGTGTGATGCACTCTGAGAAACTGCATGTGGATCCCGACAACTTCAGGCTTCTCGCTGATTGCATCACCGTTTGCGCTGCCATGAAGTTCGGCCAAGCTGGTTTCAATGCTGATGTCCAGGAGGCCTGGCAGAAGTTTCTGGCTGTGGTCGTTTCTGCTCTGTGCAGACAGTACCAC",
                 "common_name": "Danio rerio",
             },
             "Frog": {
-                "dna": "ATGGTTCATTGGACAGCTGAAGAGAAGGCCGCCATCACCTCTGTGTGGCAGGAGGTCAACCAGGAGCAAGATGGCCATGATGCACTCACAAGGCTGCTGGTTGTGTACCCCTGGACCCAGAGATACTTCAGCAGTTTTGGAAATCTCGGTAATGCCACAGCTATTGCTGGAAATGTCAAGGTGCGTGCCCATGGCAAGAAGGTTCTTTCAGCTGTTGGTGATGCCATCGCCCATCTTGACAACGTGAAG",
+                "dna": "ATGGTTCATTGGACAGCTGAAGAGAAGGCCGCCATCACCTCTGTGTGGCAGGAGGTCAACCAGGAGCAAGATGGCCATGATGCACTCACAAGGCTGCTGGTTGTGTACCCCTGGACCCAGAGATACTTCAGCAGTTTTGGAAATCTCGGTAATGCCACAGCTATTGCTGGAAATGTCAAGGTGCGTGCCCATGGCAAGAAGGTTCTTTCAGCTGTTGGTGATGCCATCGCCCATCTTGACAACGTGAAGGGAACTCTCCATGACCTCAGTGTGGTCCACGCCTTCAAGCTCTATGTGGATCCTGAGAACTTCAAGCGTCTTGGTGAAGTTCTGGTCATTGTCTTGGCTTCCAAACTGGGATCAGCCTTTACTCCTCAAGTCCAGGGAGCCTGGGAGAAATTTGTTGCTGTTCTGGTTGATGCCCTCAGCCAAGGATACAAC",
                 "common_name": "Xenopus laevis",
             },
             "Cow": {
-                "dna": "ATGCTGACTGCTGAGGAGAAGGCTGCCGTCACCGCCTTTTGGGGCAAGGTGAAAGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTTGTCTACCCCTGGACTCAGAGGTTCTTTGAGTCCTTTGGGGACTTGTCCACTGCTGATGCTGTTATGAACAACCCTAAGGTGAAGGCCCATGGCAAGAAGGTGCTAGATTCCTTTAGTAATGGCATGAAGCATCTCGATGACCTCAAGGGCACC",
+                "dna": "ATGCTGACTGCTGAGGAGAAGGCTGCCGTCACCGCCTTTTGGGGCAAGGTGAAAGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTTGTCTACCCCTGGACTCAGAGGTTCTTTGAGTCCTTTGGGGACTTGTCCACTGCTGATGCTGTTATGAACAACCCTAAGGTGAAGGCCCATGGCAAGAAGGTGCTAGATTCCTTTAGTAATGGCATGAAGCATCTCGATGACCTCAAGGGCACCTTTGCTGCGCTGAGTGAGCTGCACTGTGATAAGCTGCATGTGGATCCTGAGAACTTCAAGCTCCTGGGCAACGTGCTAGTGGTTGTGCTGGCTCGCAATTTTGGCAAGGAATTCACCCCGGTGCTGCAGGCTGACTTTCAGAAGGTGGTGGCTGGTGTGGCCAATGCCCTGGCCCACAGATATCAT",
                 "common_name": "Bos taurus",
             },
         },
@@ -108,27 +108,27 @@ GENE_SETS = {
         "description": "The 'guardian of the genome' - p53 detects DNA damage and triggers repair or cell death. Mutated in >50% of human cancers. Elephants have 20 copies of p53 (humans have 1), which may explain their extremely low cancer rates despite their size (Peto's paradox).",
         "sequences": {
             "Human": {
-                "dna": "ATGGAGGAGCCGCAGTCAGATCCTAGCGTCGAGCCCCCTCTGAGTCAGGAAACATTTTCAGACCTATGGAAACTACTTCCTGAAAACAACGTTCTGTCCCCCTTGCCGTCCCAAGCAATGGATGATTTGATGCTGTCCCCGGACGATATTGAACAATGGTTCACTGAAGACCCAGGTCCAGATGAAGCTCCCAGAATGCCAGAGGCTGCTCCCCCCGTGGCCCCTGCACCAGCAGCTCCTACACCGGCG",
+                "dna": "ATGGAGGAGCCGCAGTCAGATCCTAGCGTCGAGCCCCCTCTGAGTCAGGAAACATTTTCAGACCTATGGAAACTACTTCCTGAAAACAACGTTCTGTCCCCCTTGCCGTCCCAAGCAATGGATGATTTGATGCTGTCCCCGGACGATATTGAACAATGGTTCACTGAAGACCCAGGTCCAGATGAAGCTCCCAGAATGCCAGAGGCTGCTCCCCCCGTGGCCCCTGCACCAGCAGCTCCTACACCGGCGGCCCCTGCACCAGCCCCCTCCTGGCCCCTGTCATCTTCTGTCCCTTCCCAGAAAACCTACCAGGGCAGCTACGGTTTCCGTCTGGGCTTCTTGCATTCTGGGACAGCCAAGTCTGTGACTTGCACGTACTCCCCTGCCCTCAACAAGATGTTTTGCCAACTGGCCAAGACCTGCCCTGTGCAGCTGTGGGTTGATTCCACACCCCCGCCCGGCACCCGCGTCCGCGCCATGGCCATCTACAAGCAGTCACAGCACATGACGGAGGTTGTGAGGCGCTGCCCCCACCATGAGCGCTGCTCAGATAGCGATGGTCTGGCCCCTCCTCAGCATCTTATCCGAGTGGAAGGAAATTTGCGTGTGGAGTATTTGGATGACAGAAACACTTTTCGACATAGTGTGGTGGTGCCCTATGAGCCGCCTGAGGTTGGCTCTGACTGTACCACCATCCACTACAACTACATGTGTAACAGTTCCTGCATGGGCGGCATGAACCGGAGGCCCATCCTCACCATCATCACACTGGAAGACTCCAGTGGTAATCTACTGGGACGGAACAGCTTTGAGGTGCGTGTTTGTGCCTGTCCTGGGAGAGACCGGCGCACAGAGGAAGAGAATCTCCGCAAGAAAGGGGAGCCTCACCACGAGCTGCCCCCAGGGAGCACTAAGCGAGCACTGCCCAACAACACCAGCTCCTCTCCCCAGCCAAAGAAGAAACCACTGGATGGAGAATATTTCACCCTTCAGATCCGTGGGCGTGAGCGCTTCGAGATGTTCCGAGAGCTGAATGAGGCCTTGGAACTCAAGGATGCCCAGGCTGGGAAGGAGCCAGGGGGGAGCAGGGCTCACTCCAGCCACCTGAAGTCCAAAAAGGGTCAGTCTACCTCCCGCCATAAAAAACTCATGTTCAAGACAGAAGGGCCTGACTCAGAC",
                 "common_name": "Homo sapiens",
             },
             "Mouse": {
-                "dna": "ATGACTGCCATGGAGGAGTCACAGTCGGATATCAGCCTCGAGCTCCCTCTGAGCCAGGAGACATTTTCAGGCTTATGGAAACTACTTCCTCCAGAAGATATCCTGCCATCACCTCACTGCATGGACGATCTGTTGCTGCCCCAGGATGTTGAGGAGTTTTTTGAAGGCCCAAGTGAAGCCCTCCGAGTGTCAGGAGCTCCTGCAGCACAGGACCCTGTCACCGAGACCCCTGGGCCAGTGGCCCCTGCC",
+                "dna": "ATGACTGCCATGGAGGAGTCACAGTCGGATATCAGCCTCGAGCTCCCTCTGAGCCAGGAGACATTTTCAGGCTTATGGAAACTACTTCCTCCAGAAGATATCCTGCCATCACCTCACTGCATGGACGATCTGTTGCTGCCCCAGGATGTTGAGGAGTTTTTTGAAGGCCCAAGTGAAGCCCTCCGAGTGTCAGGAGCTCCTGCAGCACAGGACCCTGTCACCGAGACCCCTGGGCCAGTGGCCCCTGCCCCAGCCACTCCATGGCCCCTGTCATCTTTTGTCCCTTCTCAAAAAACTTACCAGGGCAACTATGGCTTCCACCTGGGCTTCCTGCAGTCTGGGACAGCCAAGTCTGTTATGTGCACGTACTCTCCTCCCCTCAATAAGCTATTCTGCCAGCTGGCGAAGACGTGCCCTGTGCAGTTGTGGGTCAGCGCCACACCTCCAGCTGGGAGCCGTGTCCGCGCCATGGCCATCTACAAGAAGTCACAGCACATGACGGAGGTCGTGAGACGCTGCCCCCACCATGAGCGCTGCTCCGATGGTGATGGCCTGGCTCCTCCCCAGCATCTTATCCGGGTGGAAGGAAATTTGTATCCCGAGTATCTGGAAGACAGGCAGACTTTTCGCCACAGCGTGGTGGTACCTTATGAGCCACCCGAGGCCGGCTCTGAGTATACCACCATCCACTACAAGTACATGTGTAATAGCTCCTGCATGGGGGGCATGAACCGCCGACCTATCCTTACCATCATCACACTGGAAGACTCCAGTGGGAACCTTCTGGGACGGGACAGCTTTGAGGTTCGTGTTTGTGCCTGCCCTGGGAGAGACCGCCGTACAGAAGAAGAAAATTTCCGCAAAAAGGAAGTCCTTTGCCCTGAACTGCCCCCAGGGAGCGCAAAGAGAGCGCTGCCCACCTGCACAAGCGCCTCTCCCCCGCAAAAGAAAAAACCACTTGATGGAGAGTATTTCACCCTCAAGATCCGCGGGCGTAAACGCTTCGAGATGTTCCGGGAGCTGAATGAGGCCTTAGAGTTAAAGGATGCCCATGCTACAGAGGAGTCTGGAGACAGCAGGGCTCACTCCAGCTACCTGAAGACCAAGAAGGGCCAGTCTACTTCCCGCCATAAAAAAACAATGGTCAAGAAAGTGGGGCCTGACTCAGAC",
                 "common_name": "Mus musculus",
             },
             "Chicken": {
-                "dna": "ATGGCGGAGGAGATGGAACCATTGCTGGAACCCACTGAGGTCTTCATGGACCTCTGGAGCATGCTCCCCTATAGCATGCAACAGCTGCCCCTCCCTGAGGATCACAGCAACTGGCAGGAGCTGAGCCCCCTGGAACCCAGCGACCCCCCCCCACCACCGCCACCACCACCTCTGCCATTGGCCGCCGCCGCCCCCCCCCCATTAAACCCCCCCACCCCCCCCCCGCGCTGCCCCCTCCCCGGTGGTCCC",
+                "dna": "ATGGCGGAGGAGATGGAACCATTGCTGGAACCCACTGAGGTCTTCATGGACCTCTGGAGCATGCTCCCCTATAGCATGCAACAGCTGCCCCTCCCTGAGGATCACAGCAACTGGCAGGAGCTGAGCCCCCTGGAACCCAGCGACCCCCCCCCACCACCGCCACCACCACCTCTGCCATTGGCCGCCGCCGCCCCCCCCCCATTAAACCCCCCCACCCCCCCCCGCGCTGCCCCCTCCCCGGTGGTCCCATCCACGGAGGATTATGGGGGGGACTTCGACTTCCGGGTGGGGTTCGTGGAGGCGGGCACAGCCAAATCGGTCACCTGCACTTACTCCCCGGTGCTGAATAAGGTCTATTGCCGCCTGGCCAAGCCGTGCCCGGTGCAGGTGAGGGTGGGGGTGGCGCCCCCCCCCGGTTCCTCCCTCCGCGCCGTGGCCGTCTATAAGAAATCAGAGCACGTGGCCGAAGTGGTGCGGCGCTGCCCCCACCACGAGCGCTGCGGGGGGGGCACCGACGGCCTGGCCCCCGCACAGCACCTCATCCGGGTGGAGGGGAACCCCCAGGCGCGTTACCACGACGACGAGACCACCAAACGGCACAGCGTCGTCGTCCCCTATGAGCCCCCCGAGGTGGGCTCTGACTGTACCACGGTGCTGTACAACTTCATGTGCAACAGTTCCTGCATGGGGGGGATGAACCGCCGCCCCATCCTCACCATCCTTACACTGGAGGGGCCGGGGGGGCAGCTGTTGGGGCGGCGCTGCTTCGAGGTGCGCGTGTGCGCATGTCCGGGGAGGGACCGCAAGATCGAGGAGGAGAACTTCCGCAAGAGGGGCGGGGCCGGGGGCGTGGCTAAGCGAGCCATGTCGCCCCCAACCGAAGCCCCCGAGCCCCCCAAGAAGCGCGTGCTGAACCCCGACAATGAGATATTCTACCTGCAGGTGCGCGGGCGCCGCCGCTATGAGATGCTGAAGGAGATCAATGAGGCGCTGCAGCTCGCCGAGGGGGGGTCCGCACCGCGGCCTTCCAAAGGCCGCCGTGTGAAGGTGGAGGGACCCCAACCCAGCTGCGGGAAGAAACTGCTGCAAAAAGGCTCGGAC",
                 "common_name": "Gallus gallus",
             },
             "Zebrafish": {
-                "dna": "ATGGCGCAAAACGACAGCCAAGAGTTCGCGGAGCTCTGGGAGAAGAATTTGATTATTCAGCCCCCAGGTGGTGGCTCTTGCTGGGACATCATTAATGATGAGGAGTACTTGCCGGGATCGTTTGACCCCAATTTTTTTGAAAATGTGCTTGAAGAACAGCCTCAGCCATCCACTCTCCCACCAACATCCACTGTTCCGGAGACAAGCGACTATCCCGGCGATCATGGATTTAGGCTCAGGTTCCCGCAG",
+                "dna": "ATGGCGCAAAACGACAGCCAAGAGTTCGCGGAGCTCTGGGAGAAGAATTTGATTATTCAGCCCCCAGGTGGTGGCTCTTGCTGGGACATCATTAATGATGAGGAGTACTTGCCGGGATCGTTTGACCCCAATTTTTTTGAAAATGTGCTTGAAGAACAGCCTCAGCCATCCACTCTCCCACCAACATCCACTGTTCCGGAGACAAGCGACTATCCCGGCGATCATGGATTTAGGCTCAGGTTCCCGCAGTCTGGCACAGCAAAATCTGTAACTTGCACTTATTCACCGGACCTGAATAAACTCTTCTGTCAGCTGGCAAAAACTTGCCCCGTTCAAATGGTGGTGGACGTTGCCCCTCCACAGGGCTCCGTGGTTCGAGCCACTGCCATCTATAAGAAGTCCGAGCATGTGGCTGAAGTGGTCCGCAGATGCCCCCATCATGAGCGAACCCCGGATGGAGATAACTTGGCGCCTGCTGGTCATTTGATAAGAGTGGAGGGCAATCAGCGAGCAAATTACAGGGAAGATAACATCACTTTAAGGCATAGTGTTTTTGTCCCATATGAAGCACCACAGCTTGGTGCTGAATGGACAACTGTGCTACTAAACTACATGTGCAATAGCAGCTGCATGGGGGGGATGAACCGCAGGCCCATCCTCACAATCATCACTCTGGAGACTCAGGAAGGTCAGTTGCTGGGCCGGAGGTCTTTTGAGGTGCGTGTGTGTGCATGTCCAGGCAGAGACAGGAAAACTGAGGAGAGCAACTTCAAGAAAGACCAAGAGACCAAAACCATGGCCAAAACCACCACTGGGACCAAACGTAGTTTGGTGAAAGAATCTTCTTCAGCTACATTACGACCTGAGGGGAGCAAAAAGGCCAAGGGCTCCAGCAGCGATGAGGAGATCTTTACCCTGCAGGTGAGGGGCAGGGAGCGTTATGAAATTTTAAAGAAATTGAACGACAGTCTGGAGTTAAGTGATGTGGTGCCTGCCTCAGATGCTGAAAAGTATCGTCAGAAATTCATGACAAAAAACAAAAAAGAGAATCGTGAATCATCTGAGCCCAAACAGGGAAAGAAGCTGATGGTGAAGGACGAAGGAAGAAGCGACTCTGAT",
                 "common_name": "Danio rerio",
             },
             "Elephant": {
-                "dna": "ATGGAGGAGCCCCAGTCAGATCTCAGCACCGAGCTCCCTCTGAGTCAAGAGACGTTTTCATACTTATGGGAACTCCTTCCTGAGAATCCGGTTCTGTCCCCCACACTACCCCCGGCAGTGGAGGTCATGGACGATCTGCTACTCTCAGAAGACACTGCAAACTGGCTAGAAAGCCAAGTTGAGGCTCAGGGAATGTCCACAACCCCTGCACCAGCCACCCCTACACCGGTGGCCCCCGCACCAGCCACC",
+                "dna": "ATGGAGGAGCCCCAGTCAGATCTCAGCACCGAGCTCCCTCTGAGTCAAGAGACGTTTTCATACTTATGGGAACTCCTTCCTGAGAATCCGGTTCTGTCCCCCACACTACCCCCGGCAGTGGAGGTCATGGACGATCTGCTACTCTCAGAAGACACTGCAAACTGGCTAGAAAGCCAAGTTGAGGCTCAGGGAATGTCCACAACCCCTGCACCAGCCACCCCTACACCGGTGGCCCCCGCACCAGCCACCTCCTGGACCCTGTCATCTTCCGTCCCTTCCCAAAAGACCTACCCTGGCACCTATGGTTTCCGTCTGGGCTTCCTACATTCTGGGACAGCCAAGTCCGTCACCTGCACGTACTCCCCTGACCTTAACAAGCTGTTTTGCCAGCTGGCAAAAACCTGCCCAGTGCAGCTGTGGGTCGCCTCACCACCCCCGCCCGGCACCCGTGTTCGCACCATGGCCATCTACAAGAAGTCAGAGCATATGACGGAGGTCGTCAAGCGCTGCCCCCACCATGAGCGCTGCTCTGACTCTAGCGATGGCCTGGCCCCTCCTCAGCACCTCATCCGGGTGGAAGGAAACCTGCGTGCTGAGTATCTGGAGGACAGCATCACTCTCCGACACAGTGTGGTGGTGCCCTACGAGCCGCCCGAGGTTGGGTCTGACTGTACCACCATCCACTTCAACTTCATGTGTAACAGCTCCTGCATGGGGGGCATGAACCGGCGGCCCATCCTCACCATCATCACACTGGAAGACTCCAGTGGTAATCTGCTGGGACGTAACAGCTTTGAGGTGCGCATTTGTGCCTGTCCTGGAAGAGACAGACGTACAGAAGAAGAAAATTTCCACAAGAAGGGAGAGCCTTGCCCAGAGCCGCCACCCCCTGGGAGGAGCACTAAGCGAGCACTGCCCACCAACACCAGCTCCTCTACCCAGCCAAAGAAGAAGCCACTGGATGAAGAATATTTCACCCTTCAGATCCGTGGGCGTGAACGCTTCAAGATGTTCCTAGAGCTAAATGAGGCCTTGGAGCTGAAGGATGCCCAGGCTGGGAAGGAGCCAGAGGGGAGCCGGGCTCACTCCAGCCCTTCGAAGTCTAAGAAGGGACAGTCTACCTCCCGCCATAAAAAACCAATGTTCAAGAGAGAGGGACCTGACTCAGAC",
                 "common_name": "Loxodonta africana",
             },
             "Dog": {
-                "dna": "ATGGAGGAGTCGCAGTCAGAGCTCAATATCGACCCCCCTCTGAGCCAGGAGACATTTTCAGAATTGTGGAACCTGCTTCCTGAAAACAATGTTCTGTCTTCGGAGCTGTGCCCAGCAGTGGATGAGCTGCTGCTCCCAGAGAGCGTCGTGAACTGGCTAGACGAAGACTCAGATGATGCTCCCAGGATGCCAGCCACTTCTGCCCCCACAGCCCCTGGACCGGCCCCCTCGTGGCCCCTATCATCCTCT",
+                "dna": "ATGGAGGAGTCGCAGTCAGAGCTCAATATCGACCCCCCTCTGAGCCAGGAGACATTTTCAGAATTGTGGAACCTGCTTCCTGAAAACAATGTTCTGTCTTCGGAGCTGTGCCCAGCAGTGGATGAGCTGCTGCTCCCAGAGAGCGTCGTGAACTGGCTAGACGAAGACTCAGATGATGCTCCCAGGATGCCAGCCACTTCTGCCCCCACAGCCCCTGGACCGGCCCCCTCGTGGCCCCTATCATCCTCTGTCCCTTCCCCGAAGACCTACCCTGGCACCTATGGGTTCCGTTTGGGGTTCCTGCATTCCGGGACAGCCAAGTCTGTTACTTGGACGTACTCCCCTCTCCTCAACAAGTTGTTTTGCCAGCTGGCGAAGACCTGCCCCGTGCAGCTGTGGGTCAGCTCCCCACCCCCACCCAATACCTGCGTCCGCGCTATGGCCATCTATAAGAAGTCGGAGTTCGTGACCGAGGTTGTGCGGCGCTGCCCCCACCATGAACGCTGCTCTGACAGTAGTGACGGTCTTGCCCCTCCTCAGCATCTCATCCGAGTGGAAGGAAATTTGCGGGCCAAGTACCTGGACGACAGAAACACTTTTCGACACAGTGTGGTGGTGCCTTATGAGCCACCCGAGGTTGGCTCTGACTATACCACCATCCACTACAACTACATGTGTAACAGTTCCTGCATGGGAGGCATGAACCGGCGGCCCATCCTCACTATCATCACCCTGGAAGACTCCAGTGGAAACGTGCTGGGACGCAACAGCTTTGAGGTACGCGTTTGTGCCTGTCCCGGGAGAGACCGCCGGACTGAGGAGGAGAATTTCCACAAGAAGGGGGAGCCTTGTCCTGAGCCACCCCCCGGGAGTACCAAGCGAGCACTGCCTCCCAGCACCAGCTCCTCTCCCCCGCAAAAGAAGAAGCCACTAGATGGAGAATATTTCACCCTTCAGATCCGTGGGCGTGAACGCTATGAGATGTTCAGGAATCTGAATGAAGCCTTGGAGCTGAAGGATGCCCAGAGTGGAAAGGAGCCAGGGGGAAGCAGGGCTCACTCCAGCCACCTGAAGGCAAAGAAGGGGCAATCTACCTCTCGCCATAAAAAACTGATGTTCAAGAGAGAAGGGCTTGACTCAGAC",
                 "common_name": "Canis lupus familiaris",
             },
         },
@@ -172,23 +172,45 @@ def _gc_content(seq: str) -> float:
     return sum(1 for b in seq.upper() if b in "GC") / len(seq)
 
 
-def _sequence_identity(seq1: str, seq2: str) -> float:
-    """Percent identity with best ungapped offset (handles small indels)."""
+def _sequence_identity(seq1: str, seq2: str, match: int = 2, mismatch: int = -1, gap: int = -2) -> float:
+    """Percent identity via Needleman-Wunsch global alignment."""
     if not seq1 or not seq2:
         return 0.0
-    max_shift = min(10, min(len(seq1), len(seq2)) // 4)
-    best = 0.0
-    for shift in range(-max_shift, max_shift + 1):
-        if shift >= 0:
-            s1, s2 = seq1[shift:], seq2
+    n, m = len(seq1), len(seq2)
+
+    # Build score matrix
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        dp[i][0] = dp[i - 1][0] + gap
+    for j in range(1, m + 1):
+        dp[0][j] = dp[0][j - 1] + gap
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            s = match if seq1[i - 1] == seq2[j - 1] else mismatch
+            dp[i][j] = max(dp[i - 1][j - 1] + s, dp[i - 1][j] + gap, dp[i][j - 1] + gap)
+
+    # Traceback to count matches and alignment length
+    i, j = n, m
+    matches = 0
+    aligned = 0
+    while i > 0 or j > 0:
+        if i > 0 and j > 0:
+            s = match if seq1[i - 1] == seq2[j - 1] else mismatch
+            if dp[i][j] == dp[i - 1][j - 1] + s:
+                if seq1[i - 1] == seq2[j - 1]:
+                    matches += 1
+                aligned += 1
+                i -= 1
+                j -= 1
+                continue
+        if i > 0 and dp[i][j] == dp[i - 1][j] + gap:
+            aligned += 1
+            i -= 1
         else:
-            s1, s2 = seq1, seq2[-shift:]
-        overlap = min(len(s1), len(s2))
-        if overlap == 0:
-            continue
-        matches = sum(1 for a, b in zip(s1[:overlap], s2[:overlap]) if a == b)
-        best = max(best, matches / overlap)
-    return best
+            aligned += 1
+            j -= 1
+
+    return matches / aligned if aligned else 0.0
 
 
 # ------------------------------------------------------------------
@@ -614,17 +636,17 @@ async def load_genes(
 
 
 # ------------------------------------------------------------------
-# Task 2: Score sequences with Carbon + compute similarity
+# Task 2: Score sequences with Carbon
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
-async def score_and_compare(
+async def score_sequences(
     genes_dir: flyte.io.Dir,
     model_name: str = "HuggingFaceBio/Carbon-3B",
 ) -> str:
-    """Score each species' gene with Carbon and compute pairwise similarity.
+    """Score each species' gene with Carbon-3B genomic language model.
 
-    Returns per-species log-likelihood scores and a pairwise DNA identity matrix.
+    Returns per-species log-likelihood scores and sequence metadata.
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -646,7 +668,6 @@ async def score_and_compare(
     species_names = list(data["sequences"].keys())
     n = len(species_names)
 
-    # Score each sequence with Carbon
     scores = {}
     for i, species in enumerate(species_names):
         await flyte.report.replace.aio(_wrap_report(
@@ -663,46 +684,21 @@ async def score_and_compare(
             loss = output.loss.item()
             ll = -loss * inputs["input_ids"].shape[1]
 
+        protein = _translate(dna)
         scores[species] = {
             "log_likelihood": round(ll, 4),
             "loss": round(loss, 4),
             "gc_content": round(_gc_content(dna), 4),
             "length": len(dna),
+            "protein": protein,
+            "protein_length": len(protein),
             "common_name": data["sequences"][species]["common_name"],
         }
         log.info(f"  {species} ({data['sequences'][species]['common_name']}): LL={ll:.2f}, GC={_gc_content(dna):.1%}")
 
-    # Pairwise DNA identity matrix
-    identity_matrix = []
-    for i, sp1 in enumerate(species_names):
-        row = []
-        for j, sp2 in enumerate(species_names):
-            dna1 = data["sequences"][sp1]["dna"]
-            dna2 = data["sequences"][sp2]["dna"]
-            identity = _sequence_identity(dna1, dna2)
-            row.append(round(identity, 4))
-        identity_matrix.append(row)
-
-    # Translate to protein and compute protein identity
-    proteins = {}
-    protein_matrix = []
-    for species in species_names:
-        dna = data["sequences"][species]["dna"]
-        protein = _translate(dna)
-        proteins[species] = protein
-        scores[species]["protein"] = protein
-        scores[species]["protein_length"] = len(protein)
-
-    for i, sp1 in enumerate(species_names):
-        row = []
-        for j, sp2 in enumerate(species_names):
-            identity = _sequence_identity(proteins[sp1], proteins[sp2])
-            row.append(round(identity, 4))
-        protein_matrix.append(row)
-
     # Report
     html_parts = [
-        f"<h2>{data['gene_name']} - Cross-Species Comparison</h2>",
+        f"<h2>{data['gene_name']} - Carbon Scoring</h2>",
         f'<div class="note">{data["description"]}</div>',
         '<div class="stat-grid">',
         f'<div class="stat"><div class="value">{n}</div><div class="label">Species</div></div>',
@@ -711,7 +707,6 @@ async def score_and_compare(
         "</div>",
     ]
 
-    # Species table
     html_parts.append(
         "<table><tr><th>Species</th><th>Scientific Name</th><th>DNA Length</th>"
         "<th>GC%</th><th>Protein Length</th><th>Carbon LL</th></tr>"
@@ -725,6 +720,103 @@ async def score_and_compare(
             f'<td>{s["log_likelihood"]:.2f}</td></tr>'
         )
     html_parts.append("</table>")
+
+    html_parts.append('<div class="chart-container">')
+    html_parts.append(_make_bar_chart(
+        species_names,
+        {"Log-Likelihood": [scores[s]["log_likelihood"] for s in species_names]},
+        title="Carbon Log-Likelihood per Species",
+        value_format=".1f",
+    ))
+    html_parts.append("</div>")
+
+    await flyte.report.replace.aio(_wrap_report("\n".join(html_parts)), do_flush=True)
+
+    result = {
+        "gene_name": data["gene_name"],
+        "description": data["description"],
+        "species": species_names,
+        "scores": scores,
+    }
+    return json.dumps(result)
+
+
+# ------------------------------------------------------------------
+# Task 3: Align sequences and compute similarity
+# ------------------------------------------------------------------
+
+@cpu_env.task(report=True)
+async def align_and_compare(
+    scores_json: str,
+    genes_dir: flyte.io.Dir,
+) -> str:
+    """Align sequences with Needleman-Wunsch and compute pairwise identity.
+
+    Translates DNA to protein, builds DNA and protein identity matrices,
+    and generates phylogenetic trees from sequence divergence.
+    """
+    scores_data = json.loads(scores_json)
+    species_names = scores_data["species"]
+    scores = scores_data["scores"]
+    gene_name = scores_data["gene_name"]
+    n = len(species_names)
+
+    genes_path = await genes_dir.download()
+    with open(os.path.join(genes_path, "genes.json")) as f:
+        data = json.load(f)
+
+    await flyte.report.replace.aio(_wrap_report(
+        f"<h2>{gene_name} - Sequence Alignment</h2>"
+        f"<p>Aligning {n} species with Needleman-Wunsch...</p>"
+    ), do_flush=True)
+
+    # Pairwise DNA identity matrix
+    identity_matrix = []
+    for sp1 in species_names:
+        row = []
+        for sp2 in species_names:
+            dna1 = data["sequences"][sp1]["dna"]
+            dna2 = data["sequences"][sp2]["dna"]
+            identity = _sequence_identity(dna1, dna2)
+            row.append(round(identity, 4))
+        identity_matrix.append(row)
+
+    # Pairwise protein identity matrix
+    protein_matrix = []
+    for sp1 in species_names:
+        row = []
+        for sp2 in species_names:
+            identity = _sequence_identity(scores[sp1]["protein"], scores[sp2]["protein"])
+            row.append(round(identity, 4))
+        protein_matrix.append(row)
+
+    # Average pairwise identities (exclude diagonal)
+    dna_pairs = [identity_matrix[i][j] for i in range(n) for j in range(i + 1, n)]
+    prot_pairs = [protein_matrix[i][j] for i in range(n) for j in range(i + 1, n)]
+    avg_dna = sum(dna_pairs) / len(dna_pairs) if dna_pairs else 0
+    avg_prot = sum(prot_pairs) / len(prot_pairs) if prot_pairs else 0
+
+    # Most/least similar pair
+    best_pair = max(range(len(dna_pairs)), key=lambda k: dna_pairs[k])
+    worst_pair = min(range(len(dna_pairs)), key=lambda k: dna_pairs[k])
+    pair_indices = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    best_sp = f"{species_names[pair_indices[best_pair][0]]}-{species_names[pair_indices[best_pair][1]]}"
+    worst_sp = f"{species_names[pair_indices[worst_pair][0]]}-{species_names[pair_indices[worst_pair][1]]}"
+
+    # Report
+    html_parts = [
+        f"<h2>{gene_name} - Sequence Alignment</h2>",
+        f'<div class="note">Pairwise alignment using Needleman-Wunsch (match=2, mismatch=-1, gap=-2). '
+        f"Identity is computed as matches / aligned length from the optimal global alignment.</div>",
+        '<div class="stat-grid">',
+        f'<div class="stat"><div class="value">{n}</div><div class="label">Species Aligned</div></div>',
+        f'<div class="stat"><div class="value">{n * (n - 1) // 2}</div><div class="label">Pairwise Alignments</div></div>',
+        f'<div class="stat"><div class="value">{avg_dna:.0%}</div><div class="label">Avg DNA Identity</div></div>',
+        f'<div class="stat"><div class="value">{avg_prot:.0%}</div><div class="label">Avg Protein Identity</div></div>',
+        f'<div class="stat"><div class="value">{best_sp}</div><div class="label">Most Similar</div></div>',
+        f'<div class="stat"><div class="value">{worst_sp}</div><div class="label">Most Divergent</div></div>',
+        "</div>",
+    ]
 
     # DNA identity heatmap
     html_parts.append('<div class="chart-container">')
@@ -745,29 +837,41 @@ async def score_and_compare(
     ))
     html_parts.append("</div>")
 
-    # Phylogenetic tree from DNA identity
+    # DNA phylogenetic tree
     html_parts.append('<div class="chart-container">')
     html_parts.append(_make_dendrogram(
         species_names, identity_matrix,
-        title=f"{data['gene_name']} - Phylogenetic Tree (DNA Identity)",
+        title=f"{gene_name} - Phylogenetic Tree (DNA Identity)",
     ))
     html_parts.append("</div>")
 
-    # Carbon score bar chart
+    # Protein phylogenetic tree
+    html_parts.append('<div class="chart-container">')
+    html_parts.append(_make_dendrogram(
+        species_names, protein_matrix,
+        title=f"{gene_name} - Phylogenetic Tree (Protein Identity)",
+        color="#059669",
+    ))
+    html_parts.append("</div>")
+
+    # DNA vs Protein conservation comparison
     html_parts.append('<div class="chart-container">')
     html_parts.append(_make_bar_chart(
         species_names,
-        {"Log-Likelihood": [scores[s]["log_likelihood"] for s in species_names]},
-        title="Carbon Log-Likelihood per Species",
-        value_format=".1f",
+        {
+            "DNA vs Human": [identity_matrix[0][j] for j in range(n)],
+            "Protein vs Human": [protein_matrix[0][j] for j in range(n)],
+        },
+        title=f"Conservation vs {species_names[0]} (DNA and Protein)",
+        value_format=".0%",
     ))
     html_parts.append("</div>")
 
     await flyte.report.replace.aio(_wrap_report("\n".join(html_parts)), do_flush=True)
 
     result = {
-        "gene_name": data["gene_name"],
-        "description": data["description"],
+        "gene_name": gene_name,
+        "description": scores_data["description"],
         "species": species_names,
         "scores": scores,
         "dna_identity_matrix": identity_matrix,
@@ -777,7 +881,7 @@ async def score_and_compare(
 
 
 # ------------------------------------------------------------------
-# Task 3: Fold proteins with ESMFold
+# Task 4: Fold proteins with ESMFold
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
@@ -942,7 +1046,7 @@ async def fold_proteins(
 
 
 # ------------------------------------------------------------------
-# Task 4: Generate summary
+# Task 5: Generate summary
 # ------------------------------------------------------------------
 
 @cpu_env.task(report=True)
@@ -981,17 +1085,6 @@ async def generate_summary(
     html_parts.append(f'<div class="stat"><div class="value">{avg_plddt:.1f}</div><div class="label">Avg pLDDT</div></div>')
     html_parts.append(f'<div class="stat"><div class="value">{len(structures)}</div><div class="label">Structures Folded</div></div>')
     html_parts.append("</div>")
-
-    # DNA vs Protein conservation insight
-    conservation_ratio = avg_protein_id / avg_dna_id if avg_dna_id > 0 else 0
-    if conservation_ratio > 1.05:
-        insight = "Protein is more conserved than DNA - synonymous mutations are accumulating while the protein function is preserved. This is classic purifying selection."
-    elif conservation_ratio < 0.95:
-        insight = "DNA is more conserved than protein - many nucleotide changes are non-synonymous, altering the protein. This can occur when signal peptides or pro-domains diverge faster than the mature functional core."
-    else:
-        insight = "DNA and protein conservation are similar - changes at the DNA level are directly reflected in protein changes."
-
-    html_parts.append(f'<div class="note"><b>Evolutionary insight:</b> {insight}</div>')
 
     # Full comparison table
     html_parts.append("<h3>Per-Species Detail</h3>")
@@ -1046,20 +1139,6 @@ async def generate_summary(
     ))
     html_parts.append("</div>")
 
-    # Method note
-    html_parts.append(
-        '<div class="note">'
-        f"<b>Method:</b> Homologous {gene_name} coding sequences from {n} species were scored "
-        "with HuggingFace Carbon (log-likelihood), aligned for pairwise identity at both DNA and "
-        "protein level, translated to amino acid sequences, and folded with ESMFold for 3D structure "
-        "comparison. Phylogenetic trees were built using UPGMA on identity matrices.<br><br>"
-        "<b>Key question:</b> Does sequence divergence translate to structural divergence? "
-        "Proteins with high sequence identity typically share 3D fold - but even distant homologs "
-        "(30-40% identity) often maintain the same overall structure, because structure is more "
-        "conserved than sequence in evolution."
-        "</div>"
-    )
-
     await flyte.report.replace.aio(_wrap_report("\n".join(html_parts)), do_flush=True)
 
     summary = {
@@ -1089,9 +1168,10 @@ async def pipeline(
     Returns (comparison JSON, structures JSON).
 
     1. Load homologous gene sequences across species
-    2. Score with Carbon + compute pairwise similarity
-    3. Fold translated proteins with ESMFold
-    4. Generate comprehensive summary with phylogenetic trees
+    2. Score with Carbon genomic language model
+    3. Align sequences and compute pairwise similarity
+    4. Fold translated proteins with ESMFold
+    5. Generate comprehensive summary with phylogenetic trees
     """
     log.info(f"Starting cross-species gene comparison pipeline (gene_set={gene_set})...")
 
@@ -1099,6 +1179,7 @@ async def pipeline(
         steps = [
             "Load Genes",
             "Carbon Scoring",
+            "Sequence Alignment",
             "ESMFold Structures",
             "Generate Summary",
         ]
@@ -1126,21 +1207,28 @@ async def pipeline(
 
     # Stage 2
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(2, "Scoring sequences with Carbon and computing similarity...")),
+        _wrap_report(_pipeline_progress(2, "Scoring sequences with Carbon...")),
         do_flush=True,
     )
-    comparison_json = await score_and_compare(genes_dir=genes_dir, model_name=model_name)
+    scores_json = await score_sequences(genes_dir=genes_dir, model_name=model_name)
 
     # Stage 3
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(3, "Folding proteins with ESMFold...")),
+        _wrap_report(_pipeline_progress(3, "Aligning sequences with Needleman-Wunsch...")),
+        do_flush=True,
+    )
+    comparison_json = await align_and_compare(scores_json=scores_json, genes_dir=genes_dir)
+
+    # Stage 4
+    await flyte.report.replace.aio(
+        _wrap_report(_pipeline_progress(4, "Folding proteins with ESMFold...")),
         do_flush=True,
     )
     structures_json = await fold_proteins(comparison_json=comparison_json)
 
-    # Stage 4
+    # Stage 5
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(4, "Generating summary report...")),
+        _wrap_report(_pipeline_progress(5, "Generating summary report...")),
         do_flush=True,
     )
     summary_json = await generate_summary(
