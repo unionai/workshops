@@ -383,119 +383,126 @@ async def train(
                 loop,
             )
 
-    # -- Sandbox session for safe code execution --
-    # Opens an isolated sandbox where LLM-generated code runs with no network
-    # access. The session persists across reward function calls so we don't pay
-    # setup cost per evaluation. The reward function (sync, in trainer thread)
-    # uses run_coroutine_threadsafe to call into the async sandbox.
-    sbx = await sb.local.session(network_mode="blocked").__aenter__()
+    # -- Sandbox helper: opens a fresh session per batch to avoid process buildup --
+    async def _run_batch_sandboxed(items: list[tuple[str, list[str]]]) -> list[tuple[bool, int, int]]:
+        """Run a batch of code+tests in a fresh sandbox session."""
+        results = []
+        async with sb.local.session(network_mode="blocked") as sbx:
+            for full_code, test_list in items:
+                results.append(await run_tests_sandboxed(sbx, full_code, test_list))
+        return results
 
-    try:
-        # -- Reward function --
-        def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], setup_code: list[str], **kwargs) -> list[float]:
-            """Reward = fraction of test cases passed. All pass = 1.0."""
-            rewards = []
-            batch_passes = 0
+    # -- Reward function --
+    def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], setup_code: list[str], **kwargs) -> list[float]:
+        """Reward = fraction of test cases passed. All pass = 1.0."""
+        rewards = []
+        batch_passes = 0
 
-            for completion, p, t, setup in zip(completions, func_prompt, tests, setup_code):
-                # The prompt ends with "def func_name(...):", completion is the body.
-                # Combine them into full code for the sandbox.
-                func_def = p.strip().split("\n")[-1]  # "def func_name(...):"
-                full_code = func_def + "\n" + completion
+        # Build all code+test pairs for this batch
+        batch_items: list[tuple[str, list[str]] | None] = []
+        for completion, p, t, setup in zip(completions, func_prompt, tests, setup_code):
+            func_def = p.strip().split("\n")[-1]
+            full_code = func_def + "\n" + completion
+            if setup:
+                full_code = setup + "\n" + full_code
+            test_list = [l.strip() for l in t.strip().split("\n") if l.strip().startswith("assert")]
+            batch_items.append((full_code, test_list))
 
-                # Prepend any setup code (e.g. "import math")
-                if setup:
-                    full_code = setup + "\n" + full_code
-
-                test_list = [l.strip() for l in t.strip().split("\n") if l.strip().startswith("assert")]
-
-                # Run tests in sandbox from trainer thread
-                future = asyncio.run_coroutine_threadsafe(
-                    run_tests_sandboxed(sbx, full_code, test_list),
-                    loop,
-                )
-                try:
-                    all_passed, passed, total = future.result(timeout=10)
-                except Exception as e:
-                    log.warning(f"[Sandbox] error: {type(e).__name__}: {e}")
-                    all_passed, passed, total = False, 0, len(test_list)
-
-                reward = passed / total if total > 0 else 0.0
-                rewards.append(reward)
-
-                if all_passed:
-                    reward_stats["all_pass"] += 1
-                    batch_passes += 1
-                reward_stats["total"] += 1
-
-            reward_stats["calls"] += 1
-            reward_stats["total_reward"] += sum(rewards)
-
-            # Track metrics
-            batch_avg = sum(rewards) / len(rewards)
-            batch_pass_pct = batch_passes / len(completions) * 100
-            running_avg = reward_stats["total_reward"] / reward_stats["total"]
-            running_pass = reward_stats["all_pass"] / reward_stats["total"] * 100
-
-            reward_log.append({
-                "batch": reward_stats["calls"],
-                "avg_reward": round(running_avg, 4),
-                "pass_rate": round(running_pass, 2),
-                "batch_reward": round(batch_avg, 4),
-                "batch_pass_rate": round(batch_pass_pct, 2),
-            })
-
-            if reward_stats["calls"] % 5 == 0:
-                log.info(
-                    f"[Reward] batch {reward_stats['calls']}: "
-                    f"avg_reward={running_avg:.3f}, pass_rate={running_pass:.1f}%, "
-                    f"batch_reward={batch_avg:.3f}"
-                )
-                # Push report update from trainer thread
-                asyncio.run_coroutine_threadsafe(
-                    flyte.report.replace.aio(
-                        _build_training_report(train_state["max_steps"]),
-                        do_flush=True,
-                    ),
-                    loop,
-                )
-
-            return rewards
-
-        # -- GRPO config --
-        output_dir = os.path.join(tempfile.mkdtemp(), "checkpoints")
-        grpo_config = GRPOConfig(
-            output_dir=output_dir,
-            num_train_epochs=epochs,
-            per_device_train_batch_size=batch_size,
-            learning_rate=lr,
-            num_generations=num_generations,
-            max_completion_length=max_completion_length,
-            logging_steps=5,
-            save_strategy="epoch",
-            bf16=use_bf16,
-            report_to="none",
+        # Run all tests in a fresh sandbox session
+        future = asyncio.run_coroutine_threadsafe(
+            _run_batch_sandboxed(batch_items),
+            loop,
         )
+        try:
+            batch_results = future.result(timeout=30)
+        except Exception as e:
+            log.warning(f"[Sandbox] batch error: {type(e).__name__}: {e}")
+            future.cancel()  # Cancel the coroutine so the sandbox session gets cleaned up
+            batch_results = [(False, 0, len(item[1])) for item in batch_items]
 
-        trainer = GRPOTrainer(
-            model=model,
-            args=grpo_config,
-            train_dataset=dataset["train"],
-            reward_funcs=code_reward,
-            peft_config=peft_config,
-            processing_class=tokenizer,
-            callbacks=[MetricsCallback()],
-        )
+        for (all_passed, passed, total) in batch_results:
+            reward = passed / total if total > 0 else 0.0
+            rewards.append(reward)
 
-        log.info(f"Starting GRPO training (num_generations={num_generations})...")
-        await flyte.report.replace.aio(
-            _build_training_report(trainer.state.max_steps or 0),
-            do_flush=True,
-        )
+            if all_passed:
+                reward_stats["all_pass"] += 1
+                batch_passes += 1
+            reward_stats["total"] += 1
 
-        await asyncio.to_thread(trainer.train)
-    finally:
-        log.info("Training loop finished, skipping sandbox close (known hang).")
+        reward_stats["calls"] += 1
+        reward_stats["total_reward"] += sum(rewards)
+
+        # Track metrics
+        batch_avg = sum(rewards) / len(rewards)
+        batch_pass_pct = batch_passes / len(completions) * 100
+        running_avg = reward_stats["total_reward"] / reward_stats["total"]
+        running_pass = reward_stats["all_pass"] / reward_stats["total"] * 100
+
+        reward_log.append({
+            "batch": reward_stats["calls"],
+            "avg_reward": round(running_avg, 4),
+            "pass_rate": round(running_pass, 2),
+            "batch_reward": round(batch_avg, 4),
+            "batch_pass_rate": round(batch_pass_pct, 2),
+        })
+
+        if reward_stats["calls"] % 5 == 0:
+            log.info(
+                f"[Reward] batch {reward_stats['calls']}: "
+                f"avg_reward={running_avg:.3f}, pass_rate={running_pass:.1f}%, "
+                f"batch_reward={batch_avg:.3f}"
+            )
+            # Push report update from trainer thread
+            asyncio.run_coroutine_threadsafe(
+                flyte.report.replace.aio(
+                    _build_training_report(train_state["max_steps"]),
+                    do_flush=True,
+                ),
+                loop,
+            )
+
+        return rewards
+
+    # -- GRPO config --
+    output_dir = os.path.join(tempfile.mkdtemp(), "checkpoints")
+    grpo_config = GRPOConfig(
+        output_dir=output_dir,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=batch_size,
+        learning_rate=lr,
+        num_generations=num_generations,
+        max_completion_length=max_completion_length,
+        logging_steps=5,
+        save_strategy="epoch",
+        bf16=use_bf16,
+        report_to="none",
+    )
+
+    trainer = GRPOTrainer(
+        model=model,
+        args=grpo_config,
+        train_dataset=dataset["train"],
+        reward_funcs=code_reward,
+        peft_config=peft_config,
+        processing_class=tokenizer,
+        callbacks=[MetricsCallback()],
+    )
+
+    log.info(f"Starting GRPO training (num_generations={num_generations})...")
+    await flyte.report.replace.aio(
+        _build_training_report(trainer.state.max_steps or 0),
+        do_flush=True,
+    )
+
+    await asyncio.to_thread(trainer.train)
+    log.info("Training loop finished.")
+
+    # Cancel any lingering sandbox coroutines from timed-out batches
+    for task in asyncio.all_tasks(loop):
+        if task is not asyncio.current_task() and not task.done():
+            task.cancel()
+    # Give cancelled tasks a moment to clean up
+    await asyncio.sleep(1)
     log.info("Saving model...")
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
     final_pass = reward_stats["all_pass"] / max(reward_stats["total"], 1) * 100
@@ -660,8 +667,7 @@ async def evaluate(
     ft_passed_tests = 0
     comparisons = []
 
-    sbx = await sb.local.session(network_mode="blocked").__aenter__()
-    try:
+    async with sb.local.session(network_mode="blocked") as sbx:
         for i in range(len(prompts)):
             func_def = prompts[i].strip().split("\n")[-1]
             setup = setup_codes[i] if setup_codes[i] else ""
@@ -704,8 +710,6 @@ async def evaluate(
                 "base_all_pass": base_all,
                 "grpo_all_pass": ft_all,
             })
-    finally:
-        pass  # Skip sandbox close (known hang issue with local sessions)
 
     total = len(prompts)
     base_rate = base_pass / total * 100
