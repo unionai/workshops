@@ -51,6 +51,16 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 |----------|-------------|
 | [MCP Recipe Assistant](tutorials/mcp/) | Build and deploy a recipe assistant MCP server on Union |
 
+## LLM Fine-Tuning
+
+| Tutorial | Description |
+|----------|-------------|
+| [LoRA / QLoRA / Full](tutorials/llm-fine-tuning-lora-qlora/) | Fine-tune an LLM on text-to-SQL with LoRA, QLoRA, or full fine-tuning — live training reports, FastAPI serving, Gradio UI |
+| [GRPO — Code Generation](tutorials/llm-fine-tuning-grpo-code/) | Teach a model to write Python with GRPO — reward = sandboxed test execution, MBPP dataset, live reward/pass-rate charts |
+| [GRPO](tutorials/llm-fine-tuning-grpo/) | GRPO fine-tuning on math/reasoning tasks |
+| [DPO](tutorials/llm-fine-tuning-dpo/) | Direct Preference Optimization for alignment |
+| [PPO](tutorials/llm-fine-tuning-ppo/) | Proximal Policy Optimization for RLHF |
+
 ## ML / AI
 
 | Tutorial | Description |
@@ -58,7 +68,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 | [Fraud Detection with Feast](tutorials/fraud-detection-feast/) | Fraud scoring pipeline with Feast feature store, XGBoost, and real-time serving |
 | [Stable Diffusion](tutorials/starter-examples/stable-diffusion/) | Image generation with SDXL Turbo |
 | [Image Classifier](tutorials/starter-examples/image-classifier/) | Fine-tune ResNet18 on Beans dataset |
-| [LLM Fine-Tuning: LoRA/QLoRA](tutorials/llm-fine-tuning-lora-qlora/) | Fine-tune an LLM on text-to-SQL with LoRA, QLoRA, or full fine-tuning — live training reports, FastAPI serving, Gradio UI |
+| [DETR Object Detection](tutorials/detr-object-detection/) | Fine-tune DETR for object detection with live mAP charts |
 
 ## Biotech / Life Sciences
 
