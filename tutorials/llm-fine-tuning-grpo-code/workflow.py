@@ -383,136 +383,110 @@ async def train(
                 loop,
             )
 
-    # -- Sandbox on a dedicated event loop --
-    # We run the sandbox on its own event loop in a daemon thread so that
-    # any zombie tasks from timed-out calls don't pollute Flyte's main
-    # event loop. When training finishes, we just stop the loop and the
-    # daemon thread dies — clean shutdown, no hangs.
-    import threading
+    # -- Sandbox session for safe code execution --
+    # Opens an isolated sandbox where LLM-generated code runs with no network
+    # access. The reward function (sync, in trainer thread) uses
+    # run_coroutine_threadsafe to call into the async sandbox.
+    async with sb.local.session(network_mode="blocked") as sbx:
 
-    sandbox_loop = asyncio.new_event_loop()
-    sandbox_thread = threading.Thread(
-        target=sandbox_loop.run_forever, daemon=True, name="sandbox-loop"
-    )
-    sandbox_thread.start()
+        # -- Reward function --
+        def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], setup_code: list[str], **kwargs) -> list[float]:
+            """Reward = fraction of test cases passed. All pass = 1.0."""
+            rewards = []
+            batch_passes = 0
 
-    # Open sandbox session on the sandbox loop
-    sbx = asyncio.run_coroutine_threadsafe(
-        sb.local.session(network_mode="blocked").__aenter__(),
-        sandbox_loop,
-    ).result()
+            for completion, p, t, setup in zip(completions, func_prompt, tests, setup_code):
+                func_def = p.strip().split("\n")[-1]
+                full_code = func_def + "\n" + completion
+                if setup:
+                    full_code = setup + "\n" + full_code
+                test_list = [l.strip() for l in t.strip().split("\n") if l.strip().startswith("assert")]
 
-    def _run_sandboxed_sync(full_code: str, test_list: list[str]) -> tuple[bool, int, int]:
-        """Run a single test in the sandbox. Called from trainer thread."""
-        future = asyncio.run_coroutine_threadsafe(
-            run_tests_sandboxed(sbx, full_code, test_list),
-            sandbox_loop,
+                # Run tests in sandbox from trainer thread
+                future = asyncio.run_coroutine_threadsafe(
+                    run_tests_sandboxed(sbx, full_code, test_list),
+                    loop,
+                )
+                try:
+                    all_passed, passed, total = future.result(timeout=10)
+                except Exception:
+                    all_passed, passed, total = False, 0, len(test_list)
+
+                reward = passed / total if total > 0 else 0.0
+                rewards.append(reward)
+
+                if all_passed:
+                    reward_stats["all_pass"] += 1
+                    batch_passes += 1
+                reward_stats["total"] += 1
+
+            reward_stats["calls"] += 1
+            reward_stats["total_reward"] += sum(rewards)
+
+            # Track metrics
+            batch_avg = sum(rewards) / len(rewards)
+            batch_pass_pct = batch_passes / len(completions) * 100
+            running_avg = reward_stats["total_reward"] / reward_stats["total"]
+            running_pass = reward_stats["all_pass"] / reward_stats["total"] * 100
+
+            reward_log.append({
+                "batch": reward_stats["calls"],
+                "avg_reward": round(running_avg, 4),
+                "pass_rate": round(running_pass, 2),
+                "batch_reward": round(batch_avg, 4),
+                "batch_pass_rate": round(batch_pass_pct, 2),
+            })
+
+            if reward_stats["calls"] % 5 == 0:
+                log.info(
+                    f"[Reward] batch {reward_stats['calls']}: "
+                    f"avg_reward={running_avg:.3f}, pass_rate={running_pass:.1f}%, "
+                    f"batch_reward={batch_avg:.3f}"
+                )
+                # Push report update from trainer thread
+                asyncio.run_coroutine_threadsafe(
+                    flyte.report.replace.aio(
+                        _build_training_report(train_state["max_steps"]),
+                        do_flush=True,
+                    ),
+                    loop,
+                )
+
+            return rewards
+
+        # -- GRPO config --
+        output_dir = os.path.join(tempfile.mkdtemp(), "checkpoints")
+        grpo_config = GRPOConfig(
+            output_dir=output_dir,
+            num_train_epochs=epochs,
+            per_device_train_batch_size=batch_size,
+            learning_rate=lr,
+            num_generations=num_generations,
+            max_completion_length=max_completion_length,
+            logging_steps=5,
+            save_strategy="epoch",
+            bf16=use_bf16,
+            report_to="none",
         )
-        try:
-            return future.result(timeout=10)
-        except Exception:
-            return False, 0, len(test_list)
 
-    # -- Reward function --
-    def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], setup_code: list[str], **kwargs) -> list[float]:
-        """Reward = fraction of test cases passed. All pass = 1.0."""
-        rewards = []
-        batch_passes = 0
+        trainer = GRPOTrainer(
+            model=model,
+            args=grpo_config,
+            train_dataset=dataset["train"],
+            reward_funcs=code_reward,
+            peft_config=peft_config,
+            processing_class=tokenizer,
+            callbacks=[MetricsCallback()],
+        )
 
-        for completion, p, t, setup in zip(completions, func_prompt, tests, setup_code):
-            func_def = p.strip().split("\n")[-1]
-            full_code = func_def + "\n" + completion
-            if setup:
-                full_code = setup + "\n" + full_code
-            test_list = [l.strip() for l in t.strip().split("\n") if l.strip().startswith("assert")]
+        log.info(f"Starting GRPO training (num_generations={num_generations})...")
+        await flyte.report.replace.aio(
+            _build_training_report(trainer.state.max_steps or 0),
+            do_flush=True,
+        )
 
-            # Run in sandbox (uses dedicated sandbox event loop, not Flyte's)
-            all_passed, passed, total = _run_sandboxed_sync(full_code, test_list)
-            reward = passed / total if total > 0 else 0.0
-            rewards.append(reward)
-
-            if all_passed:
-                reward_stats["all_pass"] += 1
-                batch_passes += 1
-            reward_stats["total"] += 1
-
-        reward_stats["calls"] += 1
-        reward_stats["total_reward"] += sum(rewards)
-
-        # Track metrics
-        batch_avg = sum(rewards) / len(rewards)
-        batch_pass_pct = batch_passes / len(completions) * 100
-        running_avg = reward_stats["total_reward"] / reward_stats["total"]
-        running_pass = reward_stats["all_pass"] / reward_stats["total"] * 100
-
-        reward_log.append({
-            "batch": reward_stats["calls"],
-            "avg_reward": round(running_avg, 4),
-            "pass_rate": round(running_pass, 2),
-            "batch_reward": round(batch_avg, 4),
-            "batch_pass_rate": round(batch_pass_pct, 2),
-        })
-
-        if reward_stats["calls"] % 5 == 0:
-            log.info(
-                f"[Reward] batch {reward_stats['calls']}: "
-                f"avg_reward={running_avg:.3f}, pass_rate={running_pass:.1f}%, "
-                f"batch_reward={batch_avg:.3f}"
-            )
-            # Push report update from trainer thread
-            asyncio.run_coroutine_threadsafe(
-                flyte.report.replace.aio(
-                    _build_training_report(train_state["max_steps"]),
-                    do_flush=True,
-                ),
-                loop,
-            )
-
-        return rewards
-
-    # -- GRPO config --
-    output_dir = os.path.join(tempfile.mkdtemp(), "checkpoints")
-    grpo_config = GRPOConfig(
-        output_dir=output_dir,
-        num_train_epochs=epochs,
-        per_device_train_batch_size=batch_size,
-        learning_rate=lr,
-        num_generations=num_generations,
-        max_completion_length=max_completion_length,
-        logging_steps=5,
-        save_strategy="epoch",
-        bf16=use_bf16,
-        report_to="none",
-    )
-
-    trainer = GRPOTrainer(
-        model=model,
-        args=grpo_config,
-        train_dataset=dataset["train"],
-        reward_funcs=code_reward,
-        peft_config=peft_config,
-        processing_class=tokenizer,
-        callbacks=[MetricsCallback()],
-    )
-
-    log.info(f"Starting GRPO training (num_generations={num_generations})...")
-    await flyte.report.replace.aio(
-        _build_training_report(trainer.state.max_steps or 0),
-        do_flush=True,
-    )
-
-    await asyncio.to_thread(trainer.train)
-    log.info("Training loop finished.")
-
-    # Stop the sandbox event loop and its thread pool workers.
-    log.info("Stopping sandbox...")
-    sandbox_loop.call_soon_threadsafe(sandbox_loop.stop)
-    sandbox_thread.join(timeout=5)
-    # Shut down the sandbox loop's thread pool so wait_and_collect
-    # threads don't keep the process alive after Flyte completes.
-    if hasattr(sandbox_loop, '_default_executor') and sandbox_loop._default_executor:
-        sandbox_loop._default_executor.shutdown(wait=False, cancel_futures=True)
-    log.info("Sandbox stopped.")
+        await asyncio.to_thread(trainer.train)
+        log.info("Training loop finished.")
 
     log.info("Saving model...")
     final_avg = reward_stats["total_reward"] / max(reward_stats["total"], 1)
