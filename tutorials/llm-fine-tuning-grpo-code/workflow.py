@@ -387,7 +387,7 @@ async def train(
     # Opens an isolated sandbox where LLM-generated code runs with no network
     # access. The reward function (sync, in trainer thread) uses
     # run_coroutine_threadsafe to call into the async sandbox.
-    async with sb.local.session(network_mode="blocked") as sbx:
+    async with sb.on_device.session(network_mode="blocked", backend="bubblewrap") as sbx:
 
         # -- Reward function --
         def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], setup_code: list[str], **kwargs) -> list[float]:
@@ -652,7 +652,7 @@ async def evaluate(
     ft_passed_tests = 0
     comparisons = []
 
-    async with sb.local.session(network_mode="blocked") as sbx:
+    async with sb.on_device.session(network_mode="blocked", backend="bubblewrap") as sbx:
         for i in range(len(prompts)):
             func_def = prompts[i].strip().split("\n")[-1]
             setup = setup_codes[i] if setup_codes[i] else ""

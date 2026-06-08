@@ -8,8 +8,9 @@ gpu_env = flyte.TaskEnvironment(
     name="grpo-code-gpu",
     image=flyte.Image.from_debian_base(
         name="grpo-code",
-    ).with_requirements("requirements.txt"),
-    resources=flyte.Resources(cpu=4, memory="48Gi", gpu=1),
+    ).with_apt_packages("bubblewrap").with_requirements("requirements.txt"),
+    resources=flyte.Resources(cpu=4, memory="48Gi", gpu="L40s:1"),
+    pod_template=flyte.PodTemplate().allow_nested_sandboxing(),
     secrets=[
         flyte.Secret(key="HF_TOKEN", as_env_var="HF_TOKEN"),
     ],

@@ -71,26 +71,54 @@ echo "HF_TOKEN=hf_your_token_here" > .env
 
 ```bash
 flyte run workflow.py pipeline \
+  --model_name "Qwen/Qwen2.5-0.5B" \
   --max_train_samples 10 \
   --epochs 1 \
   --num_generations 2 \
-  --batch_size 2
+  --batch_size 2 \
+  --num_eval_examples 5
 ```
 
 Small dataset, one epoch, minimal generations — finishes in a few minutes. Good for verifying the pipeline works end to end.
 
-### Default run (SmolLM2-135M)
+### Standard run
 
 ```bash
-flyte run workflow.py pipeline
+flyte run workflow.py pipeline \
+  --model_name "Qwen/Qwen2.5-0.5B" \
+  --method lora \
+  --epochs 3 \
+  --lr 5e-5 \
+  --batch_size 4 \
+  --num_generations 4 \
+  --max_completion_length 128 \
+  --max_train_samples 200 \
+  --max_eval_samples 50 \
+  --num_eval_examples 30
 ```
 
-200 training samples, 3 epochs, 4 generations per prompt. Takes ~20–30 min on a T4.
+These are the default values shown explicitly. The default SmolLM2-135M is too small to write valid Python for MBPP problems — use Qwen2.5-0.5B or larger for meaningful results.
+
+### Longer training run
+
+```bash
+flyte run workflow.py pipeline \
+  --model_name "Qwen/Qwen2.5-0.5B" \
+  --method lora \
+  --epochs 5 \
+  --lr 5e-5 \
+  --batch_size 4 \
+  --num_generations 4 \
+  --max_completion_length 192 \
+  --max_train_samples 400 \
+  --max_eval_samples 50 \
+  --num_eval_examples 50
+```
 
 ### Full fine-tuning (no LoRA)
 
 ```bash
-flyte run workflow.py pipeline --method full
+flyte run workflow.py pipeline --method full --model_name "Qwen/Qwen2.5-0.5B"
 ```
 
 By default the pipeline uses LoRA adapters (`--method lora`), which freeze most weights and train small low-rank matrices. Use `--method full` to update all parameters — more expressive but uses more memory and is slower.
@@ -98,7 +126,7 @@ By default the pipeline uses LoRA adapters (`--method lora`), which freeze most 
 ### Bigger model
 
 ```bash
-flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B"
+flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-1.5B"
 ```
 
 ### Local execution (no cluster)
@@ -164,13 +192,14 @@ This continuous signal is important — GRPO gets partial credit for partially c
 
 ## Sandboxed Code Execution
 
-The model generates arbitrary Python which needs to be executed to compute rewards. Rather than using `exec()` in the training process (dangerous with untrusted code), this tutorial uses [Union interactive sandboxes](https://docs.union.ai/docs/v2/union/user-guide/sandboxing/interactive-sandboxes/) to run generated code safely:
+The model generates arbitrary Python which needs to be executed to compute rewards. Rather than using `exec()` in the training process (dangerous with untrusted code), this tutorial uses [Union interactive sandboxes](https://docs.union.ai/docs/v2/union/user-guide/sandboxing/interactive-sandboxes/) (`union.sandbox.on_device`) to run generated code safely:
 
 - **Network blocked** — generated code cannot make network requests
 - **Process isolation** — crashes in generated code don't affect the trainer
 - **Persistent session** — one sandbox stays open for the entire training run, avoiding per-evaluation setup cost
+- **Timeout enforcement** — each code execution has a 5-second timeout, preventing infinite loops
 
-The sandbox session is opened once per task, and the reward function calls into it from the trainer thread using `asyncio.run_coroutine_threadsafe()`.
+The sandbox session is opened once per task, and the reward function calls into it from the trainer thread using `asyncio.run_coroutine_threadsafe()`. For production workloads with higher isolation requirements, use `sb.session()` (remote sandbox) which runs each session in its own Kubernetes pod.
 
 ## Live Training Reports
 
