@@ -19,7 +19,7 @@ base_image = flyte.Image.from_debian_base(
 gpu_env = flyte.TaskEnvironment(
     name="nuclei-segmentation-gpu",
     image=base_image,
-    resources=flyte.Resources(cpu=4, memory="24Gi", gpu=1),
+    resources=flyte.Resources(cpu=4, memory="24Gi", gpu=1, shm="4Gi"),
 )
 
 cpu_env = flyte.TaskEnvironment(

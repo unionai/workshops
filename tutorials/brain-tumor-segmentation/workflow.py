@@ -727,6 +727,7 @@ async def train(
         Compose,
         ConvertToMultiChannelBasedOnBratsClassesd,
         CropForegroundd,
+        DivisiblePadd,
         EnsureChannelFirstd,
         LoadImaged,
         NormalizeIntensityd,
@@ -788,6 +789,7 @@ async def train(
             roi_size=[patch_size, patch_size, patch_size],
             random_size=False,
         ),
+        DivisiblePadd(keys=["image", "label"], k=16),
         RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
         RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
         RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
@@ -802,6 +804,7 @@ async def train(
         CastToTyped(keys="label", dtype="float32"),
         NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
         CropForegroundd(keys=["image", "label"], source_key="image"),
+        DivisiblePadd(keys=["image", "label"], k=16),
     ])
 
     train_ds = CacheDataset(data=train_dicts, transform=train_transforms, cache_rate=0.5)
@@ -953,8 +956,8 @@ async def train(
 
                         val_data["pred"] = val_outputs
                         val_data = [post_trans(i) for i in decollate_batch(val_data)]
-                        val_outputs_post = [d["pred"] for d in val_data]
-                        val_labels_post = [d["label"] for d in val_data]
+                        val_outputs_post = [d["pred"].cpu() for d in val_data]
+                        val_labels_post = [d["label"].cpu() for d in val_data]
 
                         dice_metric(y_pred=val_outputs_post, y=val_labels_post)
 
@@ -1131,6 +1134,7 @@ async def evaluate(
         Compose,
         ConvertToMultiChannelBasedOnBratsClassesd,
         CropForegroundd,
+        DivisiblePadd,
         EnsureChannelFirstd,
         LoadImaged,
         NormalizeIntensityd,
@@ -1167,6 +1171,7 @@ async def evaluate(
         CastToTyped(keys="label", dtype="float32"),
         NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
         CropForegroundd(keys=["image", "label"], source_key="image"),
+        DivisiblePadd(keys=["image", "label"], k=16),
     ])
 
     val_ds = CacheDataset(data=val_dicts, transform=val_transforms, cache_rate=1.0)
@@ -1192,8 +1197,8 @@ async def evaluate(
 
             val_data["pred"] = val_outputs
             val_data = [post_trans(i) for i in decollate_batch(val_data)]
-            val_outputs_post = [d["pred"] for d in val_data]
-            val_labels_post = [d["label"] for d in val_data]
+            val_outputs_post = [d["pred"].cpu() for d in val_data]
+            val_labels_post = [d["label"].cpu() for d in val_data]
 
             dice_metric(y_pred=val_outputs_post, y=val_labels_post)
 
@@ -1288,7 +1293,7 @@ async def inference(
         CastToTyped,
         Compose,
         ConvertToMultiChannelBasedOnBratsClassesd,
-        CropForegroundd,
+        DivisiblePadd,
         EnsureChannelFirstd,
         LoadImaged,
         NormalizeIntensityd,
@@ -1320,6 +1325,7 @@ async def inference(
         ConvertToMultiChannelBasedOnBratsClassesd(keys="label"),
         CastToTyped(keys="label", dtype="float32"),
         NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
+        DivisiblePadd(keys=["image", "label"], k=16),
     ])
 
     html_blocks = []
