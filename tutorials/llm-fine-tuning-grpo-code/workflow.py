@@ -9,19 +9,22 @@ Multiple valid implementations exist for each problem, so GRPO can explore
 different solutions — unlike SFT which teaches a single "correct" answer.
 
 This is the same technique DeepSeek used for R1, applied to code generation.
+Generated code runs in a sandboxed environment (union.sandbox) for safe execution.
 
 Usage:
-    # Default (SmolLM2-135M)
-    flyte run --local --tui workflow.py pipeline
+    # Quick sanity check
+    flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B" \\
+        --max_train_samples 10 --epochs 1 --num_generations 2 --batch_size 2
 
-    # Quick test
-    flyte run --local --tui workflow.py pipeline --max_train_samples 30 --epochs 1
-
-    # Remote
-    flyte run workflow.py pipeline --epochs 3
-
-    # Bigger model
+    # Standard run
     flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B"
+
+    # Full fine-tuning (no LoRA)
+    flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B" --method full
+
+    # Longer training
+    flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B" \\
+        --max_train_samples 200 --epochs 5 --num_eval_examples 30
 """
 
 import asyncio
@@ -83,7 +86,7 @@ async def run_tests_sandboxed(
     out, err = await proc.communicate_text()
 
     if not out or proc.returncode != 0:
-        log.warning(f"[Sandbox] returncode={proc.returncode} stdout={repr(out[:100]) if out else 'None'} stderr={err[:200] if err else 'None'}")
+        log.debug(f"[Sandbox] returncode={proc.returncode} stderr={err[:200] if err else 'None'}")
 
     passed = out.count("PASS:") if out else 0
     return passed == total, passed, total

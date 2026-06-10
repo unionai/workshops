@@ -79,11 +79,29 @@ Ideas for healthcare/clinical AI demos with strong visual reports.
 | **Drug-Drug Interaction Prediction** | DrugBank or TWOSIDES | Molecule pair cards, interaction severity heatmaps, drug interaction network graphs |
 | **Drug Repurposing with Embeddings** | DrugBank + disease ontologies | UMAP projections colored by therapeutic area, nearest-neighbor candidate tables, embedding similarity heatmaps |
 
-### Top 3 Picks (visual impact + demo value)
+### Computer Vision — Instance Segmentation
 
-1. **Chest X-Ray Triage** — Universally recognized, GradCAM heatmaps are gorgeous, CheXpert is open
-2. **ECG Arrhythmia Detection** — Signal waveforms look amazing in SVG, PTB-XL is open, everyone knows an ECG
-3. **Retinal Disease Detection** — Fundus images are visually striking, clear grading scale, real screening use case
+| Tutorial Idea | Dataset | Visuals |
+|--------------|---------|---------|
+| **Nuclei Segmentation (Mask R-CNN)** | Data Science Bowl 2018 (~670 microscopy images, Kaggle) | Colorful per-nucleus instance masks overlaid on microscopy, mask confidence scores, cell count distributions, before/after segmentation comparisons |
+
+### 3D Medical Imaging
+
+| Tutorial Idea | Dataset | Visuals |
+|--------------|---------|---------|
+| **Brain Tumor Segmentation (3D MRI)** | BraTS 2023 (multi-modal MRI volumes, open) | 3D tumor volume renderings, axial/sagittal/coronal slice views with mask overlays, tumor subregion breakdowns (enhancing, necrotic, edema), volumetric statistics |
+| **3D Organ Segmentation (CT)** | TotalSegmentator (1.2k CT scans, 117 anatomical structures) | 3D organ renderings, slice-by-slice segmentation animations, multi-organ Dice score comparisons |
+
+### Build Queue
+
+1. **Nuclei Segmentation (Mask R-CNN)** — Instance segmentation showpiece, healthcare + biotech crossover
+2. **Brain Tumor Segmentation (3D MRI)** — Volumetric data, 3D renderings are visually stunning
+3. **Chest X-Ray Triage** — Universally recognized, GradCAM heatmaps
+4. **ECG Arrhythmia Detection** — Different modality (time-series), everyone knows an ECG
+
+### Other Strong Picks
+
+- **Retinal Disease Detection** — Fundus images are visually striking, clear grading scale, real screening use case
 
 ## Notes
 

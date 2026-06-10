@@ -55,7 +55,8 @@ The workflow runs three steps:
 
 ```bash
 cd tutorials/llm-fine-tuning-grpo-code
-uv venv .venv --python 3.11 && source .venv/bin/activate
+uv venv .venv --python 3.11
+source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 

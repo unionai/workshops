@@ -1,0 +1,3 @@
+flyte[tui]>=2.0.0
+openai
+python-dotenv

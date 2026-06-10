@@ -2,13 +2,7 @@ import flyte
 
 base_image = flyte.Image.from_debian_base(
     name="genomic-gene-compare-v1",
-).with_pip_packages(
-    "flyte[tui]>=2.0",
-    "torch>=2.9.0",
-    "transformers>=4.49.0",
-    "accelerate>=0.34.0",
-    "numpy",
-)
+).with_requirements("requirements.txt")
 
 gpu_env = flyte.TaskEnvironment(
     name="genomic-gene-compare-gpu",
