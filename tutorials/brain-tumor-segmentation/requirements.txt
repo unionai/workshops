@@ -1,0 +1,7 @@
+flyte[tui]>=2.0
+torch>=2.9.0
+monai>=1.4.0
+nibabel>=5.0.0
+huggingface_hub>=0.24.0
+numpy
+pillow>=10.0.0
