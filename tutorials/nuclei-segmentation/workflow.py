@@ -805,8 +805,6 @@ async def train(
     # the pretrained RPN weights). Lower NMS threshold for dense/touching
     # nuclei and allow more detections per image.
     model = maskrcnn_resnet50_fpn_v2(weights=MaskRCNN_ResNet50_FPN_V2_Weights.DEFAULT)
-    model.roi_heads.nms_thresh = 0.3          # lower NMS for touching nuclei
-    model.roi_heads.detections_per_img = 300  # default 100, but images can have 70+
 
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES)

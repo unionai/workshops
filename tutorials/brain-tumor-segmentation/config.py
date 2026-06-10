@@ -19,7 +19,7 @@ base_image = flyte.Image.from_debian_base(
 gpu_env = flyte.TaskEnvironment(
     name="brain-tumor-seg-gpu",
     image=base_image,
-    resources=flyte.Resources(cpu=4, memory="32Gi", gpu=1),
+    resources=flyte.Resources(cpu=4, memory="32Gi", gpu=1, shm="8Gi"),
 )
 
 cpu_env = flyte.TaskEnvironment(

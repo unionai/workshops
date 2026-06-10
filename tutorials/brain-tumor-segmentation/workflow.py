@@ -723,6 +723,7 @@ async def train(
     from monai.metrics import DiceMetric
     from monai.networks.nets import SegResNet
     from monai.transforms import (
+        CastToTyped,
         Compose,
         ConvertToMultiChannelBasedOnBratsClassesd,
         CropForegroundd,
@@ -779,6 +780,7 @@ async def train(
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys="label"),
         ConvertToMultiChannelBasedOnBratsClassesd(keys="label"),
+        CastToTyped(keys="label", dtype="float32"),
         NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
         CropForegroundd(keys=["image", "label"], source_key="image"),
         RandSpatialCropd(
@@ -797,6 +799,7 @@ async def train(
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys="label"),
         ConvertToMultiChannelBasedOnBratsClassesd(keys="label"),
+        CastToTyped(keys="label", dtype="float32"),
         NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
         CropForegroundd(keys=["image", "label"], source_key="image"),
     ])
@@ -804,8 +807,8 @@ async def train(
     train_ds = CacheDataset(data=train_dicts, transform=train_transforms, cache_rate=0.5)
     val_ds = CacheDataset(data=val_dicts, transform=val_transforms, cache_rate=1.0)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
 
     # SegResNet: 4 input channels (T1, T1ce, T2, FLAIR), 3 output channels
     # (WT, TC, ET — the standard BraTS composite regions)
@@ -1124,6 +1127,7 @@ async def evaluate(
     from monai.transforms import (
         Activationsd,
         AsDiscreted,
+        CastToTyped,
         Compose,
         ConvertToMultiChannelBasedOnBratsClassesd,
         CropForegroundd,
@@ -1160,12 +1164,13 @@ async def evaluate(
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys="label"),
         ConvertToMultiChannelBasedOnBratsClassesd(keys="label"),
+        CastToTyped(keys="label", dtype="float32"),
         NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
         CropForegroundd(keys=["image", "label"], source_key="image"),
     ])
 
     val_ds = CacheDataset(data=val_dicts, transform=val_transforms, cache_rate=1.0)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
 
     dice_metric = DiceMetric(include_background=True, reduction="mean_batch")
     post_trans = Compose([Activationsd(keys="pred", sigmoid=True), AsDiscreted(keys="pred", threshold=0.5)])
@@ -1280,6 +1285,7 @@ async def inference(
     import torch
     from monai.inferers import sliding_window_inference
     from monai.transforms import (
+        CastToTyped,
         Compose,
         ConvertToMultiChannelBasedOnBratsClassesd,
         CropForegroundd,
@@ -1312,6 +1318,7 @@ async def inference(
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys="label"),
         ConvertToMultiChannelBasedOnBratsClassesd(keys="label"),
+        CastToTyped(keys="label", dtype="float32"),
         NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
     ])
 
