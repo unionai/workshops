@@ -1,0 +1,9 @@
+flyte[tui]>=2.0
+torch>=2.9.0
+torchvision>=0.24.0
+torchmetrics>=1.4.0
+pycocotools>=2.0.7
+pillow>=10.0.0
+numpy
+datasets>=3.0.0
+huggingface_hub>=0.24.0
