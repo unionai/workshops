@@ -26,8 +26,6 @@ Usage:
 """
 
 import asyncio
-import base64
-import io
 import json
 import logging
 import os
@@ -39,462 +37,27 @@ import flyte
 import flyte.io
 import flyte.report
 from config import cpu_env, gpu_env
+from report_helpers import (
+    EVAL_REGIONS,
+    LABEL_MAP,
+    MRI_DISPLAY_NAMES,
+    MRI_MODALITIES,
+    REGION_COLORS,
+    REGION_COLORS_HEX,
+    dual_slice_viewer_html,
+    make_bar_chart,
+    make_line_chart,
+    render_slice_gif,
+    slice_to_data_uri,
+    slice_viewer_html,
+    three_plane_html,
+    tumor_legend_html,
+    wrap_report,
+)
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
-
-
-# ------------------------------------------------------------------
-# Tumor subregion definitions
-# ------------------------------------------------------------------
-
-# BraTS label map (label 3 is intentionally skipped in the dataset)
-LABEL_MAP = {0: "background", 1: "NCR", 2: "ED", 4: "ET"}
-
-# Composite regions used for evaluation (standard BraTS metrics)
-# WT = Whole Tumor (labels 1+2+4), TC = Tumor Core (labels 1+4), ET = Enhancing (label 4)
-EVAL_REGIONS = {
-    "WT": "Whole Tumor",
-    "TC": "Tumor Core",
-    "ET": "Enhancing Tumor",
-}
-
-# Colors for overlay visualization
-REGION_COLORS = {
-    1: (255, 220, 50),   # NCR — yellow
-    2: (50, 205, 50),    # ED — green
-    4: (220, 50, 50),    # ET — red
-}
-
-REGION_COLORS_HEX = {
-    1: "#ffdc32",  # NCR
-    2: "#32cd32",  # ED
-    4: "#dc3232",  # ET
-}
-
-MRI_MODALITIES = ["t1n", "t1c", "t2w", "t2f"]
-MRI_DISPLAY_NAMES = {"t1n": "T1", "t1c": "T1-contrast", "t2w": "T2", "t2f": "FLAIR"}
-
-
-# ------------------------------------------------------------------
-# Report styling — deep blue/indigo neuroimaging theme
-# ------------------------------------------------------------------
-
-REPORT_CSS = """
-<style>
-  .report { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; color: #1a1a2e; }
-  .report h2 { color: #1e3a5f; border-bottom: 2px solid #3b82f6; padding-bottom: 8px; margin-top: 24px; }
-  .report h3 { color: #1e40af; margin-top: 20px; }
-  .report .card { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 16px; margin: 12px 0; }
-  .report .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 12px 0; }
-  .report .stat { background: #fff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 12px; text-align: center; }
-  .report .stat .value { font-size: 1.5em; font-weight: 700; color: #1e3a5f; }
-  .report .stat .label { font-size: 0.85em; color: #6c757d; margin-top: 4px; }
-  .report table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-  .report th { background: #1e3a5f; color: #fff; padding: 10px 14px; text-align: left; font-weight: 600; }
-  .report td { padding: 8px 14px; border-bottom: 1px solid #bfdbfe; }
-  .report tr:nth-child(even) { background: #eff6ff; }
-  .report .highlight { color: #1e3a5f; font-weight: 700; }
-  .report .note { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 10px 14px; border-radius: 4px; margin: 12px 0; font-size: 0.9em; }
-  .report .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: 600; }
-  .report .badge-success { background: #d1fae5; color: #065f46; }
-  .report .badge-danger { background: #fee2e2; color: #991b1b; }
-  .report .badge-info { background: #dbeafe; color: #1e3a5f; }
-  .report .chart-container { background: #fff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 16px; margin: 16px 0; }
-  .report .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin: 16px 0; }
-  .report .image-card { background: #000; border: 1px solid #bfdbfe; border-radius: 8px; overflow: hidden; }
-  .report .image-card img { width: 100%; aspect-ratio: 1; object-fit: contain; }
-  .report .image-card .caption { padding: 6px 10px; font-size: 0.8em; color: #fff; background: #1e293b; }
-  .report .slice-panel { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; }
-  .report .slice-panel img { width: 100%; border-radius: 6px; border: 1px solid #334155; }
-  .report .legend { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
-  .report .legend-item { display: flex; align-items: center; gap: 4px; font-size: 0.85em; }
-  .report .legend-swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
-</style>
-"""
-
-
-def _wrap_report(html: str) -> str:
-    return f'{REPORT_CSS}<div class="report">{html}</div>'
-
-
-def _tumor_legend_html() -> str:
-    """Render an HTML legend showing tumor subregion colors."""
-    items = ""
-    for label_id, hex_color in REGION_COLORS_HEX.items():
-        name = LABEL_MAP[label_id]
-        items += (
-            f'<span class="legend-item">'
-            f'<span class="legend-swatch" style="background:{hex_color};"></span>'
-            f'{name}</span>'
-        )
-    return f'<div class="legend">{items}</div>'
-
-
-# ------------------------------------------------------------------
-# SVG chart helpers
-# ------------------------------------------------------------------
-
-def _make_line_chart(
-    data: list[dict],
-    x_key: str,
-    y_keys: list[str],
-    title: str = "",
-    x_label: str = "",
-    y_label: str = "",
-    colors: list[str] | None = None,
-    width: int = 700,
-    height: int = 300,
-    y_max_cap: float | None = None,
-    x_range_override: tuple[float, float] | None = None,
-    y_display_names: dict[str, str] | None = None,
-) -> str:
-    """Generate an SVG line chart from a list of dicts."""
-    default_colors = ["#3b82f6", "#1e3a5f", "#06d6a0", "#f59e0b", "#6c757d"]
-    colors = colors or default_colors
-
-    ml, mr, mt, mb = 60, 20, 40, 50
-    cw = width - ml - mr
-    ch = height - mt - mb
-
-    x_vals = [d[x_key] for d in data] if data else []
-    if x_range_override:
-        x_min, x_max = x_range_override
-    elif x_vals:
-        x_min, x_max = min(x_vals), max(x_vals)
-    else:
-        x_min, x_max = 0, 1
-    x_range = x_max - x_min or 1
-
-    all_y = []
-    for key in y_keys:
-        all_y.extend(d[key] for d in data if key in d)
-    y_min = min(all_y) if all_y else 0
-    y_max = max(all_y) if all_y else 1
-    y_pad = (y_max - y_min) * 0.1 or 0.1
-    y_min_plot = max(0, y_min - y_pad)
-    y_max_plot = y_max + y_pad
-    if y_max_cap is not None:
-        y_max_plot = min(y_max_plot, y_max_cap)
-    y_range = y_max_plot - y_min_plot or 1
-
-    def sx(v):
-        return ml + (v - x_min) / x_range * cw
-
-    def sy(v):
-        return mt + ch - (v - y_min_plot) / y_range * ch
-
-    lines = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-        f'style="width:100%;max-width:{width}px;height:auto;">',
-        f'<rect width="{width}" height="{height}" fill="#fff" rx="6"/>',
-    ]
-
-    for i in range(6):
-        y_tick = y_min_plot + y_range * i / 5
-        py = sy(y_tick)
-        lines.append(
-            f'<line x1="{ml}" y1="{py:.1f}" x2="{ml + cw}" y2="{py:.1f}" '
-            f'stroke="#bfdbfe" stroke-width="1"/>'
-        )
-        lines.append(
-            f'<text x="{ml - 8}" y="{py + 4:.1f}" text-anchor="end" '
-            f'font-size="11" fill="#6c757d">{y_tick:.3f}</text>'
-        )
-
-    lines.append(
-        f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ch}" '
-        f'stroke="#93c5fd" stroke-width="1.5"/>'
-    )
-    lines.append(
-        f'<line x1="{ml}" y1="{mt + ch}" x2="{ml + cw}" y2="{mt + ch}" '
-        f'stroke="#93c5fd" stroke-width="1.5"/>'
-    )
-
-    if x_vals:
-        n_x_ticks = min(len(data), 10)
-        step = max(1, len(data) // n_x_ticks)
-        for i in range(0, len(data), step):
-            px = sx(x_vals[i])
-            lines.append(
-                f'<text x="{px:.1f}" y="{mt + ch + 20}" text-anchor="middle" '
-                f'font-size="11" fill="#6c757d">{x_vals[i]:.0f}</text>'
-            )
-    else:
-        for i in range(6):
-            x_tick = x_min + x_range * i / 5
-            px = sx(x_tick)
-            lines.append(
-                f'<text x="{px:.1f}" y="{mt + ch + 20}" text-anchor="middle" '
-                f'font-size="11" fill="#6c757d">{x_tick:.0f}</text>'
-            )
-
-    if not data:
-        lines.append(
-            f'<text x="{ml + cw / 2}" y="{mt + ch / 2}" text-anchor="middle" '
-            f'font-size="13" fill="#93c5fd" font-style="italic">Waiting for data...</text>'
-        )
-    for si, key in enumerate(y_keys):
-        color = colors[si % len(colors)]
-        points = [(sx(d[x_key]), sy(d[key])) for d in data if key in d]
-        if not points:
-            continue
-        if len(points) >= 2:
-            path_d = f"M {points[0][0]:.1f},{points[0][1]:.1f}"
-            for px, py in points[1:]:
-                path_d += f" L {px:.1f},{py:.1f}"
-            dash = ' stroke-dasharray="6,3"' if si % 2 == 1 else ""
-            lines.append(
-                f'<path d="{path_d}" fill="none" stroke="{color}" '
-                f'stroke-width="2" stroke-linejoin="round"{dash}/>'
-            )
-        if len(points) <= 30:
-            for px, py in points:
-                lines.append(
-                    f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3" fill="{color}"/>'
-                )
-
-    if title:
-        lines.append(
-            f'<text x="{width / 2}" y="22" text-anchor="middle" '
-            f'font-size="14" font-weight="600" fill="#1e3a5f">{title}</text>'
-        )
-
-    if x_label:
-        lines.append(
-            f'<text x="{ml + cw / 2}" y="{height - 6}" text-anchor="middle" '
-            f'font-size="12" fill="#6c757d">{x_label}</text>'
-        )
-    if y_label:
-        lines.append(
-            f'<text x="14" y="{mt + ch / 2}" text-anchor="middle" '
-            f'font-size="12" fill="#6c757d" '
-            f'transform="rotate(-90, 14, {mt + ch / 2})">{y_label}</text>'
-        )
-
-    names = y_display_names or {}
-    if len(y_keys) > 1:
-        lx = ml + 10
-        for si, key in enumerate(y_keys):
-            color = colors[si % len(colors)]
-            ly = mt + 14 + si * 18
-            lines.append(
-                f'<rect x="{lx}" y="{ly - 6}" width="12" height="12" '
-                f'rx="2" fill="{color}"/>'
-            )
-            label = names.get(key, key)
-            lines.append(
-                f'<text x="{lx + 16}" y="{ly + 4}" font-size="11" '
-                f'fill="#1a1a2e">{label}</text>'
-            )
-
-    lines.append("</svg>")
-    return "\n".join(lines)
-
-
-def _make_bar_chart(
-    labels: list[str],
-    series: dict[str, list[float]],
-    title: str = "",
-    colors: list[str] | None = None,
-    width: int = 700,
-    height: int = 300,
-    y_max_cap: float | None = None,
-) -> str:
-    """Generate an SVG grouped bar chart."""
-    if not labels:
-        return ""
-
-    default_colors = ["#3b82f6", "#1e3a5f", "#06d6a0", "#93c5fd"]
-    colors = colors or default_colors
-
-    ml, mr, mt, mb = 60, 20, 40, 60
-    cw = width - ml - mr
-    ch = height - mt - mb
-
-    all_vals = [v for vals in series.values() for v in vals]
-    y_max = max(all_vals) if all_vals else 1
-    y_max_plot = y_max * 1.15 or 1
-    if y_max_cap is not None:
-        y_max_plot = min(y_max_plot, y_max_cap) or y_max_cap
-
-    n_groups = len(labels)
-    n_series = len(series)
-    group_width = cw / n_groups
-    bar_width = group_width * 0.7 / max(n_series, 1)
-    gap = group_width * 0.15
-
-    def sy(v):
-        return mt + ch - (v / y_max_plot) * ch
-
-    lines_svg = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-        f'style="width:100%;max-width:{width}px;height:auto;">',
-        f'<rect width="{width}" height="{height}" fill="#fff" rx="6"/>',
-    ]
-
-    for i in range(6):
-        y_tick = y_max_plot * i / 5
-        py = sy(y_tick)
-        lines_svg.append(
-            f'<line x1="{ml}" y1="{py:.1f}" x2="{ml + cw}" y2="{py:.1f}" '
-            f'stroke="#bfdbfe" stroke-width="1"/>'
-        )
-        lines_svg.append(
-            f'<text x="{ml - 8}" y="{py + 4:.1f}" text-anchor="end" '
-            f'font-size="11" fill="#6c757d">{y_tick:.3f}</text>'
-        )
-
-    for gi, label in enumerate(labels):
-        gx = ml + gi * group_width + gap
-        for si, (name, vals) in enumerate(series.items()):
-            color = colors[si % len(colors)]
-            bx = gx + si * bar_width
-            val = vals[gi]
-            by = sy(val)
-            bh = mt + ch - by
-            lines_svg.append(
-                f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_width - 1:.1f}" '
-                f'height="{bh:.1f}" fill="{color}" rx="3"/>'
-            )
-            lines_svg.append(
-                f'<text x="{bx + bar_width / 2:.1f}" y="{by - 4:.1f}" '
-                f'text-anchor="middle" font-size="10" fill="#1e3a5f">'
-                f'{val:.3f}</text>'
-            )
-        lines_svg.append(
-            f'<text x="{gx + n_series * bar_width / 2:.1f}" y="{mt + ch + 18}" '
-            f'text-anchor="middle" font-size="10" fill="#6c757d">{label}</text>'
-        )
-
-    if title:
-        lines_svg.append(
-            f'<text x="{width / 2}" y="22" text-anchor="middle" '
-            f'font-size="14" font-weight="600" fill="#1e3a5f">{title}</text>'
-        )
-
-    lx = ml + cw - len(series) * 100
-    for si, name in enumerate(series):
-        color = colors[si % len(colors)]
-        lines_svg.append(
-            f'<rect x="{lx + si * 100}" y="{mt + ch + 35}" width="12" '
-            f'height="12" rx="2" fill="{color}"/>'
-        )
-        lines_svg.append(
-            f'<text x="{lx + si * 100 + 16}" y="{mt + ch + 46}" font-size="11" '
-            f'fill="#1a1a2e">{name}</text>'
-        )
-
-    lines_svg.append("</svg>")
-    return "\n".join(lines_svg)
-
-
-# ------------------------------------------------------------------
-# Visualization helpers — MRI slice rendering with tumor overlays
-# ------------------------------------------------------------------
-
-def _render_mri_slice(volume_slice, seg_slice=None, alpha: float = 0.4) -> bytes:
-    """Render a 2D MRI slice as a PNG with optional colored tumor overlay.
-
-    Args:
-        volume_slice: 2D numpy array (H, W) — MRI intensity values.
-        seg_slice: 2D numpy array (H, W) — segmentation labels (0,1,2,4).
-        alpha: Overlay transparency.
-
-    Returns:
-        PNG image bytes.
-    """
-    import numpy as np
-    from PIL import Image
-
-    # Normalize MRI to 0-255
-    s = volume_slice.astype(np.float32)
-    if s.max() > s.min():
-        s = (s - s.min()) / (s.max() - s.min())
-    s = (s * 255).astype(np.uint8)
-
-    # Convert grayscale to RGB
-    rgb = np.stack([s, s, s], axis=-1).astype(np.float32)
-
-    # Overlay tumor regions
-    if seg_slice is not None:
-        for label_id, color in REGION_COLORS.items():
-            mask = seg_slice == label_id
-            if mask.any():
-                for c in range(3):
-                    rgb[:, :, c] = np.where(
-                        mask,
-                        rgb[:, :, c] * (1 - alpha) + color[c] * alpha,
-                        rgb[:, :, c],
-                    )
-
-    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
-    img = Image.fromarray(rgb)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
-
-
-def _slice_to_data_uri(volume_slice, seg_slice=None, alpha: float = 0.4) -> str:
-    """Render an MRI slice to a base64 data URI."""
-    png_bytes = _render_mri_slice(volume_slice, seg_slice, alpha)
-    return "data:image/png;base64," + base64.b64encode(png_bytes).decode()
-
-
-def _render_three_planes(volume, seg=None, alpha: float = 0.4) -> tuple[str, str, str]:
-    """Render axial, sagittal, coronal center slices as data URIs.
-
-    Args:
-        volume: 3D numpy array (H, W, D).
-        seg: 3D numpy array (H, W, D) of labels, or None.
-
-    Returns:
-        Tuple of (axial_uri, coronal_uri, sagittal_uri).
-    """
-    import numpy as np
-
-    # Find center of tumor mass if segmentation available, else use volume center
-    if seg is not None and seg.max() > 0:
-        coords = np.argwhere(seg > 0)
-        center = coords.mean(axis=0).astype(int)
-    else:
-        center = [s // 2 for s in volume.shape]
-
-    h, w, d = volume.shape
-    ax_idx = min(max(center[2], 0), d - 1)
-    cor_idx = min(max(center[1], 0), w - 1)
-    sag_idx = min(max(center[0], 0), h - 1)
-
-    axial = volume[:, :, ax_idx]
-    axial_seg = seg[:, :, ax_idx] if seg is not None else None
-
-    coronal = volume[:, cor_idx, :]
-    coronal_seg = seg[:, cor_idx, :] if seg is not None else None
-
-    sagittal = volume[sag_idx, :, :]
-    sagittal_seg = seg[sag_idx, :, :] if seg is not None else None
-
-    return (
-        _slice_to_data_uri(axial, axial_seg, alpha),
-        _slice_to_data_uri(coronal, coronal_seg, alpha),
-        _slice_to_data_uri(sagittal, sagittal_seg, alpha),
-    )
-
-
-def _three_plane_html(volume, seg=None, label: str = "", alpha: float = 0.4) -> str:
-    """Render a 3-plane panel (axial, coronal, sagittal) as report HTML."""
-    axial_uri, coronal_uri, sagittal_uri = _render_three_planes(volume, seg, alpha)
-    return f"""
-    <div class="card">
-      {f'<b>{label}</b>' if label else ''}
-      <div class="slice-panel">
-        <div><img src="{axial_uri}" /><div style="text-align:center;font-size:0.8em;color:#6c757d;">Axial</div></div>
-        <div><img src="{coronal_uri}" /><div style="text-align:center;font-size:0.8em;color:#6c757d;">Coronal</div></div>
-        <div><img src="{sagittal_uri}" /><div style="text-align:center;font-size:0.8em;color:#6c757d;">Sagittal</div></div>
-      </div>
-    </div>
-    """
 
 
 # ------------------------------------------------------------------
@@ -573,12 +136,12 @@ async def prepare_data(
                     dst_name = "seg.nii.gz"
                 elif "t1c" in f_lower or "t1ce" in f_lower or "t1gd" in f_lower:
                     dst_name = "t1c.nii.gz"
-                elif "t1n" in f_lower or ("t1" in f_lower and "c" not in f_lower.split("t1")[1][:2]):
-                    dst_name = "t1n.nii.gz"
-                elif "t2w" in f_lower or ("t2" in f_lower and "f" not in f_lower.split("t2")[1][:2]):
-                    dst_name = "t2w.nii.gz"
                 elif "t2f" in f_lower or "flair" in f_lower:
                     dst_name = "t2f.nii.gz"
+                elif "t2w" in f_lower or ("t2" in f_lower and "f" not in f_lower):
+                    dst_name = "t2w.nii.gz"
+                elif "t1n" in f_lower or ("t1" in f_lower and "c" not in f_lower):
+                    dst_name = "t1n.nii.gz"
                 else:
                     dst_name = f
                 shutil.copy2(src, os.path.join(case_out, dst_name))
@@ -635,7 +198,7 @@ async def prepare_data(
         flair = nib.load(flair_path).get_fdata()
         seg = nib.load(seg_path).get_fdata().astype(int)
 
-        samples_html += _three_plane_html(
+        samples_html += three_plane_html(
             flair, seg,
             label=f"Case: {case_id} — NCR:{stat['NCR']:,} ED:{stat['ED']:,} ET:{stat['ET']:,} voxels",
         )
@@ -655,7 +218,7 @@ async def prepare_data(
             mod_path = os.path.join(case_dir, f"{mod}.nii.gz")
             if os.path.exists(mod_path):
                 vol = nib.load(mod_path).get_fdata()
-                uri = _slice_to_data_uri(vol[:, :, best_z])
+                uri = slice_to_data_uri(vol[:, :, best_z])
                 modality_html += f'''
                 <div class="image-card">
                   <img src="{uri}" />
@@ -678,7 +241,7 @@ async def prepare_data(
       <div class="stat"><div class="value">3</div><div class="label">Tumor Subregions</div></div>
       <div class="stat"><div class="value">{has_tumor_pct:.0f}%</div><div class="label">With Tumor</div></div>
     </div>
-    {_tumor_legend_html()}
+    {tumor_legend_html()}
     {modality_html}
     <h3>Sample Cases with Tumor Overlays (FLAIR)</h3>
     <p>Axial, coronal, and sagittal views centered on tumor mass.</p>
@@ -693,7 +256,7 @@ async def prepare_data(
     </div>
     """
 
-    await flyte.report.replace.aio(_wrap_report(report_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(report_html), do_flush=True)
 
     return await flyte.io.Dir.from_local(out_dir)
 
@@ -740,7 +303,7 @@ async def train(
     )
 
     log.info("Setting up SegResNet training...")
-    await flyte.report.replace.aio(_wrap_report(
+    await flyte.report.replace.aio(wrap_report(
         "<h2>Loading Model...</h2>"
         "<p>SegResNet for 3D brain tumor segmentation</p>"
         "<p>Preparing MONAI data pipeline with patch-based training...</p>"
@@ -807,8 +370,12 @@ async def train(
         DivisiblePadd(keys=["image", "label"], k=16),
     ])
 
-    train_ds = CacheDataset(data=train_dicts, transform=train_transforms, cache_rate=0.5)
-    val_ds = CacheDataset(data=val_dicts, transform=val_transforms, cache_rate=1.0)
+    # For large datasets, disable caching to avoid OOM (each 3D volume is ~56MB).
+    # For small runs (<100 cases), cache_rate=0.5 is fine.
+    cache_rate = 0.5 if len(train_dicts) <= 100 else 0.0
+    val_cache_rate = 1.0 if len(val_dicts) <= 50 else 0.0
+    train_ds = CacheDataset(data=train_dicts, transform=train_transforms, cache_rate=cache_rate)
+    val_ds = CacheDataset(data=val_dicts, transform=val_transforms, cache_rate=val_cache_rate)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
@@ -854,7 +421,7 @@ async def train(
           <div class="stat"><div class="value">{learning_rate}</div><div class="label">Learning Rate</div></div>
           <div class="stat"><div class="value">{trainable_params:,}</div><div class="label">Parameters</div></div>
         </div>
-        {_tumor_legend_html()}
+        {tumor_legend_html()}
         """
 
         charts_html = ""
@@ -873,7 +440,7 @@ async def train(
             </div>
             """
 
-            loss_chart = _make_line_chart(
+            loss_chart = make_line_chart(
                 data=training_log,
                 x_key="epoch",
                 y_keys=["train_loss"],
@@ -886,7 +453,7 @@ async def train(
             charts_html += f'<div class="chart-container">{loss_chart}</div>'
 
         if val_log:
-            dice_chart = _make_line_chart(
+            dice_chart = make_line_chart(
                 data=val_log,
                 x_key="epoch",
                 y_keys=["dice_wt", "dice_tc", "dice_et"],
@@ -904,17 +471,19 @@ async def train(
             )
             charts_html += f'<div class="chart-container">{dice_chart}</div>'
 
-        return _wrap_report(stats_html + charts_html)
+        return wrap_report(stats_html + charts_html)
 
     def _train_loop():
         best_dice = 0
         val_interval = max(1, epochs // 10)
 
+        log_interval = max(1, len(train_dicts) // 10)  # log ~10 times per epoch
+
         for epoch in range(1, epochs + 1):
             model.train()
             epoch_losses = []
 
-            for batch_data in train_loader:
+            for batch_idx, batch_data in enumerate(train_loader):
                 inputs = batch_data["image"].to(device)
                 labels = batch_data["label"].to(device)
 
@@ -924,6 +493,12 @@ async def train(
                 loss.backward()
                 optimizer.step()
                 epoch_losses.append(loss.item())
+
+                if (batch_idx + 1) % log_interval == 0:
+                    log.info(
+                        f"  step={batch_idx + 1}/{len(train_loader)} "
+                        f"epoch={epoch} loss={loss.item():.4f}"
+                    )
 
             lr_scheduler.step()
             avg_loss = np.mean(epoch_losses)
@@ -1024,12 +599,12 @@ async def train(
       <div class="stat"><div class="value">{epochs}</div><div class="label">Epochs</div></div>
       <div class="stat"><div class="value">{trainable_params:,}</div><div class="label">Parameters</div></div>
     </div>
-    {_tumor_legend_html()}
+    {tumor_legend_html()}
     """
 
     charts_html = ""
     if training_log:
-        loss_chart = _make_line_chart(
+        loss_chart = make_line_chart(
             data=training_log,
             x_key="epoch",
             y_keys=["train_loss"],
@@ -1053,7 +628,7 @@ async def train(
         </div>
         """
 
-        dice_chart = _make_line_chart(
+        dice_chart = make_line_chart(
             data=val_log,
             x_key="epoch",
             y_keys=["dice_wt", "dice_tc", "dice_et"],
@@ -1071,7 +646,7 @@ async def train(
         )
         charts_html += f'<div class="chart-container">{dice_chart}</div>'
 
-    await flyte.report.replace.aio(_wrap_report(stats_html + charts_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(stats_html + charts_html), do_flush=True)
 
     return await flyte.io.Dir.from_local(save_dir)
 
@@ -1141,7 +716,7 @@ async def evaluate(
     )
 
     log.info("Starting evaluation...")
-    await flyte.report.replace.aio(_wrap_report(
+    await flyte.report.replace.aio(wrap_report(
         "<h2>Evaluation</h2><p>Running sliding window inference on validation set...</p>"
     ), do_flush=True)
 
@@ -1225,7 +800,7 @@ async def evaluate(
     log.info(f"Dice — WT:{dice_wt:.3f} TC:{dice_tc:.3f} ET:{dice_et:.3f} Mean:{mean_dice:.3f}")
 
     # Build report
-    bar_chart = _make_bar_chart(
+    bar_chart = make_bar_chart(
         labels=["Whole Tumor", "Tumor Core", "Enhancing"],
         series={"Dice": [dice_wt, dice_tc, dice_et]},
         title="Dice Score by Tumor Region",
@@ -1242,7 +817,7 @@ async def evaluate(
       <div class="stat"><div class="value highlight">{dice_et:.3f}</div><div class="label">Dice ET</div></div>
       <div class="stat"><div class="value highlight">{mean_dice:.3f}</div><div class="label">Mean Dice</div></div>
     </div>
-    {_tumor_legend_html()}
+    {tumor_legend_html()}
     <div class="chart-container">{bar_chart}</div>
     <table>
       <tr><th>Region</th><th>Dice Score</th><th>Description</th></tr>
@@ -1257,7 +832,7 @@ async def evaluate(
     </div>
     """
 
-    await flyte.report.replace.aio(_wrap_report(eval_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(eval_html), do_flush=True)
 
     return json.dumps({
         "dice_wt": dice_wt,
@@ -1274,7 +849,7 @@ async def evaluate(
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
-async def inference(
+async def explore_results(
     finetuned_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
     max_cases: int = 4,
@@ -1300,7 +875,7 @@ async def inference(
     )
 
     log.info("Starting inference visualization...")
-    await flyte.report.replace.aio(_wrap_report(
+    await flyte.report.replace.aio(wrap_report(
         "<h2>Inference</h2><p>Generating multi-plane tumor overlays...</p>"
     ), do_flush=True)
 
@@ -1353,23 +928,28 @@ async def inference(
             )
             pred = (torch.sigmoid(output) > 0.5).squeeze(0).cpu().numpy()
 
-        # Convert multi-channel pred back to label map
-        # Channel 0=WT, 1=TC, 2=ET
-        # Reconstruct: ET=4 where ch2, NCR=1 where ch1 & ~ch2, ED=2 where ch0 & ~ch1
-        pred_seg = np.zeros(pred.shape[1:], dtype=int)
-        pred_seg[pred[0] > 0] = 2   # ED (whole tumor minus core)
-        pred_seg[pred[1] > 0] = 1   # NCR (core minus enhancing)
-        pred_seg[pred[2] > 0] = 4   # ET (enhancing)
-
-        # Ground truth: load original labels
+        # Ground truth and FLAIR at original resolution
         gt_seg = nib.load(label_path).get_fdata().astype(int)
-
-        # Load FLAIR for background
         flair = nib.load(os.path.join(case_dir, "t2f.nii.gz")).get_fdata()
+        orig_shape = flair.shape
 
-        # Render GT and pred overlays
-        gt_html = _three_plane_html(flair, gt_seg, label="Ground Truth")
-        pred_html = _three_plane_html(flair, pred_seg, label="Predicted")
+        # Convert multi-channel pred back to label map
+        # Channel 0=WT (all tumor), 1=TC (core=NCR+ET), 2=ET (enhancing)
+        # Use set differences to reconstruct exclusive regions:
+        wt = pred[0] > 0   # whole tumor
+        tc = pred[1] > 0   # tumor core
+        et = pred[2] > 0   # enhancing tumor
+        pred_seg = np.zeros(pred.shape[1:], dtype=int)
+        pred_seg[wt & ~tc] = 2    # ED: in whole tumor but NOT in core
+        pred_seg[tc & ~et] = 1    # NCR: in core but NOT enhancing
+        pred_seg[et] = 4          # ET: enhancing tumor
+
+        # Crop pred back to original volume size (DivisiblePadd may have padded)
+        pred_seg = pred_seg[:orig_shape[0], :orig_shape[1], :orig_shape[2]]
+
+        # Mask predictions to brain region only (no tumor outside the skull)
+        brain_mask = flair > 0
+        pred_seg[~brain_mask] = 0
 
         # Count voxels per region
         gt_counts = {
@@ -1383,6 +963,21 @@ async def inference(
             "ET": int((pred_seg == 4).sum()),
         }
 
+        # Interactive slice viewer with slider + play/pause (GT vs Predicted)
+        viewer_html = dual_slice_viewer_html(
+            flair, gt_seg, pred_seg,
+            axis="axial", n_frames=24,
+            label=f"Case: {case_id} — Axial Slice Viewer",
+        )
+
+        # Static 3-plane overview
+        static_html = f"""
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div>{three_plane_html(flair, gt_seg, label="Ground Truth")}</div>
+          <div>{three_plane_html(flair, pred_seg, label="Predicted")}</div>
+        </div>
+        """
+
         html_blocks.append(f"""
         <div class="card">
           <b>Case: {case_id}</b>
@@ -1390,10 +985,8 @@ async def inference(
             GT: NCR={gt_counts['NCR']:,} ED={gt_counts['ED']:,} ET={gt_counts['ET']:,} |
             Pred: NCR={pred_counts['NCR']:,} ED={pred_counts['ED']:,} ET={pred_counts['ET']:,}
           </span>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
-            <div>{gt_html}</div>
-            <div>{pred_html}</div>
-          </div>
+          {viewer_html}
+          {static_html}
         </div>
         """)
 
@@ -1417,16 +1010,17 @@ async def inference(
       {metric_stats}
       <div class="stat"><div class="value">{len(case_ids)}</div><div class="label">Cases Shown</div></div>
     </div>
-    {_tumor_legend_html()}
-    <p>Each case shows axial, coronal, and sagittal views centered on the tumor.
-    Left: ground truth annotations. Right: model predictions.
+    {tumor_legend_html()}
+    <p>Use the <b>slider</b> to scrub through axial slices or hit <b>Play</b> to animate.
+    Ground truth (left) and predictions (right) are synced.
+    Static 3-plane views (axial/coronal/sagittal) are shown below each viewer.
     <span style="color:#ffdc32;">Yellow=NCR</span>
     <span style="color:#32cd32;">Green=ED</span>
     <span style="color:#dc3232;">Red=ET</span></p>
     {"".join(html_blocks)}
     """
 
-    await flyte.report.replace.aio(_wrap_report(demo_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(demo_html), do_flush=True)
 
     del model
     if torch.cuda.is_available():
@@ -1463,7 +1057,7 @@ async def pipeline(
     log.info(f"Pipeline: SegResNet | dataset={dataset_repo}")
 
     def _pipeline_progress(step: int, label: str) -> str:
-        steps = ["Preparing Data", "Training SegResNet", "Evaluating", "Inference Demo"]
+        steps = ["Preparing Data", "Training SegResNet", "Evaluating", "Explore Results"]
         dots = ""
         for i, s in enumerate(steps):
             if i + 1 < step:
@@ -1482,7 +1076,7 @@ async def pipeline(
 
     # Step 1: Prepare data
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(1, "Downloading BraTS 2023 from HuggingFace...")),
+        wrap_report(_pipeline_progress(1, "Downloading BraTS 2023 from HuggingFace...")),
         do_flush=True,
     )
     data_dir = await prepare_data(
@@ -1493,7 +1087,7 @@ async def pipeline(
 
     # Step 2: Train
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(2, "Training SegResNet on 3D MRI volumes...")),
+        wrap_report(_pipeline_progress(2, "Training SegResNet on 3D MRI volumes...")),
         do_flush=True,
     )
     finetuned_dir = await train(
@@ -1506,7 +1100,7 @@ async def pipeline(
 
     # Step 3: Evaluate
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(3, "Computing Dice scores (WT, TC, ET)...")),
+        wrap_report(_pipeline_progress(3, "Computing Dice scores (WT, TC, ET)...")),
         do_flush=True,
     )
     metrics_json = await evaluate(finetuned_dir, data_dir)
@@ -1514,10 +1108,10 @@ async def pipeline(
 
     # Step 4: Inference
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(4, "Generating multi-plane tumor overlays...")),
+        wrap_report(_pipeline_progress(4, "Generating multi-plane tumor overlays...")),
         do_flush=True,
     )
-    inference_json = await inference(
+    inference_json = await explore_results(
         finetuned_dir, data_dir, demo_cases,
         metrics_json=metrics_json,
     )
@@ -1538,7 +1132,7 @@ async def pipeline(
       <div class="stat"><div class="value highlight">{dice_et:.3f}</div><div class="label">Dice ET</div></div>
       <div class="stat"><div class="value highlight">{mean_dice:.3f}</div><div class="label">Mean Dice</div></div>
     </div>
-    {_tumor_legend_html()}
+    {tumor_legend_html()}
     <div class="card">
       <b>Configuration:</b> {epochs} epochs | LR {learning_rate} | Patch {patch_size}³ |
       {max_cases} cases | Val fraction {val_fraction}
@@ -1550,7 +1144,7 @@ async def pipeline(
     </div>
     """
 
-    await flyte.report.replace.aio(_wrap_report(final_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(final_html), do_flush=True)
 
     log.info(f"Pipeline complete. Dice — WT:{dice_wt:.3f} TC:{dice_tc:.3f} ET:{dice_et:.3f}")
     return finetuned_dir, json.dumps({"metrics": metrics, "inference": json.loads(inference_json)})

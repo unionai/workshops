@@ -24,8 +24,6 @@ Usage:
 """
 
 import asyncio
-import base64
-import io
 import json
 import logging
 import os
@@ -37,421 +35,24 @@ import flyte
 import flyte.io
 import flyte.report
 from config import cpu_env, gpu_env
+from report_helpers import (
+    CLASS_COLORS,
+    CLASS_COLORS_HEX,
+    CLASS_NAMES,
+    NUM_CLASSES,
+    class_legend_html,
+    img_to_data_uri,
+    interactive_overlay_html,
+    make_bar_chart,
+    make_confusion_matrix_svg,
+    make_line_chart,
+    overlay_masks_by_class,
+    wrap_report,
+)
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
-
-
-# ------------------------------------------------------------------
-# Nucleus class definitions
-# ------------------------------------------------------------------
-
-# PanNuke categories (0-indexed in dataset) → Mask R-CNN classes (1-indexed, 0=background)
-CLASS_NAMES = ["background", "neoplastic", "inflammatory", "connective", "dead", "epithelial"]
-NUM_CLASSES = len(CLASS_NAMES)  # 6 (including background)
-
-# Fixed colors per class for consistent visualizations
-CLASS_COLORS = {
-    1: (239, 68, 68),    # neoplastic — red
-    2: (59, 130, 246),   # inflammatory — blue
-    3: (34, 197, 94),    # connective — green
-    4: (107, 114, 128),  # dead — gray
-    5: (168, 85, 247),   # epithelial — purple
-}
-
-CLASS_COLORS_HEX = {
-    1: "#ef4444",  # neoplastic
-    2: "#3b82f6",  # inflammatory
-    3: "#22c55e",  # connective
-    4: "#6b7280",  # dead
-    5: "#a855f7",  # epithelial
-}
-
-
-# ------------------------------------------------------------------
-# Report styling — medical imaging teal theme
-# ------------------------------------------------------------------
-
-REPORT_CSS = """
-<style>
-  .report { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; color: #1a1a2e; }
-  .report h2 { color: #0d6e6e; border-bottom: 2px solid #14b8a6; padding-bottom: 8px; margin-top: 24px; }
-  .report h3 { color: #0f766e; margin-top: 20px; }
-  .report .card { background: #f0fdfa; border: 1px solid #ccfbf1; border-radius: 8px; padding: 16px; margin: 12px 0; }
-  .report .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 12px 0; }
-  .report .stat { background: #fff; border: 1px solid #ccfbf1; border-radius: 6px; padding: 12px; text-align: center; }
-  .report .stat .value { font-size: 1.5em; font-weight: 700; color: #0d6e6e; }
-  .report .stat .label { font-size: 0.85em; color: #6c757d; margin-top: 4px; }
-  .report table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-  .report th { background: #0d6e6e; color: #fff; padding: 10px 14px; text-align: left; font-weight: 600; }
-  .report td { padding: 8px 14px; border-bottom: 1px solid #ccfbf1; }
-  .report tr:nth-child(even) { background: #f0fdfa; }
-  .report .highlight { color: #0d6e6e; font-weight: 700; }
-  .report .note { background: #f0fdfa; border-left: 4px solid #14b8a6; padding: 10px 14px; border-radius: 4px; margin: 12px 0; font-size: 0.9em; }
-  .report .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: 600; }
-  .report .badge-success { background: #d1fae5; color: #065f46; }
-  .report .badge-danger { background: #fee2e2; color: #991b1b; }
-  .report .badge-info { background: #ccfbf1; color: #0d6e6e; }
-  .report .chart-container { background: #fff; border: 1px solid #ccfbf1; border-radius: 8px; padding: 16px; margin: 16px 0; }
-  .report .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin: 16px 0; }
-  .report .image-card { background: #fff; border: 1px solid #ccfbf1; border-radius: 8px; overflow: hidden; }
-  .report .image-card img { width: 100%; aspect-ratio: 1; object-fit: cover; }
-  .report .image-card .caption { padding: 8px 12px; font-size: 0.85em; }
-  .report .img-pair { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
-  .report .img-pair > div { flex: 1; min-width: 280px; }
-  .report .img-pair img { width: 100%; border-radius: 6px; border: 1px solid #ccfbf1; }
-  .report .legend { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
-  .report .legend-item { display: flex; align-items: center; gap: 4px; font-size: 0.85em; }
-  .report .legend-swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
-</style>
-"""
-
-
-def _wrap_report(html: str) -> str:
-    return f'{REPORT_CSS}<div class="report">{html}</div>'
-
-
-def _class_legend_html() -> str:
-    """Render an HTML legend showing class colors."""
-    items = ""
-    for cls_id in range(1, NUM_CLASSES):
-        hex_color = CLASS_COLORS_HEX[cls_id]
-        name = CLASS_NAMES[cls_id]
-        items += (
-            f'<span class="legend-item">'
-            f'<span class="legend-swatch" style="background:{hex_color};"></span>'
-            f'{name}</span>'
-        )
-    return f'<div class="legend">{items}</div>'
-
-
-# ------------------------------------------------------------------
-# SVG chart helpers — lightweight charts without matplotlib
-# ------------------------------------------------------------------
-
-def _make_line_chart(
-    data: list[dict],
-    x_key: str,
-    y_keys: list[str],
-    title: str = "",
-    x_label: str = "",
-    y_label: str = "",
-    colors: list[str] | None = None,
-    width: int = 700,
-    height: int = 300,
-    y_max_cap: float | None = None,
-    x_range_override: tuple[float, float] | None = None,
-    y_display_names: dict[str, str] | None = None,
-) -> str:
-    """Generate an SVG line chart from a list of dicts."""
-    default_colors = ["#14b8a6", "#0d6e6e", "#06d6a0", "#f59e0b", "#6c757d"]
-    colors = colors or default_colors
-
-    ml, mr, mt, mb = 60, 20, 40, 50
-    cw = width - ml - mr
-    ch = height - mt - mb
-
-    x_vals = [d[x_key] for d in data] if data else []
-    if x_range_override:
-        x_min, x_max = x_range_override
-    elif x_vals:
-        x_min, x_max = min(x_vals), max(x_vals)
-    else:
-        x_min, x_max = 0, 1
-    x_range = x_max - x_min or 1
-
-    all_y = []
-    for key in y_keys:
-        all_y.extend(d[key] for d in data if key in d)
-    y_min = min(all_y) if all_y else 0
-    y_max = max(all_y) if all_y else 1
-    y_pad = (y_max - y_min) * 0.1 or 0.1
-    y_min_plot = max(0, y_min - y_pad)
-    y_max_plot = y_max + y_pad
-    if y_max_cap is not None:
-        y_max_plot = min(y_max_plot, y_max_cap)
-    y_range = y_max_plot - y_min_plot or 1
-
-    def sx(v):
-        return ml + (v - x_min) / x_range * cw
-
-    def sy(v):
-        return mt + ch - (v - y_min_plot) / y_range * ch
-
-    lines = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-        f'style="width:100%;max-width:{width}px;height:auto;">',
-        f'<rect width="{width}" height="{height}" fill="#fff" rx="6"/>',
-    ]
-
-    for i in range(6):
-        y_tick = y_min_plot + y_range * i / 5
-        py = sy(y_tick)
-        lines.append(
-            f'<line x1="{ml}" y1="{py:.1f}" x2="{ml + cw}" y2="{py:.1f}" '
-            f'stroke="#ccfbf1" stroke-width="1"/>'
-        )
-        lines.append(
-            f'<text x="{ml - 8}" y="{py + 4:.1f}" text-anchor="end" '
-            f'font-size="11" fill="#6c757d">{y_tick:.3f}</text>'
-        )
-
-    lines.append(
-        f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ch}" '
-        f'stroke="#99f6e4" stroke-width="1.5"/>'
-    )
-    lines.append(
-        f'<line x1="{ml}" y1="{mt + ch}" x2="{ml + cw}" y2="{mt + ch}" '
-        f'stroke="#99f6e4" stroke-width="1.5"/>'
-    )
-
-    if x_vals:
-        n_x_ticks = min(len(data), 10)
-        step = max(1, len(data) // n_x_ticks)
-        for i in range(0, len(data), step):
-            px = sx(x_vals[i])
-            lines.append(
-                f'<text x="{px:.1f}" y="{mt + ch + 20}" text-anchor="middle" '
-                f'font-size="11" fill="#6c757d">{x_vals[i]:.0f}</text>'
-            )
-    else:
-        for i in range(6):
-            x_tick = x_min + x_range * i / 5
-            px = sx(x_tick)
-            lines.append(
-                f'<text x="{px:.1f}" y="{mt + ch + 20}" text-anchor="middle" '
-                f'font-size="11" fill="#6c757d">{x_tick:.0f}</text>'
-            )
-
-    if not data:
-        lines.append(
-            f'<text x="{ml + cw / 2}" y="{mt + ch / 2}" text-anchor="middle" '
-            f'font-size="13" fill="#99f6e4" font-style="italic">Waiting for data...</text>'
-        )
-    for si, key in enumerate(y_keys):
-        color = colors[si % len(colors)]
-        points = [(sx(d[x_key]), sy(d[key])) for d in data if key in d]
-        if not points:
-            continue
-        if len(points) >= 2:
-            path_d = f"M {points[0][0]:.1f},{points[0][1]:.1f}"
-            for px, py in points[1:]:
-                path_d += f" L {px:.1f},{py:.1f}"
-            dash = ' stroke-dasharray="6,3"' if si % 2 == 1 else ""
-            lines.append(
-                f'<path d="{path_d}" fill="none" stroke="{color}" '
-                f'stroke-width="2" stroke-linejoin="round"{dash}/>'
-            )
-        if len(points) <= 30:
-            for px, py in points:
-                lines.append(
-                    f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3" fill="{color}"/>'
-                )
-
-    if title:
-        lines.append(
-            f'<text x="{width / 2}" y="22" text-anchor="middle" '
-            f'font-size="14" font-weight="600" fill="#0d6e6e">{title}</text>'
-        )
-
-    if x_label:
-        lines.append(
-            f'<text x="{ml + cw / 2}" y="{height - 6}" text-anchor="middle" '
-            f'font-size="12" fill="#6c757d">{x_label}</text>'
-        )
-    if y_label:
-        lines.append(
-            f'<text x="14" y="{mt + ch / 2}" text-anchor="middle" '
-            f'font-size="12" fill="#6c757d" '
-            f'transform="rotate(-90, 14, {mt + ch / 2})">{y_label}</text>'
-        )
-
-    names = y_display_names or {}
-    if len(y_keys) > 1:
-        lx = ml + 10
-        for si, key in enumerate(y_keys):
-            color = colors[si % len(colors)]
-            ly = mt + 14 + si * 18
-            lines.append(
-                f'<rect x="{lx}" y="{ly - 6}" width="12" height="12" '
-                f'rx="2" fill="{color}"/>'
-            )
-            label = names.get(key, key)
-            lines.append(
-                f'<text x="{lx + 16}" y="{ly + 4}" font-size="11" '
-                f'fill="#1a1a2e">{label}</text>'
-            )
-
-    lines.append("</svg>")
-    return "\n".join(lines)
-
-
-def _make_bar_chart(
-    labels: list[str],
-    series: dict[str, list[float]],
-    title: str = "",
-    colors: list[str] | None = None,
-    width: int = 700,
-    height: int = 300,
-    y_max_cap: float | None = None,
-) -> str:
-    """Generate an SVG grouped bar chart."""
-    if not labels:
-        return ""
-
-    default_colors = ["#14b8a6", "#0d6e6e", "#06d6a0", "#99f6e4"]
-    colors = colors or default_colors
-
-    ml, mr, mt, mb = 60, 20, 40, 60
-    cw = width - ml - mr
-    ch = height - mt - mb
-
-    all_vals = [v for vals in series.values() for v in vals]
-    y_max = max(all_vals) if all_vals else 1
-    y_max_plot = y_max * 1.15 or 1
-    if y_max_cap is not None:
-        y_max_plot = min(y_max_plot, y_max_cap) or y_max_cap
-
-    n_groups = len(labels)
-    n_series = len(series)
-    group_width = cw / n_groups
-    bar_width = group_width * 0.7 / max(n_series, 1)
-    gap = group_width * 0.15
-
-    def sy(v):
-        return mt + ch - (v / y_max_plot) * ch
-
-    lines_svg = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-        f'style="width:100%;max-width:{width}px;height:auto;">',
-        f'<rect width="{width}" height="{height}" fill="#fff" rx="6"/>',
-    ]
-
-    for i in range(6):
-        y_tick = y_max_plot * i / 5
-        py = sy(y_tick)
-        lines_svg.append(
-            f'<line x1="{ml}" y1="{py:.1f}" x2="{ml + cw}" y2="{py:.1f}" '
-            f'stroke="#ccfbf1" stroke-width="1"/>'
-        )
-        lines_svg.append(
-            f'<text x="{ml - 8}" y="{py + 4:.1f}" text-anchor="end" '
-            f'font-size="11" fill="#6c757d">{y_tick:.3f}</text>'
-        )
-
-    for gi, label in enumerate(labels):
-        gx = ml + gi * group_width + gap
-        for si, (name, vals) in enumerate(series.items()):
-            color = colors[si % len(colors)]
-            bx = gx + si * bar_width
-            val = vals[gi]
-            by = sy(val)
-            bh = mt + ch - by
-            lines_svg.append(
-                f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_width - 1:.1f}" '
-                f'height="{bh:.1f}" fill="{color}" rx="3"/>'
-            )
-            lines_svg.append(
-                f'<text x="{bx + bar_width / 2:.1f}" y="{by - 4:.1f}" '
-                f'text-anchor="middle" font-size="10" fill="#0d6e6e">'
-                f'{val:.3f}</text>'
-            )
-        display_label = label if len(label) <= 12 else label[:10] + ".."
-        lines_svg.append(
-            f'<text x="{gx + n_series * bar_width / 2:.1f}" y="{mt + ch + 18}" '
-            f'text-anchor="middle" font-size="10" fill="#6c757d">{display_label}</text>'
-        )
-
-    if title:
-        lines_svg.append(
-            f'<text x="{width / 2}" y="22" text-anchor="middle" '
-            f'font-size="14" font-weight="600" fill="#0d6e6e">{title}</text>'
-        )
-
-    lx = ml + cw - len(series) * 100
-    for si, name in enumerate(series):
-        color = colors[si % len(colors)]
-        lines_svg.append(
-            f'<rect x="{lx + si * 100}" y="{mt + ch + 35}" width="12" '
-            f'height="12" rx="2" fill="{color}"/>'
-        )
-        lines_svg.append(
-            f'<text x="{lx + si * 100 + 16}" y="{mt + ch + 46}" font-size="11" '
-            f'fill="#1a1a2e">{name}</text>'
-        )
-
-    lines_svg.append("</svg>")
-    return "\n".join(lines_svg)
-
-
-# ------------------------------------------------------------------
-# Visualization helpers — class-colored instance mask overlays
-# ------------------------------------------------------------------
-
-def _overlay_masks_by_class(image, masks, labels, alpha: float = 0.45):
-    """Overlay instance masks colored by nucleus class.
-
-    Each nucleus gets the fixed color for its class (neoplastic=red,
-    inflammatory=blue, etc.), with white contour outlines on boundaries.
-    """
-    import numpy as np
-    from PIL import Image as PILImage, ImageFilter
-
-    img_array = np.array(image).astype(np.float32)
-    n_masks = len(masks)
-
-    if n_masks == 0:
-        return image.copy()
-
-    overlay = img_array.copy()
-
-    for mask, label in zip(masks, labels):
-        if hasattr(mask, "numpy"):
-            mask_np = mask.numpy()
-        else:
-            mask_np = np.array(mask)
-        mask_bool = mask_np > 0.5
-
-        # Get class color (default to white if unknown)
-        label_int = int(label) if hasattr(label, "item") else int(label)
-        color = CLASS_COLORS.get(label_int, (200, 200, 200))
-
-        for c in range(3):
-            overlay[:, :, c] = np.where(
-                mask_bool,
-                overlay[:, :, c] * (1 - alpha) + color[c] * alpha,
-                overlay[:, :, c],
-            )
-
-    # Draw white contours on mask boundaries
-    for mask in masks:
-        if hasattr(mask, "numpy"):
-            mask_np = mask.numpy()
-        else:
-            mask_np = np.array(mask)
-        mask_bool = mask_np > 0.5
-
-        mask_pil = PILImage.fromarray((mask_bool * 255).astype(np.uint8))
-        dilated = mask_pil.filter(ImageFilter.MaxFilter(3))
-        boundary = np.array(dilated) > np.array(mask_pil)
-        overlay[boundary] = [255, 255, 255]
-
-    result = np.clip(overlay, 0, 255).astype(np.uint8)
-    return PILImage.fromarray(result)
-
-
-def _img_to_data_uri(img, max_dim: int = 600) -> str:
-    """PIL image to base64 PNG data URI, downscaled for report embedding."""
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    w, h = img.size
-    if max(w, h) > max_dim:
-        scale = max_dim / max(w, h)
-        img = img.resize((int(w * scale), int(h * scale)))
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 # ------------------------------------------------------------------
@@ -583,7 +184,7 @@ async def prepare_data(
             m = np.array(Image.open(os.path.join(mask_dir, mf)).convert("L"))
             masks.append(m)
 
-        overlay = _overlay_masks_by_class(img, masks, labels, alpha=0.45)
+        overlay = overlay_masks_by_class(img, masks, labels, alpha=0.45)
 
         # Count per class for this image
         class_counts = Counter(labels)
@@ -595,7 +196,7 @@ async def prepare_data(
 
         sample_html += f'''
         <div class="image-card">
-          <img src="{_img_to_data_uri(overlay, max_dim=400)}" alt="nuclei overlay" />
+          <img src="{img_to_data_uri(overlay, max_dim=400)}" alt="nuclei overlay" />
           <div class="caption">
             <span class="badge badge-info">{len(labels)} nuclei</span>
             <div style="font-size:0.75em;margin-top:4px;">{class_badges}</div>
@@ -607,7 +208,7 @@ async def prepare_data(
     dist_labels = [CLASS_NAMES[i] for i in range(1, NUM_CLASSES)]
     dist_values = [float(all_class_counts.get(CLASS_NAMES[i], 0)) for i in range(1, NUM_CLASSES)]
 
-    dist_chart = _make_bar_chart(
+    dist_chart = make_bar_chart(
         labels=dist_labels,
         series={"Count": dist_values},
         title="Nucleus Class Distribution (All Data)",
@@ -624,7 +225,7 @@ async def prepare_data(
       <div class="stat"><div class="value">{meta['avg_nuclei_per_image']:.0f}</div><div class="label">Avg Nuclei/Image</div></div>
       <div class="stat"><div class="value">{NUM_CLASSES - 1}</div><div class="label">Nucleus Classes</div></div>
     </div>
-    {_class_legend_html()}
+    {class_legend_html()}
     <h3>Sample Images with Class-Colored Masks</h3>
     {sample_html}
     <div class="chart-container">{dist_chart}</div>
@@ -638,7 +239,7 @@ async def prepare_data(
     </div>
     """
 
-    await flyte.report.replace.aio(_wrap_report(report_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(report_html), do_flush=True)
 
     return await flyte.io.Dir.from_local(out_dir)
 
@@ -775,7 +376,7 @@ async def train(
     from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 
     log.info("Loading Mask R-CNN ResNet-50 FPN v2...")
-    await flyte.report.replace.aio(_wrap_report(
+    await flyte.report.replace.aio(wrap_report(
         "<h2>Loading Model...</h2>"
         "<p>Mask R-CNN ResNet-50 FPN v2 (COCO pretrained)</p>"
         "<p>Replacing heads for 5-class nuclei segmentation...</p>"
@@ -801,9 +402,6 @@ async def train(
 
     log.info(f"Train: {len(train_ds)} images | Val: {len(val_ds)} images")
 
-    # Load pretrained Mask R-CNN (keep default anchors — they're coupled to
-    # the pretrained RPN weights). Lower NMS threshold for dense/touching
-    # nuclei and allow more detections per image.
     model = maskrcnn_resnet50_fpn_v2(weights=MaskRCNN_ResNet50_FPN_V2_Weights.DEFAULT)
 
     in_features = model.roi_heads.box_predictor.cls_score.in_features
@@ -842,7 +440,7 @@ async def train(
     loop = asyncio.get_running_loop()
     total_steps = epochs * len(train_loader)
 
-    class_badges = _class_legend_html()
+    legend = class_legend_html()
 
     def _build_training_report() -> str:
         stats_html = f"""
@@ -856,7 +454,7 @@ async def train(
           <div class="stat"><div class="value">{batch_size}</div><div class="label">Batch Size</div></div>
           <div class="stat"><div class="value">{NUM_CLASSES - 1}</div><div class="label">Nucleus Classes</div></div>
         </div>
-        {class_badges}
+        {legend}
         """
 
         charts_html = ""
@@ -875,51 +473,32 @@ async def train(
             </div>
             """
 
-            loss_chart = _make_line_chart(
-                data=training_log,
-                x_key="step",
-                y_keys=["total_loss"],
-                title="Total Training Loss",
-                x_label="Step",
-                y_label="Loss",
-                colors=["#14b8a6"],
-                x_range_override=(0, total_steps),
+            loss_chart = make_line_chart(
+                data=training_log, x_key="step", y_keys=["total_loss"],
+                title="Total Training Loss", x_label="Step", y_label="Loss",
+                colors=["#14b8a6"], x_range_override=(0, total_steps),
             )
             charts_html += f'<div class="chart-container">{loss_chart}</div>'
 
             component_keys = ["loss_mask", "loss_classifier", "loss_box_reg"]
-            component_names = {
-                "loss_mask": "Mask Loss",
-                "loss_classifier": "Classifier",
-                "loss_box_reg": "Box Reg",
-            }
+            component_names = {"loss_mask": "Mask Loss", "loss_classifier": "Classifier", "loss_box_reg": "Box Reg"}
             if all(k in training_log[-1] for k in component_keys):
-                comp_chart = _make_line_chart(
-                    data=training_log,
-                    x_key="step",
-                    y_keys=component_keys,
-                    title="Loss Components",
-                    x_label="Step",
-                    y_label="Loss",
+                comp_chart = make_line_chart(
+                    data=training_log, x_key="step", y_keys=component_keys,
+                    title="Loss Components", x_label="Step", y_label="Loss",
                     colors=["#0d6e6e", "#14b8a6", "#06d6a0"],
-                    x_range_override=(0, total_steps),
-                    y_display_names=component_names,
+                    x_range_override=(0, total_steps), y_display_names=component_names,
                 )
                 charts_html += f'<div class="chart-container">{comp_chart}</div>'
 
-            lr_chart = _make_line_chart(
-                data=training_log,
-                x_key="step",
-                y_keys=["lr"],
-                title="Learning Rate Schedule",
-                x_label="Step",
-                y_label="LR",
-                colors=["#0d6e6e"],
-                x_range_override=(0, total_steps),
+            lr_chart = make_line_chart(
+                data=training_log, x_key="step", y_keys=["lr"],
+                title="Learning Rate Schedule", x_label="Step", y_label="LR",
+                colors=["#0d6e6e"], x_range_override=(0, total_steps),
             )
             charts_html += f'<div class="chart-container">{lr_chart}</div>'
 
-        return _wrap_report(stats_html + charts_html)
+        return wrap_report(stats_html + charts_html)
 
     def _train_loop():
         global_step = 0
@@ -958,15 +537,10 @@ async def train(
                         entry[k] = round(v.item(), 4)
 
                     training_log.append(entry)
-                    log.info(
-                        f"step={global_step}/{total_steps} "
-                        f"epoch={epoch} loss={loss_val:.4f}"
-                    )
+                    log.info(f"step={global_step}/{total_steps} epoch={epoch} loss={loss_val:.4f}")
 
                     asyncio.run_coroutine_threadsafe(
-                        flyte.report.replace.aio(
-                            _build_training_report(), do_flush=True,
-                        ),
+                        flyte.report.replace.aio(_build_training_report(), do_flush=True),
                         loop,
                     )
 
@@ -1005,7 +579,7 @@ async def train(
       <div class="stat"><div class="value">{batch_size}</div><div class="label">Batch Size</div></div>
       <div class="stat"><div class="value">{trainable_params:,}</div><div class="label">Trainable Params</div></div>
     </div>
-    {class_badges}
+    {legend}
     """
 
     charts_html = ""
@@ -1024,56 +598,38 @@ async def train(
         </div>
         """
 
-        loss_chart = _make_line_chart(
-            data=training_log,
-            x_key="step",
-            y_keys=["total_loss"],
-            title="Total Training Loss",
-            x_label="Step",
-            y_label="Loss",
-            colors=["#14b8a6"],
-            x_range_override=(0, total_steps),
+        loss_chart = make_line_chart(
+            data=training_log, x_key="step", y_keys=["total_loss"],
+            title="Total Training Loss", x_label="Step", y_label="Loss",
+            colors=["#14b8a6"], x_range_override=(0, total_steps),
         )
         charts_html += f'<div class="chart-container">{loss_chart}</div>'
 
         component_keys = ["loss_mask", "loss_classifier", "loss_box_reg"]
         if all(k in training_log[-1] for k in component_keys):
-            comp_chart = _make_line_chart(
-                data=training_log,
-                x_key="step",
-                y_keys=component_keys,
-                title="Loss Components",
-                x_label="Step",
-                y_label="Loss",
+            comp_chart = make_line_chart(
+                data=training_log, x_key="step", y_keys=component_keys,
+                title="Loss Components", x_label="Step", y_label="Loss",
                 colors=["#0d6e6e", "#14b8a6", "#06d6a0"],
                 x_range_override=(0, total_steps),
-                y_display_names={
-                    "loss_mask": "Mask Loss",
-                    "loss_classifier": "Classifier",
-                    "loss_box_reg": "Box Reg",
-                },
+                y_display_names={"loss_mask": "Mask Loss", "loss_classifier": "Classifier", "loss_box_reg": "Box Reg"},
             )
             charts_html += f'<div class="chart-container">{comp_chart}</div>'
 
-        lr_chart = _make_line_chart(
-            data=training_log,
-            x_key="step",
-            y_keys=["lr"],
-            title="Learning Rate Schedule",
-            x_label="Step",
-            y_label="LR",
-            colors=["#0d6e6e"],
-            x_range_override=(0, total_steps),
+        lr_chart = make_line_chart(
+            data=training_log, x_key="step", y_keys=["lr"],
+            title="Learning Rate Schedule", x_label="Step", y_label="LR",
+            colors=["#0d6e6e"], x_range_override=(0, total_steps),
         )
         charts_html += f'<div class="chart-container">{lr_chart}</div>'
 
-    await flyte.report.replace.aio(_wrap_report(stats_html + charts_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(stats_html + charts_html), do_flush=True)
 
     return await flyte.io.Dir.from_local(save_dir)
 
 
 # ------------------------------------------------------------------
-# Inference helper — load model and run on PIL images
+# Inference helper — load model
 # ------------------------------------------------------------------
 
 def _load_mask_rcnn(model_path: str, device):
@@ -1118,7 +674,7 @@ async def evaluate(
     """Evaluate the fine-tuned Mask R-CNN on the validation set.
 
     Computes COCO mAP for both bounding boxes and instance masks,
-    plus per-class detection accuracy.
+    plus per-class detection accuracy and confusion matrix.
     """
     import numpy as np
     import torch
@@ -1128,7 +684,7 @@ async def evaluate(
     from torchvision import transforms as T
 
     log.info("Starting evaluation...")
-    await flyte.report.replace.aio(_wrap_report(
+    await flyte.report.replace.aio(wrap_report(
         "<h2>Evaluation</h2><p>Loading model and scoring validation images...</p>"
     ), do_flush=True)
 
@@ -1215,32 +771,24 @@ async def evaluate(
 
     # Build report
     metric_keys = ["map", "map_50", "map_75", "mar_10"]
-    metric_display = {
-        "map": "mAP", "map_50": "mAP@50", "map_75": "mAP@75", "mar_10": "mAR@10",
-    }
+    metric_display = {"map": "mAP", "map_50": "mAP@50", "map_75": "mAP@75", "mar_10": "mAR@10"}
 
-    bar_chart = _make_bar_chart(
+    bar_chart = make_bar_chart(
         labels=[metric_display.get(k, k) for k in metric_keys],
         series={
             "BBox": [bbox_metrics.get(k, 0) for k in metric_keys],
             "Segm": [segm_metrics.get(k, 0) for k in metric_keys],
         },
         title="COCO Evaluation Metrics (BBox vs Segm)",
-        colors=["#14b8a6", "#0d6e6e"],
-        y_max_cap=1.0,
+        colors=["#14b8a6", "#0d6e6e"], y_max_cap=1.0,
     )
 
     table_rows = ""
     for k in metric_keys:
         b_val = bbox_metrics.get(k, 0)
         s_val = segm_metrics.get(k, 0)
-        table_rows += (
-            f"<tr><td><b>{metric_display.get(k, k)}</b></td>"
-            f"<td>{b_val:.3f}</td>"
-            f"<td>{s_val:.3f}</td></tr>"
-        )
+        table_rows += f"<tr><td><b>{metric_display.get(k, k)}</b></td><td>{b_val:.3f}</td><td>{s_val:.3f}</td></tr>"
 
-    # Per-class detection counts
     class_table_rows = ""
     for cls_id in range(1, NUM_CLASSES):
         cls_name = CLASS_NAMES[cls_id]
@@ -1248,11 +796,46 @@ async def evaluate(
         pred_count = pred_class_counts.get(cls_id, 0)
         hex_color = CLASS_COLORS_HEX[cls_id]
         class_table_rows += (
-            f'<tr><td><span style="color:{hex_color};font-weight:600;">'
-            f'{cls_name}</span></td>'
-            f'<td>{gt_count:,}</td>'
-            f'<td>{pred_count:,}</td></tr>'
+            f'<tr><td><span style="color:{hex_color};font-weight:600;">{cls_name}</span></td>'
+            f'<td>{gt_count:,}</td><td>{pred_count:,}</td></tr>'
         )
+
+    # Confusion matrix — IoU-based matching
+    n_cls = NUM_CLASSES - 1
+    conf_matrix = [[0] * n_cls for _ in range(n_cls)]
+
+    for target, pred in zip(all_targets, all_preds):
+        gt_boxes = target["boxes"]
+        gt_labels = target["labels"]
+        pred_boxes = pred["boxes"]
+        pred_labels = pred["labels"]
+
+        if len(gt_boxes) == 0 or len(pred_boxes) == 0:
+            continue
+
+        from torchvision.ops import box_iou
+        iou_matrix = box_iou(gt_boxes, pred_boxes)
+
+        matched_preds = set()
+        for gi in range(len(gt_boxes)):
+            best_iou = 0.3
+            best_pi = -1
+            for pi in range(len(pred_boxes)):
+                if pi in matched_preds:
+                    continue
+                if iou_matrix[gi, pi] > best_iou:
+                    best_iou = iou_matrix[gi, pi].item()
+                    best_pi = pi
+            if best_pi >= 0:
+                matched_preds.add(best_pi)
+                gt_cls = int(gt_labels[gi]) - 1
+                pred_cls = int(pred_labels[best_pi]) - 1
+                if 0 <= gt_cls < n_cls and 0 <= pred_cls < n_cls:
+                    conf_matrix[gt_cls][pred_cls] += 1
+
+    conf_labels = CLASS_NAMES[1:]
+    conf_colors = [CLASS_COLORS_HEX[i] for i in range(1, NUM_CLASSES)]
+    confusion_svg = make_confusion_matrix_svg(conf_matrix, conf_labels, conf_colors)
 
     eval_html = f"""
     <h2>Evaluation Results</h2>
@@ -1262,7 +845,7 @@ async def evaluate(
       <div class="stat"><div class="value highlight">{segm_metrics.get('map', 0):.3f}</div><div class="label">Segm mAP</div></div>
       <div class="stat"><div class="value">{score_threshold}</div><div class="label">Score Threshold</div></div>
     </div>
-    {_class_legend_html()}
+    {class_legend_html()}
     <div class="chart-container">{bar_chart}</div>
     <table>
       <tr><th>Metric</th><th>BBox</th><th>Segm</th></tr>
@@ -1273,6 +856,9 @@ async def evaluate(
       <tr><th>Class</th><th>Ground Truth</th><th>Predicted</th></tr>
       {class_table_rows}
     </table>
+    <h3>Nucleus Type Confusion Matrix</h3>
+    <p style="font-size:0.9em;color:#6c757d;">Matched GT to predictions using IoU &gt; 0.3. Shows which nucleus types get confused for each other.</p>
+    <div class="chart-container">{confusion_svg}</div>
     <div class="note">
       <b>BBox mAP</b> evaluates bounding box detection quality.
       <b>Segm mAP</b> evaluates instance mask quality — how well predicted
@@ -1280,34 +866,33 @@ async def evaluate(
     </div>
     """
 
-    await flyte.report.replace.aio(_wrap_report(eval_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(eval_html), do_flush=True)
 
-    metrics_out = {
+    return json.dumps({
         "bbox": {k: v for k, v in bbox_metrics.items() if isinstance(v, (int, float))},
         "segm": {k: v for k, v in segm_metrics.items() if isinstance(v, (int, float))},
         "num_val_images": len(val_ds),
         "gt_class_counts": dict(gt_class_counts),
         "pred_class_counts": dict(pred_class_counts),
-    }
-
-    return json.dumps(metrics_out)
+    })
 
 
 # ------------------------------------------------------------------
-# Task 4: Inference — class-colored instance mask overlays
+# Task 4: Explore results — interactive class-colored mask overlays
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
-async def inference(
+async def explore_results(
     finetuned_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
     score_threshold: float = 0.5,
     max_images: int = 8,
     metrics_json: str = "{}",
 ) -> str:
-    """Run predictions on validation images and render side-by-side mask overlays.
+    """Run predictions on validation images and render interactive overlays.
 
-    Ground truth and predicted masks are both colored by nucleus class type.
+    Ground truth shown as static class-colored overlay. Predictions shown with
+    per-class toggle checkboxes and confidence heatmap toggle.
     """
     import torch
     from collections import Counter
@@ -1315,8 +900,8 @@ async def inference(
     from torchvision import transforms as T
 
     log.info("Starting inference visualization...")
-    await flyte.report.replace.aio(_wrap_report(
-        "<h2>Inference</h2><p>Generating class-colored mask overlays...</p>"
+    await flyte.report.replace.aio(wrap_report(
+        "<h2>Explore Results</h2><p>Generating interactive mask overlays...</p>"
     ), do_flush=True)
 
     data_path = await data_dir.download()
@@ -1363,9 +948,16 @@ async def inference(
         n_pred = len(pred_masks)
         total_pred_nuclei += n_pred
 
-        # Create class-colored overlay visualizations
-        gt_overlay = _overlay_masks_by_class(img, gt_masks, gt_labels, alpha=0.45)
-        pred_overlay = _overlay_masks_by_class(img, pred_masks, pred_labels, alpha=0.45)
+        # GT overlay (static)
+        gt_overlay = overlay_masks_by_class(img, gt_masks, gt_labels, alpha=0.45)
+        gt_overlay_uri = img_to_data_uri(gt_overlay)
+
+        # Interactive predicted overlay
+        viewer_id = f"img_{idx}"
+        interactive_pred = interactive_overlay_html(
+            img, pred_masks, pred_labels, pred_scores,
+            gt_overlay_uri, viewer_id,
+        )
 
         # Per-class count comparison
         gt_counts = Counter(gt_labels.tolist())
@@ -1377,14 +969,10 @@ async def inference(
             p = pred_counts.get(cls_id, 0)
             if g > 0 or p > 0:
                 hex_c = CLASS_COLORS_HEX[cls_id]
-                class_detail += (
-                    f'<span style="color:{hex_c};font-size:0.8em;">'
-                    f'{CLASS_NAMES[cls_id]}:{g}/{p} </span>'
-                )
+                class_detail += f'<span style="color:{hex_c};font-size:0.8em;">{CLASS_NAMES[cls_id]}:{g}/{p} </span>'
 
         count_diff = abs(n_gt - n_pred)
         count_badge_cls = "badge-success" if count_diff <= 3 else "badge-danger"
-
         avg_score = float(pred_scores.mean()) if len(pred_scores) > 0 else 0
 
         html_blocks.append(f"""
@@ -1399,12 +987,12 @@ async def inference(
             <div>
               <p style="text-align:center;font-weight:600;color:#0d6e6e;">
                 Ground Truth — {n_gt} nuclei</p>
-              <img src="{_img_to_data_uri(gt_overlay)}" />
+              <img src="{gt_overlay_uri}" style="width:100%;border-radius:6px;" />
             </div>
             <div>
               <p style="text-align:center;font-weight:600;color:#14b8a6;">
-                Predicted — {n_pred} nuclei</p>
-              <img src="{_img_to_data_uri(pred_overlay)}" />
+                Predicted — {n_pred} nuclei (toggle classes below)</p>
+              {interactive_pred}
             </div>
           </div>
         </div>""")
@@ -1429,13 +1017,14 @@ async def inference(
       <div class="stat"><div class="value">{total_pred_nuclei}</div><div class="label">Pred Nuclei</div></div>
       <div class="stat"><div class="value">{score_threshold}</div><div class="label">Score Threshold</div></div>
     </div>
-    {_class_legend_html()}
-    <p>Each nucleus is colored by its class. White outlines mark instance boundaries.
-    Left: ground truth. Right: model predictions. Count format: predicted/ground truth.</p>
+    {class_legend_html()}
+    <p>Left: ground truth. Right: predicted with <b>per-class toggles</b> — use the
+    checkboxes to show/hide each nucleus type. Toggle <b>Confidence Heatmap</b>
+    to see prediction certainty (brighter = more confident). Count format: GT/predicted.</p>
     {"".join(html_blocks)}
     """
 
-    await flyte.report.replace.aio(_wrap_report(demo_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(demo_html), do_flush=True)
 
     del model
     if torch.cuda.is_available():
@@ -1476,7 +1065,7 @@ async def pipeline(
     log.info(f"Pipeline: Mask R-CNN | dataset={dataset_name}")
 
     def _pipeline_progress(step: int, label: str) -> str:
-        steps = ["Preparing Data", "Training Mask R-CNN", "Evaluating", "Inference Demo"]
+        steps = ["Preparing Data", "Training Mask R-CNN", "Evaluating", "Explore Results"]
         dots = ""
         for i, s in enumerate(steps):
             if i + 1 < step:
@@ -1495,7 +1084,7 @@ async def pipeline(
 
     # Step 1: Prepare data
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(1, "Downloading PanNuke from HuggingFace...")),
+        wrap_report(_pipeline_progress(1, "Downloading PanNuke from HuggingFace...")),
         do_flush=True,
     )
     data_dir = await prepare_data(
@@ -1506,7 +1095,7 @@ async def pipeline(
 
     # Step 2: Train
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(2, "Fine-tuning Mask R-CNN on 5 nucleus classes...")),
+        wrap_report(_pipeline_progress(2, "Fine-tuning Mask R-CNN on 5 nucleus classes...")),
         do_flush=True,
     )
     finetuned_dir = await train(
@@ -1518,18 +1107,18 @@ async def pipeline(
 
     # Step 3: Evaluate
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(3, "Computing COCO mAP (bbox + segm)...")),
+        wrap_report(_pipeline_progress(3, "Computing COCO mAP (bbox + segm)...")),
         do_flush=True,
     )
     metrics_json = await evaluate(finetuned_dir, data_dir, score_threshold)
     metrics = json.loads(metrics_json)
 
-    # Step 4: Inference
+    # Step 4: Explore results
     await flyte.report.replace.aio(
-        _wrap_report(_pipeline_progress(4, "Generating class-colored mask overlays...")),
+        wrap_report(_pipeline_progress(4, "Generating interactive mask overlays...")),
         do_flush=True,
     )
-    inference_json = await inference(
+    inference_json = await explore_results(
         finetuned_dir, data_dir, score_threshold, sample_images,
         metrics_json=metrics_json,
     )
@@ -1547,19 +1136,19 @@ async def pipeline(
       <div class="stat"><div class="value highlight">{bbox_map:.3f}</div><div class="label">BBox mAP</div></div>
       <div class="stat"><div class="value highlight">{segm_map:.3f}</div><div class="label">Segm mAP</div></div>
     </div>
-    {_class_legend_html()}
+    {class_legend_html()}
     <div class="card">
       <b>Configuration:</b> {epochs} epochs | LR {learning_rate} | Batch size {batch_size} |
       Train: {train_folds} | Val: {val_fold} | Score threshold {score_threshold}
     </div>
     <div class="note">
-      Pipeline ran: prepare_data &#8594; train &#8594; evaluate &#8594; inference.
+      Pipeline ran: prepare_data &#8594; train &#8594; evaluate &#8594; explore_results.
       Check individual task reports for detailed loss curves, metrics charts,
-      and side-by-side class-colored mask visualizations.
+      and interactive class-colored mask visualizations.
     </div>
     """
 
-    await flyte.report.replace.aio(_wrap_report(final_html), do_flush=True)
+    await flyte.report.replace.aio(wrap_report(final_html), do_flush=True)
 
     log.info(f"Pipeline complete. BBox mAP: {bbox_map:.3f}, Segm mAP: {segm_map:.3f}")
     return finetuned_dir, json.dumps({"metrics": metrics, "inference": inference_results})
