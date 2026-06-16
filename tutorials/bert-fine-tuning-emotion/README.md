@@ -2,6 +2,8 @@
 
 Fine-tune ModernBERT to classify emotions in text, then explore *how* the model makes decisions with attention heatmaps and gradient-based token attribution.
 
+<a target="_blank" href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/bert-fine-tuning-emotion/bert-emotion-tutorial.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+
 The dataset is [dair-ai/emotion](https://huggingface.co/datasets/dair-ai/emotion) — ~20k English Twitter messages labeled with one of 6 emotions:
 
 | Label | Emotion | Example |
