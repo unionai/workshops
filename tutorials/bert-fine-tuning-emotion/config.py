@@ -13,7 +13,7 @@ gpu_env = flyte.TaskEnvironment(
     image=base_image,
     resources=flyte.Resources(cpu=4, memory="16Gi", gpu="T4:1"),
     secrets=[
-        flyte.Secret(key="HF_TOKEN", as_env_var="HF_TOKEN"),
+        # flyte.Secret(key="HF_TOKEN", as_env_var="HF_TOKEN"),
     ],
 )
 
