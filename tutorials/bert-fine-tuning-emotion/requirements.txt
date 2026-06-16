@@ -1,0 +1,13 @@
+flyte[tui]>=2.0
+torch>=2.1.0
+transformers>=4.45.0
+datasets>=3.0.0
+accelerate>=0.34.0
+scikit-learn
+numpy
+python-dotenv
+fastapi
+uvicorn
+httpx
+gradio>=5.0.0
+pydantic
