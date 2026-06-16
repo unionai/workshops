@@ -152,10 +152,23 @@ def launch_app(server_url: str):
                 '<div style="line-height:2.4;font-size:1.1em;">'
             )
             for tok, w in zip(tokens, weights):
-                opacity = 0.08 + w * 0.85
-                text_color = "#fff" if w > 0.6 else "#1a1a2e"
+                # Gradient: light blue (#dbe9f7) → mid blue (#5a9bd5) → deep navy (#0f3460)
+                if w < 0.5:
+                    # Low attention: light background, dark text
+                    t = w / 0.5
+                    r = int(219 + (90 - 219) * t)
+                    g = int(233 + (155 - 233) * t)
+                    b = int(247 + (213 - 247) * t)
+                    text_color = "#1a1a2e"
+                else:
+                    # High attention: dark background, white text
+                    t = (w - 0.5) / 0.5
+                    r = int(90 + (15 - 90) * t)
+                    g = int(155 + (52 - 155) * t)
+                    b = int(213 + (96 - 213) * t)
+                    text_color = "#ffffff"
                 attention_html += (
-                    f'<span style="background:rgba(15,52,96,{opacity:.2f});'
+                    f'<span style="background:rgb({r},{g},{b});'
                     f'color:{text_color};padding:4px 6px;border-radius:4px;'
                     f'margin:2px;display:inline-block;">{tok}</span>'
                 )

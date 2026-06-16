@@ -207,6 +207,19 @@ importance(token) = ||gradient(prediction, embedding(token)) * embedding(token)|
 
 Green tokens **support** the prediction, red tokens **oppose** it. This is complementary to attention — attention shows where the model looks, while attribution shows what actually drives the decision.
 
+### Negation and model blind spots
+
+BERT-style models struggle with negation. Try "this does not make me angry" — the model predicts **anger** with 99.8% confidence because it latches onto the word "angry" without properly handling "not" as a negation. The attention heatmap reveals this: "angry" gets high attention (0.44) and "not" gets some (0.41), but the model doesn't use the negation to flip the meaning.
+
+This happens because the training data (Twitter messages) consists mostly of direct emotional statements. Negated emotions like "I'm not sad anymore" or "this doesn't scare me" are rare in the dataset, so the model never learns to handle them.
+
+Try these in the Gradio app to explore the model's limits:
+- "this does not make me angry" → predicts anger (wrong)
+- "I used to be sad but now I'm fine" → may still predict sadness
+- "I'm not surprised at all" → may still predict surprise
+
+This is exactly why the attention visualization is valuable — you can *see* where the model's reasoning breaks down.
+
 ### Misclassification spotlight
 
 The most confident wrong predictions are the most informative errors. A model that says "95% anger" on a text that's actually "fear" reveals something about the model's confusion boundary between those emotions. These often involve ambiguous text where emotions overlap (e.g., "i can't believe they did that" could be anger or surprise).
