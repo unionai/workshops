@@ -207,18 +207,18 @@ importance(token) = ||gradient(prediction, embedding(token)) * embedding(token)|
 
 Green tokens **support** the prediction, red tokens **oppose** it. This is complementary to attention — attention shows where the model looks, while attribution shows what actually drives the decision.
 
-### Negation and model blind spots
+### Negation (a dataset gap)
 
-BERT-style models struggle with negation. Try "this does not make me angry" — the model predicts **anger** with 99.8% confidence because it latches onto the word "angry" without properly handling "not" as a negation. The attention heatmap reveals this: "angry" gets high attention (0.44) and "not" gets some (0.41), but the model doesn't use the negation to flip the meaning.
+Try "this does not make me angry". The model predicts **anger** with 99.8% confidence because it latches onto the word "angry" without properly handling "not" as a negation. The attention heatmap reveals this: "angry" gets high attention (0.44) and "not" gets some (0.41), but the model doesn't use the negation to flip the meaning.
 
-This happens because the training data (Twitter messages) consists mostly of direct emotional statements. Negated emotions like "I'm not sad anymore" or "this doesn't scare me" are rare in the dataset, so the model never learns to handle them.
+This isn't a limitation of the model architecture. The training data (Twitter messages) consists mostly of direct emotional statements. Negated emotions like "I'm not sad anymore" or "this doesn't scare me" are rare in the dataset, so the model simply pattern-matches on emotional keywords. A dataset with more negated examples would teach the model to handle these correctly.
 
-Try these in the Gradio app to explore the model's limits:
+Try these in the Gradio app to explore the effect:
 - "this does not make me angry" → predicts anger (wrong)
 - "I used to be sad but now I'm fine" → may still predict sadness
 - "I'm not surprised at all" → may still predict surprise
 
-This is exactly why the attention visualization is valuable — you can *see* where the model's reasoning breaks down.
+This is exactly why the attention visualization is valuable. You can *see* what the model latches onto and understand where the training data has gaps.
 
 ### Misclassification spotlight
 
