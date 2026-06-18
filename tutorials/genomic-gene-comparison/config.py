@@ -14,4 +14,5 @@ cpu_env = flyte.TaskEnvironment(
     name="genomic-gene-compare-cpu",
     image=base_image,
     resources=flyte.Resources(cpu=2, memory="8Gi"),
+    depends_on=[gpu_env],
 )
