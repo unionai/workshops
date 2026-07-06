@@ -9,6 +9,7 @@ Short, self-contained examples showing how to use Flyte for agents, ML, and data
 | [stable-diffusion](stable-diffusion/) | Generate images from text prompts | GPU tasks, `flyte.io.File`, `flyte.report` |
 | [image-classifier](image-classifier/) | Fine-tune ResNet18 on HuggingFace dataset | PyTorch training, multi-task pipeline |
 | [duckdb-etl](duckdb-etl/) | Extract and transform CSV data with SQL | DuckDB, pandas, Flyte reports |
+| [oom-self-healing](oom-self-healing/) | Catch OOM errors and retry with more memory | `OOMError`, `.override()`, self-healing |
 | [snowflake-etl](snowflake-etl/) | ETL pipeline with Snowflake connector | Snowflake plugin, batch insert |
 | [flyte-local-dev](flyte-local-dev/) | Local dev features — no cluster needed | `cache`, `report`, `@flyte.trace`, TUI, local serving |
 
