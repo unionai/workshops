@@ -8,16 +8,7 @@ Uses a **real** detection dataset ([CPPE-5](https://huggingface.co/datasets/rish
 
 Computer-vision training data is often stored as a **huge number of tiny image files** — one small image per sample, frequently multiplied by a per-sample variant dimension (multiple views, crops, tiles, or augmentations), and often paired with a per-sample label mask. A modest dataset therefore explodes into thousands or millions of tiny objects in storage.
 
-The bytes aren't the problem. The problem is that a training loop reads these files **one at a time**, paying a fresh object-store connection setup **per file**. That per-file tax dominates the wall-clock, and it repeats on every epoch of every run.
-
-Two different access patterns, two different tools:
-
-| Access pattern | Right tool |
-|---|---|
-| Random-access, folder-scoped reads (browse a subset, grab a few files) | **[Volumes](https://docs.union.ai/)** — a mountable, folder-scoped filesystem |
-| Streaming the whole dataset into training, run after run | **Lance** — a streaming-optimized, columnar, multimodal format |
-
-Volumes solve the first. They don't fix streaming for training — that's what Lance is for.
+The bytes aren't the problem. The problem is that a training loop reads these files **one at a time**, paying a fresh object-store connection setup **per file**. That per-file tax dominates the wall-clock, and it repeats on every epoch of every run. **Lance** — a streaming-optimized, columnar, multimodal format — fixes it: convert the pile of tiny files into one dataset once, then stream it.
 
 ## The fix
 
