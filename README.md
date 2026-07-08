@@ -87,6 +87,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 |----------|-------------|
 | [DuckDB ETL](tutorials/starter-examples/duckdb-etl/) | SQL-based data pipeline with DuckDB |
 | [Snowflake ETL](tutorials/starter-examples/snowflake-etl/) | ETL with Snowflake connector |
+| [Lance Streaming for Vision](tutorials/lance-streaming-vision/) | Convert a swarm of tiny per-sample image files (real CPPE-5 detection data) into one Lance dataset, benchmark per-file vs Lance streaming against real object storage, then train / evaluate / explore a Faster R-CNN streamed straight from S3 on a T4 |
 
 ---
 
