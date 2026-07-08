@@ -1,0 +1,15 @@
+# Lance + Flyte streaming vision tutorial.
+#
+# Default torch/torchvision wheels include CUDA, so the same image runs the data
+# tasks on CPU nodes and the detector training on GPU (T4) nodes.
+
+flyte[tui]>=2.0
+pylance>=0.19.0
+pyarrow>=17.0.0
+pillow>=10.0.0
+numpy
+torch>=2.4.0
+torchvision>=0.19.0
+torchmetrics>=1.4.0
+pycocotools>=2.0.7
+datasets>=2.19.0
