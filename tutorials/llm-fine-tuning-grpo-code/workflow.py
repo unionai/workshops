@@ -11,10 +11,18 @@ different solutions — unlike SFT which teaches a single "correct" answer.
 This is the same technique DeepSeek used for R1, applied to code generation.
 Generated code runs in a sandboxed environment (union.sandbox) for safe execution.
 
+Before training, a learnability filter samples the base model over a candidate
+pool and keeps only the problems it solves *sometimes but not always* — the zone
+where GRPO's within-group advantage is non-zero. Combined with a binary
+(all-or-nothing) reward, this stops the model from collapsing onto degenerate
+constants like `return True` that hack partial credit on impossible problems.
+The filter task is cached, so it runs once and later runs reuse the filtered set.
+
 Usage:
     # Quick sanity check
     flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B" \\
-        --max_train_samples 10 --epochs 1 --num_generations 2 --batch_size 2
+        --max_candidate_samples 20 --max_train_samples 10 --filter_samples 3 \\
+        --epochs 1 --num_generations 2 --batch_size 2
 
     # Standard run
     flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B"
@@ -24,7 +32,7 @@ Usage:
 
     # Longer training
     flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B" \\
-        --max_train_samples 200 --epochs 5 --num_eval_examples 30
+        --max_candidate_samples 400 --max_train_samples 200 --epochs 5 --num_eval_examples 30
 """
 
 import asyncio
@@ -46,6 +54,53 @@ log.setLevel(logging.INFO)
 
 
 MBPP_DATASET = "google-research-datasets/mbpp"
+
+# For instruct models, a bare "def foo():" completion prompt makes them ramble
+# (explanations, example usage, prose) which breaks the sandbox. A chat prompt
+# with an explicit "code only" instruction gives a fair baseline — the base
+# model produces clean code, so the GRPO delta reflects skill, not just format.
+CODE_SYSTEM_PROMPT = (
+    "You are an expert Python programmer. Given a problem description and a "
+    "function signature, respond with ONLY the complete Python function that "
+    "solves it — the signature and its body. Do not include any explanation, "
+    "prose, example usage, test code, or text outside the function."
+)
+
+
+def build_code_prompt(tokenizer, raw_prompt: str, use_chat_template: bool = True) -> str:
+    """Wrap the raw (problem + signature) prompt in the chat template with a
+    code-only instruction, when the tokenizer supports it. Falls back to the raw
+    completion-style prompt (correct for base models with no chat template)."""
+    if use_chat_template and getattr(tokenizer, "chat_template", None):
+        return tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": CODE_SYSTEM_PROMPT},
+                {"role": "user", "content": raw_prompt},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    return raw_prompt
+
+
+def assemble_code(func_def: str, completion: str, setup: str = "") -> str:
+    """Turn a model completion into a runnable script.
+
+    Handles both styles: a completion that is just the function body (prepend the
+    signature) and one that already includes `def name(...)` (use as-is). Strips
+    markdown code fences that instruct models often add.
+    """
+    m = re.search(r"def\s+(\w+)", func_def)
+    fname = m.group(1) if m else None
+    completion = re.sub(r"^\s*```(?:python)?\n?", "", completion)
+    completion = re.sub(r"\n?```\s*$", "", completion)
+    if fname and re.search(rf"\bdef\s+{re.escape(fname)}\b", completion):
+        code = completion
+    else:
+        code = func_def + "\n" + completion
+    if setup:
+        code = setup + "\n" + code
+    return code
 
 
 async def run_tests_sandboxed(
@@ -98,14 +153,19 @@ async def run_tests_sandboxed(
 
 @cpu_env.task(cache="auto")
 async def prepare_data(
-    max_train_samples: int = 200,
+    max_candidate_samples: int = 250,
     max_eval_samples: int = 50,
 ) -> flyte.io.Dir:
-    """Load MBPP coding problems and prepare train/eval splits.
+    """Load MBPP coding problems and prepare a candidate pool + eval split.
 
     MBPP columns: text (problem description), code (solution), test_list (assert strings).
     We build a prompt that includes the problem description and the function signature
     extracted from the reference solution, then let the model complete the body.
+
+    The "train" split here is a *candidate pool* — `filter_learnable` samples the
+    base model over it and keeps only the problems in the learnable zone (solved
+    sometimes but not always). GRPO only learns where the generation group has
+    reward variance, so we start with more candidates than we'll ultimately train on.
     """
     from datasets import Dataset, DatasetDict, load_dataset
 
@@ -160,23 +220,197 @@ async def prepare_data(
     rng = random.Random(42)
     rng.shuffle(all_rows)
 
-    n_train = min(max_train_samples, len(all_rows) - max_eval_samples)
+    n_train = min(max_candidate_samples, len(all_rows) - max_eval_samples)
     n_eval = min(max_eval_samples, len(all_rows) - n_train)
 
     processed = DatasetDict({
-        "train": Dataset.from_list(all_rows[:n_train]),
+        "train": Dataset.from_list(all_rows[:n_train]),  # candidate pool (pre-filter)
         "eval": Dataset.from_list(all_rows[n_train:n_train + n_eval]),
     })
 
     output_dir = os.path.join(tempfile.mkdtemp(), "dataset")
     processed.save_to_disk(output_dir)
-    log.info(f"Dataset ready: {n_train} train, {n_eval} eval")
+    log.info(f"Dataset ready: {n_train} candidates, {n_eval} eval")
 
     return await flyte.io.Dir.from_local(output_dir)
 
 
 # ------------------------------------------------------------------
-# Task 2: Train with GRPO
+# Task 2: Filter for learnable problems (RLVR data curation)
+# ------------------------------------------------------------------
+
+@gpu_env.task(cache="auto", report=True)
+async def filter_learnable(
+    model_name: str,
+    data_dir: flyte.io.Dir,
+    max_train_samples: int = 120,
+    filter_samples: int = 4,
+    temperature: float = 0.8,
+    max_completion_length: int = 128,
+) -> flyte.io.Dir:
+    """Keep only the *learnable* training problems for GRPO.
+
+    GRPO computes advantages *within* a group of completions, so it only learns
+    where the group has reward variance. Two kinds of problems give zero signal:
+
+      - Impossible (base model never solves it) — every completion scores 0.
+        These are also exactly where partial-credit reward hacking takes over:
+        `return True` / `return -1` grab a fraction of the asserts and become the
+        highest-advantage completion in an otherwise all-zero group.
+      - Trivial (base model always solves it) — every completion scores 1.
+
+    This pre-pass samples the BASE model `filter_samples` times on each candidate
+    and keeps only problems it solves *sometimes but not always*
+    (1 <= all_pass_count < filter_samples) — the learnable middle. Cached, so the
+    first workshop run pays for it once and later runs reuse the filtered set.
+    """
+    import torch
+    from datasets import Dataset, DatasetDict, load_from_disk
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from union import sandbox as sb
+
+    log.info(f"Filtering candidates for learnability with {model_name} (N={filter_samples})")
+
+    await flyte.report.replace.aio(
+        wrap_report(
+            f"<h2>Filtering for Learnable Problems...</h2>"
+            f"<h3>{model_name}</h3>"
+            f'<div class="card"><p>Sampling the base model {filter_samples}× per '
+            f"candidate — keeping only problems it solves <i>sometimes</i>.</p></div>"
+        ),
+        do_flush=True,
+    )
+
+    data_path = await data_dir.download()
+    dataset = load_from_disk(data_path)
+    candidates = dataset["train"]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    use_fp16 = torch.cuda.is_available() and not use_bf16
+    dtype = torch.bfloat16 if use_bf16 else torch.float16 if use_fp16 else torch.float32
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, token=HF_TOKEN, dtype=dtype, device_map="auto",
+    )
+    model.eval()
+
+    def sample_completions(prompt: str) -> list[str]:
+        """Draw `filter_samples` sampled completions for one prompt."""
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_completion_length,
+                do_sample=True,
+                temperature=temperature,
+                top_p=0.95,
+                num_return_sequences=filter_samples,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        gen = outputs[:, inputs.input_ids.shape[1]:]
+        return [tokenizer.decode(g, skip_special_tokens=True) for g in gen]
+
+    kept: list[dict] = []
+    n_impossible = 0
+    n_trivial = 0
+
+    async with sb.on_device.session(network_mode="blocked", backend="bubblewrap") as sbx:
+        for idx in range(len(candidates)):
+            if len(kept) >= max_train_samples:
+                break
+
+            row = candidates[idx]
+            func_def = row["func_prompt"].strip().split("\n")[-1]
+            setup = row["setup_code"].strip() if row["setup_code"] else ""
+            test_list = [
+                l.strip() for l in row["tests"].strip().split("\n")
+                if l.strip().startswith("assert")
+            ]
+
+            completions = sample_completions(row["prompt"])
+
+            all_pass_count = 0
+            for completion in completions:
+                if not completion.strip():
+                    continue
+                full_code = func_def + "\n" + completion
+                if setup:
+                    full_code = setup + "\n" + full_code
+                all_passed, _, _ = await run_tests_sandboxed(sbx, full_code, test_list)
+                if all_passed:
+                    all_pass_count += 1
+
+            if all_pass_count == 0:
+                n_impossible += 1
+            elif all_pass_count == filter_samples:
+                n_trivial += 1
+            else:
+                kept.append(row)
+
+            if (idx + 1) % 10 == 0 or len(kept) >= max_train_samples:
+                log.info(
+                    f"[Filter] scanned {idx + 1}/{len(candidates)}: "
+                    f"kept={len(kept)} impossible={n_impossible} trivial={n_trivial}"
+                )
+                await flyte.report.replace.aio(
+                    wrap_report(
+                        f"<h2>Filtering for Learnable Problems...</h2>"
+                        f"<h3>{model_name}</h3>"
+                        f'<div class="stat-grid">'
+                        f'  <div class="stat"><div class="value">{len(kept)}</div><div class="label">Learnable (kept)</div></div>'
+                        f'  <div class="stat"><div class="value">{n_impossible}</div><div class="label">Impossible (all fail)</div></div>'
+                        f'  <div class="stat"><div class="value">{n_trivial}</div><div class="label">Trivial (all pass)</div></div>'
+                        f'  <div class="stat"><div class="value">{idx + 1}/{len(candidates)}</div><div class="label">Scanned</div></div>'
+                        f'</div>'
+                        f'<div class="card"><p>Target: {max_train_samples} learnable problems. '
+                        f"Sampling base model {filter_samples}× each.</p></div>"
+                    ),
+                    do_flush=True,
+                )
+
+    log.info(
+        f"Filter complete: kept {len(kept)} learnable "
+        f"(dropped {n_impossible} impossible, {n_trivial} trivial)"
+    )
+
+    if not kept:
+        raise RuntimeError(
+            "No learnable problems found — every candidate was impossible or trivial. "
+            "Try a stronger model, more candidates, or a higher filter_samples."
+        )
+
+    filtered = DatasetDict({
+        "train": Dataset.from_list(kept),
+        "eval": dataset["eval"],  # pass the held-out eval split through unchanged
+    })
+
+    output_dir = os.path.join(tempfile.mkdtemp(), "filtered")
+    filtered.save_to_disk(output_dir)
+
+    await flyte.report.replace.aio(
+        wrap_report(
+            f"<h2>Learnability Filter Complete</h2>"
+            f"<h3>{model_name}</h3>"
+            f'<div class="stat-grid">'
+            f'  <div class="stat"><div class="value">{len(kept)}</div><div class="label">Learnable (kept)</div></div>'
+            f'  <div class="stat"><div class="value">{n_impossible}</div><div class="label">Impossible</div></div>'
+            f'  <div class="stat"><div class="value">{n_trivial}</div><div class="label">Trivial</div></div>'
+            f'</div>'
+            f'<div class="card"><p>GRPO now trains only on problems with reward '
+            f"variance — the learnable zone where advantages are non-zero.</p></div>"
+        ),
+        do_flush=True,
+    )
+
+    return await flyte.io.Dir.from_local(output_dir)
+
+
+# ------------------------------------------------------------------
+# Task 3: Train with GRPO
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
@@ -191,11 +425,16 @@ async def train(
     max_completion_length: int = 128,
     lora_r: int = 16,
     lora_alpha: int = 32,
+    beta: float = 0.04,
+    use_chat_template: bool = True,
 ) -> flyte.io.Dir:
     """Fine-tune a model with GRPO — reward = do the tests pass?
 
     Args:
         method: "lora" for LoRA adapters (default), "full" for full fine-tuning.
+        beta: KL penalty coefficient. Anchors the policy to the base model so it
+            can't drift far and overfit the small training set (train reward ↑
+            but held-out eval ↓). 0 disables the KL term; 0.04 is a safe default.
     """
     import torch
     from datasets import load_from_disk
@@ -236,12 +475,19 @@ async def train(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # T4 (Turing) has no bf16 — fall back to fp16, not fp32. fp32 would be ~2x
+    # the memory and much slower generation, which is the GRPO bottleneck.
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    use_fp16 = torch.cuda.is_available() and not use_bf16
+    train_dtype = (
+        torch.bfloat16 if use_bf16 else torch.float16 if use_fp16 else torch.float32
+    )
+    log.info(f"Training precision: {train_dtype}")
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         token=HF_TOKEN,
-        dtype=torch.bfloat16 if use_bf16 else torch.float32,
+        dtype=train_dtype,
         device_map="auto",
     )
 
@@ -394,15 +640,22 @@ async def train(
 
         # -- Reward function --
         def code_reward(completions: list[str], func_prompt: list[str], tests: list[str], setup_code: list[str], **kwargs) -> list[float]:
-            """Reward = fraction of test cases passed. All pass = 1.0."""
+            """Reward = 1.0 only if ALL tests pass, else 0.0 (binary / all-or-nothing).
+
+            Binary reward is deliberate. Partial credit (passed/total) is easy to
+            hack on this task: a constant like `return True` or `return -1` grabs a
+            fraction of the asserts and, in a group where the genuine attempts all
+            score 0, becomes the highest-advantage completion — so GRPO reinforces
+            degenerate constants. All-or-nothing removes that gradient. It only works
+            because `filter_learnable` guarantees each problem's group still has
+            variance (some completions fully pass, some don't).
+            """
             rewards = []
             batch_passes = 0
 
             for completion, p, t, setup in zip(completions, func_prompt, tests, setup_code):
                 func_def = p.strip().split("\n")[-1]
-                full_code = func_def + "\n" + completion
-                if setup:
-                    full_code = setup + "\n" + full_code
+                full_code = assemble_code(func_def, completion, setup)
                 test_list = [l.strip() for l in t.strip().split("\n") if l.strip().startswith("assert")]
 
                 # Run tests in sandbox from trainer thread
@@ -415,7 +668,7 @@ async def train(
                 except Exception:
                     all_passed, passed, total = False, 0, len(test_list)
 
-                reward = passed / total if total > 0 else 0.0
+                reward = 1.0 if all_passed else 0.0
                 rewards.append(reward)
 
                 if all_passed:
@@ -466,16 +719,27 @@ async def train(
             learning_rate=lr,
             num_generations=num_generations,
             max_completion_length=max_completion_length,
+            beta=beta,  # KL anchor to the base model — prevents overfit-drift
             logging_steps=5,
             save_strategy="epoch",
             bf16=use_bf16,
+            fp16=use_fp16,
             report_to="none",
         )
+
+        # Prompt the model the way we'll evaluate it: for instruct models, wrap
+        # the raw problem in the chat template with a "code only" instruction.
+        # `func_prompt` stays raw so the reward can reconstruct the signature.
+        train_dataset = dataset["train"].map(
+            lambda ex: {"prompt": build_code_prompt(tokenizer, ex["func_prompt"], use_chat_template)}
+        )
+        if use_chat_template and getattr(tokenizer, "chat_template", None):
+            log.info("Using chat template for training prompts (code-only instruction).")
 
         trainer = GRPOTrainer(
             model=model,
             args=grpo_config,
-            train_dataset=dataset["train"],
+            train_dataset=train_dataset,
             reward_funcs=code_reward,
             peft_config=peft_config,
             processing_class=tokenizer,
@@ -569,7 +833,7 @@ async def train(
 
 
 # ------------------------------------------------------------------
-# Task 3: Evaluate
+# Task 4: Evaluate
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
@@ -578,6 +842,7 @@ async def evaluate(
     finetuned_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
     num_examples: int = 30,
+    use_chat_template: bool = True,
 ) -> str:
     """Compare base vs GRPO-trained model on code generation."""
     import torch
@@ -604,13 +869,18 @@ async def evaluate(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Match training precision: T4 has no bf16, so use fp16 rather than fp32.
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    dtype = torch.bfloat16 if use_bf16 else torch.float32
+    use_fp16 = torch.cuda.is_available() and not use_bf16
+    dtype = torch.bfloat16 if use_bf16 else torch.float16 if use_fp16 else torch.float32
 
-    def generate_code(model, prompts, max_new_tokens=128):
+    def generate_code(model, prompts, max_new_tokens=192):
         results = []
         for prompt in prompts:
-            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+            # Prompt exactly as in training: chat template + code-only instruction
+            # for instruct models, raw completion otherwise.
+            model_input = build_code_prompt(tokenizer, prompt, use_chat_template)
+            inputs = tokenizer(model_input, return_tensors="pt").to(model.device)
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id,
@@ -661,12 +931,9 @@ async def evaluate(
             setup = setup_codes[i] if setup_codes[i] else ""
             test_list = [l.strip() for l in tests_list[i].strip().split("\n") if l.strip().startswith("assert")]
 
-            # Build full code: setup + func_def + model completion
-            base_code = func_def + "\n" + base_results[i]
-            ft_code = func_def + "\n" + ft_results[i]
-            if setup:
-                base_code = setup + "\n" + base_code
-                ft_code = setup + "\n" + ft_code
+            # Build full code: setup + (signature if needed) + model completion
+            base_code = assemble_code(func_def, base_results[i], setup)
+            ft_code = assemble_code(func_def, ft_results[i], setup)
 
             base_all = False
             base_p = 0
@@ -772,18 +1039,23 @@ async def evaluate(
 
 @cpu_env.task(report=True)
 async def pipeline(
-    model_name: str = "HuggingFaceTB/SmolLM2-135M",
+    model_name: str = "Qwen/Qwen2.5-0.5B",
     method: str = "lora",
-    epochs: int = 3,
+    epochs: int = 1,
     lr: float = 5e-5,
-    batch_size: int = 4,
-    num_generations: int = 4,
+    batch_size: int = 6,
+    num_generations: int = 6,
     max_completion_length: int = 128,
-    max_train_samples: int = 200,
+    max_train_samples: int = 100,
+    max_candidate_samples: int = 300,
+    filter_samples: int = 4,
     max_eval_samples: int = 50,
-    num_eval_examples: int = 30,
+    num_eval_examples: int = 20,
     lora_r: int = 16,
     lora_alpha: int = 32,
+    beta: float = 0.04,
+    use_chat_template: bool = True,
+    use_filter: bool = True,
 ) -> str:
     """
     GRPO fine-tuning pipeline — teach a model to write correct Python.
@@ -791,12 +1063,16 @@ async def pipeline(
     Args:
         method: "lora" for LoRA adapters (default), "full" for full fine-tuning.
 
-    1. Generate coding problems with test cases
-    2. Train with GRPO — reward = fraction of tests passed
-    3. Evaluate: pass rate before/after
+    1. Prepare a candidate pool of MBPP problems with test cases
+    2. Filter for learnability — keep problems the base model solves *sometimes*
+    3. Train with GRPO — binary reward = do ALL tests pass?
+    4. Evaluate: pass rate before/after
     """
-    log.info(f"Pipeline: {model_name} | GRPO code generation")
-    steps = ["Prepare Data", "GRPO Train", "Evaluate"]
+    log.info(f"Pipeline: {model_name} | GRPO code generation (filter={use_filter})")
+    steps = (
+        ["Prepare Data", "Filter", "GRPO Train", "Evaluate"] if use_filter
+        else ["Prepare Data", "GRPO Train", "Evaluate"]
+    )
 
     await flyte.report.replace.aio(
         wrap_report(
@@ -808,34 +1084,57 @@ async def pipeline(
         do_flush=True,
     )
 
-    data_dir = await prepare_data(max_train_samples, max_eval_samples)
+    data_dir = await prepare_data(max_candidate_samples, max_eval_samples)
+
+    # The learnability filter concentrates training on problems the base solves
+    # *sometimes*. With use_filter=False we train on the whole candidate pool —
+    # more data, but many zero-gradient (all-pass/all-fail) groups. Binary reward
+    # keeps this safe (impossible problems just contribute no gradient, no hacking).
+    if use_filter:
+        await flyte.report.replace.aio(
+            wrap_report(
+                f"<h2>GRPO Code Pipeline</h2>"
+                f"<h3>{model_name}</h3>"
+                f"{pipeline_step_indicator(1, steps)}"
+                f'<div class="card"><p>Filtering candidates for learnability...</p></div>'
+            ),
+            do_flush=True,
+        )
+        train_dir = await filter_learnable(
+            model_name, data_dir, max_train_samples, filter_samples,
+            max_completion_length=max_completion_length,
+        )
+    else:
+        log.info("Skipping learnability filter — training on the full candidate pool.")
+        train_dir = data_dir
 
     await flyte.report.replace.aio(
         wrap_report(
             f"<h2>GRPO Code Pipeline</h2>"
             f"<h3>{model_name}</h3>"
-            f"{pipeline_step_indicator(1, steps)}"
-            f'<div class="card"><p>GRPO training — reward = tests pass...</p></div>'
+            f"{pipeline_step_indicator(len(steps) - 2, steps)}"
+            f'<div class="card"><p>GRPO training — binary reward = all tests pass...</p></div>'
         ),
         do_flush=True,
     )
 
     finetuned_dir = await train(
-        model_name, data_dir, method, epochs, lr, batch_size,
-        num_generations, max_completion_length, lora_r, lora_alpha,
+        model_name, train_dir, method, epochs, lr, batch_size,
+        num_generations, max_completion_length, lora_r, lora_alpha, beta,
+        use_chat_template,
     )
 
     await flyte.report.replace.aio(
         wrap_report(
             f"<h2>GRPO Code Pipeline</h2>"
             f"<h3>{model_name}</h3>"
-            f"{pipeline_step_indicator(2, steps)}"
+            f"{pipeline_step_indicator(len(steps) - 1, steps)}"
             f'<div class="card"><p>Evaluating base vs GRPO model...</p></div>'
         ),
         do_flush=True,
     )
 
-    result = await evaluate(model_name, finetuned_dir, data_dir, num_eval_examples)
+    result = await evaluate(model_name, finetuned_dir, train_dir, num_eval_examples, use_chat_template)
     metrics = json.loads(result)
 
     improvement = metrics["improvement"]
@@ -845,7 +1144,7 @@ async def pipeline(
         wrap_report(
             f"<h2>GRPO Code Pipeline Complete</h2>"
             f"<h3>{model_name}</h3>"
-            f"{pipeline_step_indicator(3, steps)}"
+            f"{pipeline_step_indicator(4, steps)}"
             f'<div class="stat-grid">'
             f'  <div class="stat"><div class="value">{metrics["base_pass_rate"]}%</div><div class="label">Base Pass Rate</div></div>'
             f'  <div class="stat"><div class="value">{metrics["grpo_pass_rate"]}%</div><div class="label">GRPO Pass Rate</div></div>'

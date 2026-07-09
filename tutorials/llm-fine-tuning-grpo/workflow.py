@@ -31,17 +31,13 @@ import re
 import tempfile
 
 import flyte
+import flyte.io
 import flyte.report
-import markdown
 from config import cpu_env, gpu_env, HF_TOKEN
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
-
-
-def md_to_html(text: str) -> str:
-    return markdown.markdown(text, extensions=["tables", "fenced_code"])
 
 
 # Common words with repeated letters — good for letter counting
@@ -546,14 +542,14 @@ async def evaluate(
 
 @cpu_env.task(report=True)
 async def pipeline(
-    model_name: str = "HuggingFaceTB/SmolLM2-135M",
-    epochs: int = 3,
+    model_name: str = "Qwen/Qwen2.5-0.5B",
+    epochs: int = 2,
     lr: float = 5e-5,
     batch_size: int = 8,
     num_generations: int = 8,
     max_completion_length: int = 32,
-    max_train_samples: int = 500,
-    max_eval_samples: int = 100,
+    max_train_samples: int = 200,
+    max_eval_samples: int = 60,
     num_eval_examples: int = 50,
     lora_r: int = 16,
     lora_alpha: int = 32,
