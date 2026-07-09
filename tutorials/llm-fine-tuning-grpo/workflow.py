@@ -143,7 +143,7 @@ async def train(
     lr: float = 5e-5,
     batch_size: int = 8,
     num_generations: int = 8,
-    max_completion_length: int = 32,
+    max_completion_length: int = 64,
     lora_r: int = 16,
     lora_alpha: int = 32,
 ) -> flyte.io.Dir:
@@ -268,27 +268,22 @@ async def train(
 
     # -- Reward function --
     def counting_reward(completions: list[str], count: list[int], **kwargs) -> list[float]:
-        """
-        Reward based on how close the model's answer is to the correct letter count.
-        - Exact match: 1.0
-        - Off by 1: 0.5
-        - Off by 2: 0.25
-        - Anything else: 0.0
+        """Binary reward: 1.0 only if the exact letter count is correct, else 0.0.
+
+        Binary is deliberate. A graded reward (off-by-1 = 0.5, off-by-2 = 0.25) is
+        trivially hackable here: since most counts are small, always answering "1"
+        lands within 1-2 of the truth on most words and racks up partial credit —
+        so the model collapses to a constant instead of learning to count.
+        All-or-nothing removes that shortcut.
         """
         rewards = []
         batch_exact = 0
         for completion, expected in zip(completions, count):
             predicted = extract_number(completion)
-            if predicted is None:
-                rewards.append(0.0)
-            elif predicted == expected:
+            if predicted is not None and predicted == expected:
                 rewards.append(1.0)
                 reward_stats["exact_matches"] += 1
                 batch_exact += 1
-            elif abs(predicted - expected) == 1:
-                rewards.append(0.5)
-            elif abs(predicted - expected) == 2:
-                rewards.append(0.25)
             else:
                 rewards.append(0.0)
             reward_stats["total"] += 1
@@ -417,7 +412,7 @@ async def evaluate(
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     dtype = torch.bfloat16 if use_bf16 else torch.float32
 
-    def generate_answers(model, prompts, max_new_tokens=32):
+    def generate_answers(model, prompts, max_new_tokens=96):
         results = []
         for prompt in prompts:
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
@@ -547,7 +542,7 @@ async def pipeline(
     lr: float = 5e-5,
     batch_size: int = 8,
     num_generations: int = 8,
-    max_completion_length: int = 32,
+    max_completion_length: int = 64,
     max_train_samples: int = 200,
     max_eval_samples: int = 60,
     num_eval_examples: int = 50,

@@ -25,6 +25,7 @@ Usage:
 """
 
 import ast
+import html
 import json
 import logging
 import operator
@@ -98,11 +99,26 @@ def numbers_in_expr(expr: str) -> list:
 
 
 def extract_answer(text: str):
-    """Pull the expression out of the last <answer>...</answer> block."""
+    """Pull the expression the model is proposing as its answer.
+
+    Prefers the <answer>...</answer> block, but falls back to a bare expression
+    (e.g. `5 * 8 + 2 = 42` -> `5 * 8 + 2`) so a model that solves the puzzle but
+    doesn't use the tags still gets credit. This keeps the base-vs-GRPO
+    comparison about *solving*, not just about following the answer format.
+    """
     matches = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
-    if not matches:
-        return None
-    return matches[-1].strip()
+    if matches:
+        return matches[-1].strip()
+    # fallback: an arithmetic expression just before an '=' sign
+    eqs = re.findall(r"([0-9][0-9+\-*/()\s]*?)\s*=", text)
+    if eqs:
+        return eqs[-1].strip()
+    # fallback: the last line that is purely an arithmetic expression
+    lines = [l.strip() for l in text.splitlines()
+             if l.strip() and re.fullmatch(r"[0-9+\-*/()\s]+", l.strip())]
+    if lines:
+        return lines[-1]
+    return None
 
 
 def is_correct(text: str, numbers: list, target: int) -> bool:
@@ -486,7 +502,7 @@ async def evaluate(
         comparisons.append({
             "question": questions[i], "target": targets[i],
             "base_answer": extract_answer(base_out[i]), "grpo_answer": extract_answer(ft_out[i]),
-            "base_out": base_out[i][:400], "grpo_out": ft_out[i][:400],
+            "base_out": base_out[i][:800], "grpo_out": ft_out[i][:800],
             "base_ok": b_ok, "grpo_ok": f_ok,
         })
 
@@ -504,19 +520,37 @@ async def evaluate(
         colors=["#adb5bd", "#0f3460"],
     )
 
-    # Show reasoning traces — prefer ones where GRPO solved it
+    # Show a REPRESENTATIVE mix, not just GRPO wins — the honest full picture.
+    gains = [c for c in comparisons if c["grpo_ok"] and not c["base_ok"]]      # GRPO fixed it
+    both_ok = [c for c in comparisons if c["grpo_ok"] and c["base_ok"]]        # both solved
+    both_bad = [c for c in comparisons if not c["grpo_ok"] and not c["base_ok"]]  # both failed
+    regress = [c for c in comparisons if c["base_ok"] and not c["grpo_ok"]]    # GRPO broke it
+    log.info(f"Buckets — gained:{len(gains)} both_ok:{len(both_ok)} both_bad:{len(both_bad)} regressed:{len(regress)}")
+
+    buckets = [
+        ("GRPO fixed it (base wrong → GRPO right)", "badge-success", gains[:5]),
+        ("Both solved it", "badge-info", both_ok[:3]),
+        ("Both still failed", "badge-danger", both_bad[:3]),
+        ("GRPO regressed (base right → GRPO wrong)", "badge-danger", regress[:2]),
+    ]
     examples_html = ""
-    picked = sorted(comparisons, key=lambda c: (not c["grpo_ok"], c["base_ok"]))[:8]
-    for c in picked:
-        b = "badge-success" if c["base_ok"] else "badge-danger"
-        f = "badge-success" if c["grpo_ok"] else "badge-danger"
-        examples_html += f"""
+    for label, badge, items in buckets:
+        if not items:
+            continue
+        examples_html += f'<h4><span class="badge {badge}">{label}</span> ({len(items)} shown)</h4>'
+        for c in items:
+            b = "badge-success" if c["base_ok"] else "badge-danger"
+            f = "badge-success" if c["grpo_ok"] else "badge-danger"
+            # escape so the model's literal <think>/<answer> tags render as text
+            base_show = html.escape(c["base_out"])
+            grpo_show = html.escape(c["grpo_out"])
+            examples_html += f"""
 <div class="card">
-<p><b>{c['question']}</b></p>
-<p><b>Base</b> <span class="badge {b}">{c['base_answer']}</span>:
-<pre style="white-space:pre-wrap;background:#f5f5f5;padding:8px;font-size:0.8em;border-radius:4px;">{c['base_out']}</pre></p>
-<p><b>GRPO</b> <span class="badge {f}">{c['grpo_answer']}</span>:
-<pre style="white-space:pre-wrap;background:#f0fff0;padding:8px;font-size:0.8em;border-radius:4px;">{c['grpo_out']}</pre></p>
+<p><b>{html.escape(c['question'])}</b></p>
+<p><b>Base (no GRPO)</b> <span class="badge {b}">{html.escape(str(c['base_answer']))}</span>:
+<pre style="white-space:pre-wrap;background:#f5f5f5;padding:8px;font-size:0.8em;border-radius:4px;">{base_show}</pre></p>
+<p><b>GRPO</b> <span class="badge {f}">{html.escape(str(c['grpo_answer']))}</span>:
+<pre style="white-space:pre-wrap;background:#f0fff0;padding:8px;font-size:0.8em;border-radius:4px;">{grpo_show}</pre></p>
 </div>"""
 
     await flyte.report.replace.aio(
@@ -541,7 +575,9 @@ async def evaluate(
         "base_mean_tokens": round(base_ml, 1),
         "grpo_mean_tokens": round(ft_ml, 1),
         "num_problems": total,
-        "comparisons": comparisons[:8],
+        "buckets": {"gained": len(gains), "both_ok": len(both_ok),
+                    "both_bad": len(both_bad), "regressed": len(regress)},
+        "comparisons": comparisons[:16],
     })
 
 
