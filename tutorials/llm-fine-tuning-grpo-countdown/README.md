@@ -68,16 +68,32 @@ No solution was ever shown — the model discovers what works from its own tries
 
 "GRPO" = **G**roup **R**elative **P**olicy **O**ptimization: advantages are computed *within* each group of attempts, which is why the group needs a mix of right and wrong answers to produce a learning signal. (That's also why the task has to sit in the model's "learnable zone" — solvable often enough that some attempts succeed.)
 
-## The Reward
+## The Reward — and How We Shaped It
 
-One reward function, and it's deliberately **binary**:
+In GRPO, **the reward function *is* the task definition.** The model has no other notion of "good" — it optimizes exactly the number you return, and it will find the *laziest* path to a high number, whether or not that path is what you intended. So most of the work here is reward design, not RL. Ours is deliberately simple:
+
+```python
+def reward(completion, numbers, target):
+    expr = extract_answer(completion)          # pull out the expression
+    if not uses_each_number_once(expr, numbers):
+        return 0.0                             # must use the given numbers, each once
+    return 1.0 if evaluates_to(expr, target) else 0.0
+```
 
 | Result | Reward |
 |--------|--------|
-| Expression uses each number once **and** equals the target | **1.0** |
+| Uses each given number once **and** equals the target | **1.0** |
 | Anything else | **0.0** |
 
-Binary is intentional. A graded reward ("close to the target = partial credit") would be *hackable* — the model could drift toward a safe average guess. All-or-nothing means the only path to reward is a genuinely correct answer. (We learned this the hard way on a sibling tutorial where partial credit let a model collapse to always guessing "1" — see [How We Know It's Real](#how-we-know-its-real-not-a-trick).)
+Three shaping decisions, and *why* each one:
+
+1. **Binary, not graded.** We do *not* give partial credit for "close to the target." A graded reward is the classic reward-hacking trap: if a near-miss scores something, the model drifts toward a safe average guess instead of solving. Binary means the only way to earn reward is a genuinely correct answer. (We learned this the hard way — a sibling tutorial gave graded credit for letter-counting and the model collapsed to always answering "1," because on small counts "1" is *close* to most answers. See [How We Know It's Real](#how-we-know-its-real-not-a-trick).)
+
+2. **The "uses each number once" check matters as much as the arithmetic.** Without it, the reward is trivially hackable — the model could ignore the numbers and just emit the target (`20`), or reuse a number, or invent new ones. The constraint *is* the puzzle, so the reward has to enforce it. This is the general rule: **before shipping a reward, ask "what's the laziest output that scores well?"** — and if that output isn't what you want, the reward is wrong.
+
+3. **We removed the format reward.** An earlier version of this tutorial added a second reward for wrapping the answer in `<think>...</think><answer>...</answer>` tags (weighted 0.2) to encourage reasoning. On a small model that backfired: the model spent capacity trying to satisfy the format instead of solving, and couldn't reliably do either. Dropping it — asking *only* for a correct answer — is what took this from a marginal gain to **+26.7pp**. The lesson: **every reward term you add is another thing the model will optimize (and possibly game); add sub-rewards only when the model genuinely can't learn without them.**
+
+For the general framework behind these choices — sparse vs. dense rewards, multi-part rewards, verifiable vs. learned rewards, and how the right reward changes with the task — see the code tutorial's [How to Think About Rewards](../llm-fine-tuning-grpo-code#how-to-think-about-rewards).
 
 ## How We Know It's Real (Not a Trick)
 
@@ -174,9 +190,52 @@ This exact setup is one step away from the famous **DeepSeek-R1-Zero / [TinyZero
 
 We keep the small-model tutorial honest by *not* claiming that: on a 0.5B–1.5B model that emergence is weak (it tends to find a terse answer rather than reason out loud), so here the deliverable is the solid, measurable one — **GRPO improves solve rate**. If you have a bigger GPU, try a 3B–7B with the reasoning format and watch the "response length grows" curve for yourself. **Same recipe, more capable base → visible reasoning.**
 
-## Why This Works (When Other Tasks Don't)
+## Choosing a Task — and a Model — for GRPO
 
-The [code tutorial](../llm-fine-tuning-grpo-code) shows a 0.5B *failing* to learn general coding from 100 diverse problems — because every code problem is a novel task, so nothing transfers. Countdown is the opposite: **one skill, endless instances**, so what the model learns generalizes — the same reason the [letter-counting](../llm-fine-tuning-grpo) and [math](../llm-fine-tuning-grpo-math) demos work. The lesson worth taking to your own task: **match the task shape to what RL can do (sharpen a repeatable skill), give it an unhackable reward, and read the actual outputs before you trust the number.**
+The single biggest predictor of whether GRPO will work isn't the algorithm — it's whether your **task** and **model** fit together. Before you spend a GPU, score your task on four axes. They're the difference between our clean wins (Countdown, math) and our instructive failures (letters, code):
+
+1. **Learnable-zone density** — for what fraction of problems does the base model succeed *sometimes but not always*? GRPO's advantage is computed within a group of attempts; if every attempt scores 0 (too hard) or every attempt scores 1 (too easy), that problem contributes **zero gradient**. RL only sharpens what the model can already do occasionally.
+2. **Transfer** — does improving on training instances raise *held-out* performance, or is each problem its own island?
+3. **Homogeneity** — one skill × endless instances, vs. many distinct micro-skills.
+4. **Verifiability** — can a cheap program score it? (Code and math are great here — that's the whole appeal.)
+
+Here's how the four tutorials in this repo actually score — and it predicts their results exactly:
+
+| Task | Learnable zone | Transfer | Homogeneity | Verifiable | Result on 0.5B |
+|------|---|---|---|---|---|
+| **Countdown** (this) | ✅ base ~10–15% | ✅ one skill | ✅ high | ✅ eval the expression | **+26.7pp** |
+| **Math** (GSM8K) | ✅ base ~25% | ✅ arithmetic skill | ✅ high | ✅ check the answer | **+10pp** |
+| **Letters** | ⚠️ base ~0% *and* a graded reward that's gameable | ✅ | ✅ | ⚠️ verifiable but graded → hackable | ❌ fake win (reward hack) |
+| **Code** (MBPP) | ⚠️ many all-fail groups | ❌ every problem an island | ❌ many micro-skills | ✅ run the tests | ❌ flat (no transfer) |
+
+Read across the rows and the outcomes stop being surprising: **Countdown and math pass all four, so they work. Code fails transfer + homogeneity (100 diverse problems don't generalize on a small model). Letters had a gameable reward.** None of that is a flaw in GRPO — it's a mismatch you can predict up front.
+
+### Where the *model* comes in
+
+The first two axes are **not fixed** — a bigger model moves them:
+
+- **Learnable-zone density** rises with capability: a stronger base solves more problems *sometimes*, pulling them out of the "always fails" dead zone and into the zone where GRPO has signal.
+- **Transfer** improves with scale too: larger models are more **sample-efficient**, so they generalize a skill from far fewer examples instead of memorizing instances.
+
+So a task that fails these axes on a 0.5B can genuinely be rescued by a bigger base — which is exactly why production GRPO (e.g. DeepSeek-R1) runs on large, capable models. **GRPO is the method; the base model is the fuel.** We use tiny models here for cost and speed, not because they're optimal — and some of our "failures" are really just *too small a model for that task*, not a limit of the technique.
+
+### "But labs use GRPO for coding all the time" — so why does *our* code example fail?
+
+Both are true, and it's worth pinning down why, because it's the most common point of confusion. Companies absolutely use GRPO/RLVR for coding in post-training (DeepSeek-R1, the Qwen-Coder line, etc.) — code is one of the *best* RLVR targets precisely because it's cheaply verifiable. The difference from our tutorial isn't the **domain**, it's the **regime**:
+
+| | This tutorial | What labs actually do |
+|---|---|---|
+| **Base model** | 0.5B–3B | 7B–70B+, already a competent coder |
+| **Learnable zone** | tiny — a 0.5B solves almost nothing occasionally → dead groups | huge — a strong base solves lots of problems *sometimes* → dense gradient everywhere |
+| **Dataset size** | ~100 MBPP problems | 10⁴–10⁶ problems (contests, repos, synthetic) |
+| **Transfer** | poor at N=100 (each problem an island) | emerges from *breadth* — at 100k problems, "write correct Python" becomes one broad skill with endless instances |
+| **Reward harness** | binary tests + a learnability filter | test suites + difficulty curricula + dedup + anti-hacking |
+
+So the resolution: **coding's task shape is excellent — at scale.** Heterogeneity stops mattering once you have enough volume for the statistical regularities of "correct code" to become learnable, and the learnable zone fills in once the base model is strong enough to occasionally solve things. Both of those fail *simultaneously* in the 0.5B-on-100-problems toy setting — which is why our code example flatlines.
+
+Countdown is engineered to have good task shape *even in the toy regime* — one skill, guaranteed-solvable, always-verifiable — which is exactly why it's the teaching demo and code isn't. And note: going 0.5B → 3B on the code example nudges knob #1 (more problems become learnable) but doesn't get you to the **data-scale** regime where the labs' results actually come from. You'd need both levers.
+
+**The one-line takeaway:** match the task shape to what RL can do (sharpen a repeatable, verifiable skill that transfers), pick a base model capable enough to have a learnable zone, give it an unhackable reward — and *read the actual outputs* before you trust the number.
 
 ## Further Reading
 

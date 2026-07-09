@@ -325,6 +325,24 @@ The model generates arbitrary Python which needs to be executed to compute rewar
 
 The sandbox session is opened once per task, and the reward function calls into it from the trainer thread using `asyncio.run_coroutine_threadsafe()`.
 
+## What to Expect on a 0.5B — and Why Labs Get Real Coding Results
+
+Be warned, and read this before you judge the numbers: on a **small model with ~100 problems, this example plateaus.** You'll see the *training* pass-rate climb nicely (GRPO genuinely learns the training problems), but **held-out** pass rate barely moves — and much of the apparent gain is the model learning to emit clean, runnable code rather than becoming a better *coder*. That's not a bug, and it's not a knock on GRPO for code. It's the **regime**.
+
+"But companies use GRPO for coding all the time!" — they do, and code is one of the *best* RLVR targets because it's cheaply verifiable. The difference isn't the domain, it's the scale:
+
+| | This tutorial | What labs actually do |
+|---|---|---|
+| **Base model** | 0.5B–3B | 7B–70B+, already a competent coder |
+| **Learnable zone** | tiny — a 0.5B solves almost nothing *sometimes* → dead groups | huge — a strong base solves lots *sometimes* → dense gradient everywhere |
+| **Dataset size** | ~100 MBPP problems | 10⁴–10⁶ problems (contests, repos, synthetic) |
+| **Transfer** | poor at N=100 (each problem an island) | emerges from *breadth* — at 100k problems, "write correct Python" becomes one broad, transferable skill |
+| **Reward harness** | binary tests + learnability filter | test suites + difficulty curricula + dedup + anti-hacking |
+
+Two things fail *simultaneously* in the 0.5B-on-100-problems toy setting: the **learnable zone** is nearly empty (the base rarely succeeds, so most groups give zero gradient), and **transfer** doesn't happen (100 diverse problems are 100 islands, not one skill). Both are fixed by scale — a stronger base fills in the learnable zone, and enough problems (10⁴+) turn "write correct Python" into a single broad skill with endless instances. Going 0.5B → 3B alone helps the first knob but not the second; you need **both** a bigger base and far more data.
+
+So this tutorial is the right place to learn the *mechanics* (sandboxed verification, the learnability filter, binary reward, the training loop) — but to get genuinely *better code*, revisit it with a 7B+ base and thousands of problems on a bigger GPU. For a task engineered to give a clean win even in the toy regime (one skill, guaranteed-solvable, always-verifiable), and a full framework for scoring your own task, see the [Countdown tutorial's task-selection guide](../llm-fine-tuning-grpo-countdown#choosing-a-task--and-a-model--for-grpo).
+
 ## Scaling This to Production
 
 This demo collapses generation, verification, and training into a single GPU task with one in-process sandbox — deliberately, so the whole pipeline fits on one T4 and stays easy to follow. In real RLVR pipelines the wall-clock is dominated by **rollout generation** and **reward verification** (running the code), not the gradient step — so that's where you scale, and you can do it *without changing how code is executed*:
