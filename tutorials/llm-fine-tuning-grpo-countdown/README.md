@@ -116,15 +116,21 @@ Enter numbers and a target, hit **Solve**, and the UI shows the model's expressi
 | `--epochs` | `3` | training epochs |
 | `--lr` | `1e-5` | learning rate |
 | `--batch_size` | `8` | completions per step (must divide by `--num_generations`) |
-| `--num_generations` | `8` | attempts per puzzle (the "group") |
+| `--num_generations` | `8` | attempts (rollouts) the model makes per puzzle; GRPO compares them against each other (the "group") |
 | `--max_completion_length` | `320` | max tokens per answer |
-| `--beta` | `0.005` | KL penalty against the base model (keeps it from drifting) |
-| `--n_numbers` | `3` | numbers per puzzle (4 is much harder) |
-| `--max_num` | `9` | largest number used |
+| `--beta` | `0.005` | strength of the KL leash to the base model (see note below); higher keeps it closer, `0` removes it |
+| `--n_numbers` | `3` | how many numbers are *in each puzzle* (task difficulty, not a training setting; 4 is much harder than 3) |
+| `--max_num` | `9` | largest number used in a puzzle |
 | `--max_train_samples` | `300` | training puzzles |
 | `--num_eval_examples` | `60` | held-out puzzles compared before and after |
 
 > For the fastest clean demo, use `--model_name Qwen/Qwen2.5-0.5B-Instruct --n_numbers 3 --epochs 2`. Bigger models and 4-number puzzles are harder and slower but scale further.
+
+### A note on `beta` (the KL penalty)
+
+**KL** stands for **Kullback-Leibler divergence**, a standard measure of how different two probability distributions are. A language model's output is a probability distribution over the next token, and the KL penalty measures how far the model you are training has drifted from where it started (the frozen base model), then charges that drift as a cost during training.
+
+Why it is there: RL optimizes the reward and nothing else, so left unchecked the model will contort itself into whatever scores highest, even if that means degenerate or incoherent text. The KL penalty is a leash back to a competent base model, so the model improves at the task without forgetting how to write normally. `beta` sets the leash length: higher keeps it closer to the base (safer, learns more slowly), lower lets it change more (faster, but risks drifting into nonsense), and `0` removes the leash entirely.
 
 ---
 
