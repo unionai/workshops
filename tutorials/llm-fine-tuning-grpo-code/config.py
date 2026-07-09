@@ -21,7 +21,10 @@ cpu_env = flyte.TaskEnvironment(
     image=flyte.Image.from_debian_base(
         name="grpo-code",
     ).with_requirements("requirements.txt"),
-    resources=flyte.Resources(cpu=2, memory="4Gi"),
+    resources=flyte.Resources(cpu=2, memory="8Gi"),
+    secrets=[
+        flyte.Secret(key="HF_TOKEN", as_env_var="HF_TOKEN"),  # for download_model
+    ],
     depends_on=[gpu_env],
 )
 

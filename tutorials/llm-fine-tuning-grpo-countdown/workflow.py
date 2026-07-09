@@ -200,25 +200,72 @@ async def prepare_data(
 
 
 # ------------------------------------------------------------------
-# Task 2: Train with GRPO
+# Task 2: Download the base model (cached)
+# ------------------------------------------------------------------
+
+@cpu_env.task(cache="auto")
+async def download_model(model_name: str) -> flyte.io.Dir:
+    """Download the base model weights once and cache them.
+
+    Otherwise every run re-downloads the model from HuggingFace inside *both* the
+    train and evaluate containers. Caching on `model_name` means it's fetched once
+    and reused across runs. (Marginal for a 0.5B, but a real win — and a dodge of
+    HF rate-limits/auth — once you move to 7B+ bases.)
+    """
+    from huggingface_hub import snapshot_download
+
+    local = os.path.join(tempfile.mkdtemp(), "model")
+    snapshot_download(
+        repo_id=model_name,
+        local_dir=local,
+        token=HF_TOKEN,
+        # weights + config/tokenizer only; skip redundant formats to save space
+        ignore_patterns=["*.pth", "*.onnx", "*.gguf", "*.msgpack", "*.h5"],
+    )
+    log.info(f"Downloaded {model_name} -> {local}")
+    return await flyte.io.Dir.from_local(local)
+
+
+# ------------------------------------------------------------------
+# Task 3: Train with GRPO
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
 async def train(
     model_name: str,
+    model_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
     method: str = "lora",
-    epochs: int = 3,
-    lr: float = 1e-5,
-    batch_size: int = 8,
-    num_generations: int = 8,
-    max_completion_length: int = 320,
-    beta: float = 0.005,
-    lora_r: int = 16,
-    lora_alpha: int = 32,
+    # -- how long / how hard we train --
+    epochs: int = 3,            # passes over the training puzzles. More = more learning, but also more risk of over-optimizing.
+    lr: float = 1e-5,           # learning rate: how big a step each update takes. RL is touchy; keep it small.
+    # -- the "RL" knobs (these are what make GRPO different from normal fine-tuning) --
+    batch_size: int = 8,        # completions processed per step. MUST be divisible by num_generations.
+    num_generations: int = 8,   # attempts the model makes per puzzle = the "Group" in GRPO. It compares these against each other.
+    max_completion_length: int = 320,  # max tokens per attempt (how much room to answer).
+    beta: float = 0.005,        # KL penalty: how hard we tether the model to its original self so it can't drift into gibberish.
+    # -- LoRA (parameter-efficient fine-tuning) --
+    lora_r: int = 16,           # LoRA rank: size of the small trainable add-on matrices. Higher = more capacity, more params.
+    lora_alpha: int = 32,       # LoRA scaling factor (effective strength = alpha / r).
 ) -> flyte.io.Dir:
-    """Fine-tune with GRPO — reward = correct Countdown answer. Watch the model
-    teach itself to reason (response length grows as accuracy climbs)."""
+    """Fine-tune the model with GRPO so it solves more Countdown puzzles.
+
+    The big idea of GRPO (Group Relative Policy Optimization), for a first look:
+
+      1. For each puzzle, the model GENERATES several attempts (a "group" of size
+         `num_generations`). This is the "rollout" step. Unlike ordinary
+         fine-tuning, we are not showing the model a correct answer to copy.
+      2. A REWARD function scores each attempt (here: 1.0 if the expression is
+         correct, else 0.0). This is the only teaching signal.
+      3. GRPO compares each attempt to the group's average ("advantage") and
+         nudges the model to make the better-than-average attempts more likely
+         and the worse ones less likely.
+      4. A KL penalty (`beta`) keeps the updated model close to the original so it
+         improves the skill without forgetting how to write coherent text.
+
+    Repeat over many puzzles and the model gets better at the task, purely from
+    the reward. No solved examples are ever provided.
+    """
     import torch
     from datasets import load_from_disk
     from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
@@ -246,7 +293,9 @@ async def train(
     data_path = await data_dir.download()
     dataset = load_from_disk(data_path)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
+    # Load the base model from the cached download (no re-fetch from HuggingFace)
+    model_path = await model_dir.download()
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -255,9 +304,12 @@ async def train(
     train_dtype = torch.bfloat16 if use_bf16 else torch.float16 if use_fp16 else torch.float32
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, token=HF_TOKEN, dtype=train_dtype, device_map="auto",
+        model_path, dtype=train_dtype, device_map="auto",
     )
 
+    # Turn each puzzle into a chat prompt (system instructions + the "Numbers... Target..."
+    # question). The model will generate its attempts from this; `numbers` and `target`
+    # ride along as extra columns so the reward function can check the answer.
     def to_conversational(ex):
         return {"prompt": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -266,11 +318,16 @@ async def train(
 
     train_ds = dataset["train"].map(to_conversational)
 
+    # LoRA = Low-Rank Adaptation. Instead of updating all ~0.5B weights (expensive,
+    # and easy to wreck), we freeze the model and train tiny "adapter" matrices
+    # inserted next to the attention/MLP layers. Far fewer parameters to train, and
+    # the base model's general ability stays intact.
     peft_config = None
     if method == "lora":
         from peft import LoraConfig
         peft_config = LoraConfig(
             r=lora_r, lora_alpha=lora_alpha,
+            # which layers get an adapter — the attention (q/k/v/o) and MLP (gate/up/down) projections
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
         )
@@ -319,7 +376,9 @@ async def train(
                 colors=["#06d6a0", "#5a7db5"], y_max_cap=105.0,
                 y_display_names={"solve_rate": "Running Avg", "batch_rate": "Per Batch"},
             ) + '</div>'
-            # THE R1 CHART: response length growing as the model learns to reason
+            # Track mean response length too. (With a <think> format + a bigger
+            # model this is where you'd see chain-of-thought reasoning emerge and
+            # this line climb — see the README's "Scaling Up" note.)
             charts += '<div class="chart-container">' + make_line_chart(
                 data=reward_log, x_key="batch", y_keys=["mean_len"],
                 title="Response Length (tokens)",
@@ -328,12 +387,19 @@ async def train(
             ) + '</div>'
         return wrap_report(stats_html + charts)
 
+    # THE REWARD FUNCTION — this is the heart of RL. It is the *only* signal the
+    # model learns from. GRPO calls it with a batch of the model's own attempts
+    # (`completions`) plus the puzzle's `numbers` and `target` (passed through from
+    # the dataset). It returns a score per attempt; GRPO then reinforces the
+    # higher-scoring ones. Design this well and the model learns; design it badly
+    # and the model learns to game it. Here it is deliberately binary: 1.0 for a
+    # genuinely correct expression, 0.0 for anything else.
     def accuracy_reward(completions, numbers, target, **kwargs):
         rewards = []
         batch_correct = 0
         for c, nums, tgt in zip(completions, numbers, target):
             text = _completion_text(c)
-            ok = is_correct(text, nums, tgt)
+            ok = is_correct(text, nums, tgt)   # uses each number once AND equals the target?
             rewards.append(1.0 if ok else 0.0)
             stats["len_sum"] += len(tokenizer(text).input_ids)
             stats["total"] += 1
@@ -352,6 +418,10 @@ async def train(
                      f"mean_len={reward_log[-1]['mean_len']}")
         return rewards
 
+    # An OPTIONAL second reward you could add: pay a little for using a
+    # <think>...</think><answer>...</answer> format. We deliberately do NOT use it
+    # here (correctness alone works better on a small model), but it is the hook
+    # for the "make reasoning emerge" variant. See the README's "Scaling Up" note.
     def format_reward(completions, **kwargs):
         return [1.0 if has_reasoning_format(_completion_text(c)) else 0.0 for c in completions]
 
@@ -369,19 +439,28 @@ async def train(
                 flyte.report.replace.aio(_build_report(state.max_steps), do_flush=True), loop,
             )
 
+    # GRPOConfig bundles all the RL settings. The interesting, RL-specific ones are
+    # num_generations and beta; the rest are standard training knobs.
     output_dir = os.path.join(tempfile.mkdtemp(), "checkpoints")
     grpo_config = GRPOConfig(
-        output_dir=output_dir, num_train_epochs=epochs,
-        per_device_train_batch_size=batch_size, learning_rate=lr,
-        num_generations=num_generations, max_completion_length=max_completion_length,
-        beta=beta,
-        gradient_checkpointing=True,  # trade compute for memory — lets bigger models fit
+        output_dir=output_dir,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=batch_size,   # completions per step; must be divisible by num_generations
+        learning_rate=lr,
+        num_generations=num_generations,          # the "group": how many attempts per puzzle GRPO compares
+        max_completion_length=max_completion_length,
+        beta=beta,                                # strength of the KL leash back to the original model
+        gradient_checkpointing=True,              # recompute activations instead of storing them: less memory, a bit slower (lets bigger models fit)
         logging_steps=5, save_strategy="epoch",
         bf16=use_bf16, fp16=use_fp16, report_to="none",
     )
+    # GRPOTrainer runs the whole RL loop for us: for each batch it generates the
+    # attempts, calls our reward function, computes advantages within each group,
+    # and updates the (LoRA) weights. We just hand it the model, the puzzles, and
+    # the reward.
     trainer = GRPOTrainer(
         model=model, args=grpo_config, train_dataset=train_ds,
-        reward_funcs=accuracy_reward,  # reward = correct equation (solve rate)
+        reward_funcs=accuracy_reward,  # <-- our teaching signal: correct equation = 1.0
         peft_config=peft_config, processing_class=tokenizer,
         callbacks=[MetricsCallback()],
     )
@@ -412,7 +491,7 @@ async def train(
         ) + '</div>'
         charts += '<div class="chart-container">' + make_line_chart(
             data=reward_log, x_key="batch", y_keys=["mean_len"],
-            title="Response Length — the model teaching itself to reason",
+            title="Response Length (tokens)",
             x_label="Reward Batch", y_label="Mean Completion Tokens", colors=["#ef476f"],
         ) + '</div>'
     await flyte.report.replace.aio(
@@ -430,19 +509,20 @@ async def train(
 
 
 # ------------------------------------------------------------------
-# Task 3: Evaluate
+# Task 4: Evaluate
 # ------------------------------------------------------------------
 
 @gpu_env.task(report=True)
 async def evaluate(
     model_name: str,
+    model_dir: flyte.io.Dir,
     finetuned_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
     num_examples: int = 60,
     max_new_tokens: int = 320,
 ) -> str:
-    """Compare base vs GRPO-trained: solve rate AND response length AND example
-    reasoning traces (does the trained model actually reason?)."""
+    """Compare base vs GRPO-trained on held-out puzzles: solve rate, response
+    length, and side-by-side equations, with an honest bucket breakdown."""
     import torch
     from datasets import load_from_disk
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -455,7 +535,8 @@ async def evaluate(
     eval_ds = dataset["eval"].select(range(min(num_examples, len(dataset["eval"]))))
     questions, numbers, targets = eval_ds["question"], eval_ds["numbers"], eval_ds["target"]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
+    model_path = await model_dir.download()
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -477,7 +558,7 @@ async def evaluate(
         return outs
 
     await flyte.report.replace.aio(wrap_report("<h2>Evaluation</h2><p>Running base model...</p>"), do_flush=True)
-    base_model = AutoModelForCausalLM.from_pretrained(model_name, token=HF_TOKEN, dtype=dtype, device_map="auto")
+    base_model = AutoModelForCausalLM.from_pretrained(model_path, dtype=dtype, device_map="auto")
     base_out = generate(base_model, questions)
     del base_model
     if torch.cuda.is_available():
@@ -565,7 +646,7 @@ async def evaluate(
             f'<div class="stat"><div class="value">{base_ml:.0f} &rarr; {ft_ml:.0f}</div><div class="label">Mean Response Tokens</div></div>'
             f'</div>'
             f'<div class="chart-container">{rate_chart}</div>'
-            f"<h3>Reasoning traces (base vs GRPO)</h3>{examples_html}"
+            f"<h3>Example puzzles (base vs GRPO)</h3>{examples_html}"
         ),
         do_flush=True,
     )
@@ -589,48 +670,59 @@ async def evaluate(
 
 @cpu_env.task(report=True)
 async def pipeline(
-    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
-    method: str = "lora",
-    epochs: int = 3,
-    lr: float = 1e-5,
-    batch_size: int = 8,
-    num_generations: int = 8,
-    max_completion_length: int = 320,
-    beta: float = 0.005,
-    n_numbers: int = 3,
-    max_num: int = 9,
-    max_train_samples: int = 300,
-    max_eval_samples: int = 100,
-    num_eval_examples: int = 60,
+    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",  # which base model to fine-tune (an instruct model works best)
+    method: str = "lora",              # "lora" (efficient, default), "full" (train all weights), or "qlora"
+    # --- training length / stability ---
+    epochs: int = 3,                   # passes over the puzzles
+    lr: float = 1e-5,                  # learning rate
+    beta: float = 0.005,               # KL leash: keeps the model from drifting off into nonsense
+    # --- the GRPO "group" settings ---
+    batch_size: int = 8,               # completions per step (must divide by num_generations)
+    num_generations: int = 8,          # attempts per puzzle that GRPO compares against each other
+    max_completion_length: int = 320,  # max tokens per attempt
+    # --- the task: how hard are the puzzles? ---
+    n_numbers: int = 3,                # numbers per puzzle (4 is much harder)
+    max_num: int = 9,                  # largest number used
+    # --- dataset sizes ---
+    max_train_samples: int = 300,      # how many puzzles to train on
+    max_eval_samples: int = 100,       # held-out pool size
+    num_eval_examples: int = 60,       # how many held-out puzzles to score before/after
+    # --- LoRA capacity ---
     lora_r: int = 16,
     lora_alpha: int = 32,
-) -> str:
+) -> flyte.io.Dir:
     """
-    GRPO reasoning pipeline — teach a non-reasoning model to reason (Countdown).
+    GRPO pipeline: teach a small model to solve Countdown math puzzles.
 
-    1. Generate solvable Countdown problems
-    2. Train with GRPO — reward = correct answer (reasoning emerges on its own)
-    3. Evaluate: solve rate + response length + reasoning traces, before/after
+    Three steps, each a separate task (see the functions above):
+      1. prepare_data  - generate solvable puzzles (numbers + target, no answers)
+      2. train         - GRPO: the model attempts puzzles, a reward scores them,
+                         and the good attempts get reinforced
+      3. evaluate      - compare the base vs trained model on held-out puzzles
+
+    Returns the trained model directory (so serve.py can deploy it).
     """
-    log.info(f"Pipeline: {model_name} | GRPO Countdown reasoning")
+    log.info(f"Pipeline: {model_name} | GRPO Countdown puzzle")
     steps = ["Prepare Data", "GRPO Train", "Evaluate"]
 
     await flyte.report.replace.aio(
         wrap_report(f"<h2>GRPO Puzzle Pipeline</h2><h3>{model_name}</h3>"
                     f"{pipeline_step_indicator(0, steps)}"
-                    f'<div class="card"><p>Generating Countdown problems...</p></div>'),
+                    f'<div class="card"><p>Generating Countdown problems + fetching model...</p></div>'),
         do_flush=True,
     )
+    # both are cached across runs — the model download happens once per model_name
     data_dir = await prepare_data(n_numbers, max_num, max_train_samples, max_eval_samples)
+    model_dir = await download_model(model_name)
 
     await flyte.report.replace.aio(
         wrap_report(f"<h2>GRPO Puzzle Pipeline</h2><h3>{model_name}</h3>"
                     f"{pipeline_step_indicator(1, steps)}"
-                    f'<div class="card"><p>GRPO training — watch reasoning emerge...</p></div>'),
+                    f'<div class="card"><p>GRPO training — reward = correct answer...</p></div>'),
         do_flush=True,
     )
     finetuned_dir = await train(
-        model_name, data_dir, method, epochs, lr, batch_size,
+        model_name, model_dir, data_dir, method, epochs, lr, batch_size,
         num_generations, max_completion_length, beta, lora_r, lora_alpha,
     )
 
@@ -640,7 +732,7 @@ async def pipeline(
                     f'<div class="card"><p>Evaluating base vs GRPO...</p></div>'),
         do_flush=True,
     )
-    result = await evaluate(model_name, finetuned_dir, data_dir, num_eval_examples, max_completion_length)
+    result = await evaluate(model_name, model_dir, finetuned_dir, data_dir, num_eval_examples, max_completion_length)
     metrics = json.loads(result)
 
     improvement = metrics["improvement"]
@@ -659,4 +751,6 @@ async def pipeline(
         do_flush=True,
     )
     log.info(f"Pipeline complete. Improvement: {improvement:+.1f}pp")
-    return result
+    # return the trained model dir so `serve.py` can deploy it via RunOutput
+    # (metrics are in the live report above)
+    return finetuned_dir

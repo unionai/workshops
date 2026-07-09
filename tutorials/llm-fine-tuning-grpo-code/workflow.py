@@ -236,6 +236,28 @@ async def prepare_data(
 
 
 # ------------------------------------------------------------------
+# Task: Download the base model (cached)
+# ------------------------------------------------------------------
+
+@cpu_env.task(cache="auto")
+async def download_model(model_name: str) -> flyte.io.Dir:
+    """Download the base model weights once and cache them, so `filter_learnable`,
+    `train`, and `evaluate` don't each re-fetch from HuggingFace every run.
+    Marginal for a 0.5B; a real win (and a dodge of HF rate-limits) for a 7B."""
+    from huggingface_hub import snapshot_download
+
+    local = os.path.join(tempfile.mkdtemp(), "model")
+    snapshot_download(
+        repo_id=model_name,
+        local_dir=local,
+        token=HF_TOKEN,
+        ignore_patterns=["*.pth", "*.onnx", "*.gguf", "*.msgpack", "*.h5"],
+    )
+    log.info(f"Downloaded {model_name} -> {local}")
+    return await flyte.io.Dir.from_local(local)
+
+
+# ------------------------------------------------------------------
 # Task 2: Filter for learnable problems (RLVR data curation)
 # ------------------------------------------------------------------
 
@@ -416,6 +438,7 @@ async def filter_learnable(
 @gpu_env.task(report=True)
 async def train(
     model_name: str,
+    model_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
     method: str = "lora",
     epochs: int = 3,
@@ -431,16 +454,21 @@ async def train(
     """Fine-tune a model with GRPO — reward = do the tests pass?
 
     Args:
-        method: "lora" for LoRA adapters (default), "full" for full fine-tuning.
+        method: "lora" (default), "full" for full fine-tuning, or "qlora" —
+            4-bit quantized base + LoRA, which lets a 7B fit on a 16GB T4
+            (generation is slow, but memory fits). qlora saves the adapter
+            (the 4-bit base can't be merged on a small GPU).
         beta: KL penalty coefficient. Anchors the policy to the base model so it
             can't drift far and overfit the small training set (train reward ↑
             but held-out eval ↓). 0 disables the KL term; 0.04 is a safe default.
     """
     import torch
     from datasets import load_from_disk
-    from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainerCallback
     from trl import GRPOConfig, GRPOTrainer
     from union import sandbox as sb
+
+    is_qlora = method == "qlora"
 
     log.info(f"GRPO Code Training: model={model_name}, method={method}")
 
@@ -470,8 +498,9 @@ async def train(
     data_path = await data_dir.download()
     dataset = load_from_disk(data_path)
 
-    # -- Load model + tokenizer --
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
+    # -- Load model + tokenizer (from the cached download) --
+    model_path = await model_dir.download()
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -482,19 +511,32 @@ async def train(
     train_dtype = (
         torch.bfloat16 if use_bf16 else torch.float16 if use_fp16 else torch.float32
     )
-    log.info(f"Training precision: {train_dtype}")
+    log.info(f"Training precision: {train_dtype} (qlora={is_qlora})")
+
+    quant_config = None
+    if is_qlora:
+        # 4-bit NF4 — a 7B base drops from ~14GB to ~4GB so it fits on a T4.
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=train_dtype,
+        )
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        token=HF_TOKEN,
+        model_path,
         dtype=train_dtype,
         device_map="auto",
+        quantization_config=quant_config,
     )
 
-    # -- LoRA (optional) --
+    # -- LoRA / QLoRA (optional) --
     peft_config = None
-    if method == "lora":
-        from peft import LoraConfig
+    if method in ("lora", "qlora"):
+        from peft import LoraConfig, prepare_model_for_kbit_training
+
+        if is_qlora:
+            model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
 
         peft_config = LoraConfig(
             r=lora_r,
@@ -720,6 +762,7 @@ async def train(
             num_generations=num_generations,
             max_completion_length=max_completion_length,
             beta=beta,  # KL anchor to the base model — prevents overfit-drift
+            gradient_checkpointing=is_qlora,  # save memory for the 4-bit 7B path
             logging_steps=5,
             save_strategy="epoch",
             bf16=use_bf16,
@@ -766,6 +809,11 @@ async def train(
         log.info("Merging LoRA weights...")
         merged_model = trainer.model.merge_and_unload()
         merged_model.save_pretrained(save_dir)
+    elif is_qlora:
+        # can't merge into a 4-bit base on a small GPU — save just the adapter;
+        # eval reloads the 4-bit base + this adapter.
+        log.info("Saving QLoRA adapter...")
+        trainer.model.save_pretrained(save_dir)
     else:
         log.info("Saving full model...")
         trainer.model.save_pretrained(save_dir)
@@ -839,16 +887,20 @@ async def train(
 @gpu_env.task(report=True)
 async def evaluate(
     model_name: str,
+    model_dir: flyte.io.Dir,
     finetuned_dir: flyte.io.Dir,
     data_dir: flyte.io.Dir,
     num_examples: int = 30,
     use_chat_template: bool = True,
+    method: str = "lora",
 ) -> str:
     """Compare base vs GRPO-trained model on code generation."""
     import torch
     from datasets import load_from_disk
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from union import sandbox as sb
+
+    is_qlora = method == "qlora"
 
     log.info("Starting evaluation...")
     await flyte.report.replace.aio(
@@ -865,7 +917,8 @@ async def evaluate(
     setup_codes = eval_ds["setup_code"]
     names = eval_ds["name"]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
+    model_path = await model_dir.download()
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -873,6 +926,14 @@ async def evaluate(
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     use_fp16 = torch.cuda.is_available() and not use_bf16
     dtype = torch.bfloat16 if use_bf16 else torch.float16 if use_fp16 else torch.float32
+
+    quant_config = None
+    if is_qlora:
+        # a 7B base won't fit in fp16 on a T4 for generation — load it 4-bit too
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=dtype,
+        )
 
     def generate_code(model, prompts, max_new_tokens=192):
         results = []
@@ -896,7 +957,9 @@ async def evaluate(
         do_flush=True,
     )
 
-    base_model = AutoModelForCausalLM.from_pretrained(model_name, token=HF_TOKEN, dtype=dtype, device_map="auto")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_path, dtype=dtype, device_map="auto", quantization_config=quant_config,
+    )
     base_results = generate_code(base_model, prompts)
     del base_model
     if torch.cuda.is_available():
@@ -910,7 +973,15 @@ async def evaluate(
     )
 
     ft_path = await finetuned_dir.download()
-    ft_model = AutoModelForCausalLM.from_pretrained(ft_path, dtype=dtype, device_map="auto")
+    if is_qlora:
+        # qlora saved just the adapter — reload the 4-bit base and attach it
+        from peft import PeftModel
+        ft_base = AutoModelForCausalLM.from_pretrained(
+            model_path, dtype=dtype, device_map="auto", quantization_config=quant_config,
+        )
+        ft_model = PeftModel.from_pretrained(ft_base, ft_path)
+    else:
+        ft_model = AutoModelForCausalLM.from_pretrained(ft_path, dtype=dtype, device_map="auto")
     ft_results = generate_code(ft_model, prompts)
     del ft_model
     if torch.cuda.is_available():
@@ -1085,6 +1156,7 @@ async def pipeline(
     )
 
     data_dir = await prepare_data(max_candidate_samples, max_eval_samples)
+    model_dir = await download_model(model_name)  # cached base-model weights
 
     # The learnability filter concentrates training on problems the base solves
     # *sometimes*. With use_filter=False we train on the whole candidate pool —
@@ -1119,7 +1191,7 @@ async def pipeline(
     )
 
     finetuned_dir = await train(
-        model_name, train_dir, method, epochs, lr, batch_size,
+        model_name, model_dir, train_dir, method, epochs, lr, batch_size,
         num_generations, max_completion_length, lora_r, lora_alpha, beta,
         use_chat_template,
     )
@@ -1134,7 +1206,7 @@ async def pipeline(
         do_flush=True,
     )
 
-    result = await evaluate(model_name, finetuned_dir, train_dir, num_eval_examples, use_chat_template)
+    result = await evaluate(model_name, model_dir, finetuned_dir, train_dir, num_eval_examples, use_chat_template, method)
     metrics = json.loads(result)
 
     improvement = metrics["improvement"]

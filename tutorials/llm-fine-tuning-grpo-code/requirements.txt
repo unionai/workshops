@@ -5,6 +5,8 @@ trl>=0.15.0
 peft>=0.13.0
 datasets>=3.0.0
 accelerate>=0.34.0
+huggingface_hub>=0.24.0
+bitsandbytes>=0.43.0
 unionai-sandbox[flyte]>=0.0.1b15
 kubernetes
 python-dotenv
