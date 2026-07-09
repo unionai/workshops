@@ -1,19 +1,21 @@
 """
-GRPO Fine-Tuning — Teach a model to REASON (the Countdown game).
+GRPO Fine-Tuning — Teach a model to solve math puzzles (the Countdown game).
 
-This is the "R1-Zero" demo: take a small model that has NO reasoning ability
-(Qwen2.5 has no thinking mode — that's Qwen3/QwQ) and use GRPO to make it reason,
-without ever showing it a single reasoning example. The only signal is a reward
-for reaching the right answer. The model discovers, on its own, that thinking
-step-by-step before answering earns more reward — so its responses get longer
-and more structured as training proceeds. That emergent "response length grows"
-curve is the famous DeepSeek-R1 / TinyZero result, reproduced on a tiny model.
+Give a small model number puzzles it often gets wrong, reward it only when its
+answer is correct, and GRPO makes it solve more of them — a clean, verifiable
+"RL improves task performance" demo, measured by solve rate before vs after.
 
 The task: **Countdown**. Given a few numbers and a target, write an arithmetic
 expression using each number exactly once (with + - * /) that equals the target.
 It's verifiable (just evaluate the expression — no sandbox, an AST evaluator
 handles it safely), homogeneous (one skill, endless instances → it transfers),
-and hard enough that reasoning genuinely helps.
+and generated so a solution is always guaranteed to exist.
+
+Note on "reasoning": with the same setup plus a `<think>...</think>` format and a
+*larger* model, this is also the DeepSeek-R1-Zero / TinyZero recipe where visible
+chain-of-thought reasoning emerges. On a small model (0.5B-1.5B) that emergence
+is weak — the model tends to find a terse answer rather than reason out loud — so
+this tutorial keeps the honest, deliverable framing: **GRPO improves solve rate.**
 
 Usage:
     # Workshop run (single T4, ~20-30 min)
@@ -47,10 +49,9 @@ log.setLevel(logging.INFO)
 SYSTEM_PROMPT = (
     "You are solving a Countdown puzzle. You are given a list of numbers and a "
     "target. Using each number exactly once and the operators + - * / (and "
-    "parentheses), write an arithmetic expression that equals the target.\n"
-    "First reason step by step inside <think> </think>, then give ONLY the final "
-    "expression (no words) inside <answer> </answer>. "
-    "Example: <think>3 and 4 make 12, plus 2 is 14</think><answer>3 * 4 + 2</answer>"
+    "parentheses), write an arithmetic expression that equals the target. "
+    "Give ONLY the expression, nothing else. "
+    "Example: for numbers [3, 4, 2] and target 14, answer: 3 * 4 + 2"
 )
 
 
@@ -223,7 +224,7 @@ async def train(
     from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
     from trl import GRPOConfig, GRPOTrainer
 
-    log.info(f"GRPO Reasoning Training: model={model_name}, method={method}")
+    log.info(f"GRPO Puzzle Training: model={model_name}, method={method}")
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
@@ -237,7 +238,7 @@ async def train(
         wrap_report(
             f"<h2>Loading Model...</h2><h3>{model_name}</h3>"
             f'<div class="card"><p><b>Method:</b> {method_badge}</p>'
-            f"<p>Teaching a non-reasoning model to reason via GRPO...</p></div>"
+            f"<p>Teaching a small model to solve Countdown puzzles...</p></div>"
         ),
         do_flush=True,
     )
@@ -290,7 +291,7 @@ async def train(
         acc = stats["correct"] / max(stats["total"], 1) * 100
         mean_len = stats["len_sum"] / max(stats["total"], 1)
         stats_html = f"""
-        <h2>GRPO Reasoning Training in Progress...</h2><h3>{model_name}</h3>
+        <h2>GRPO Puzzle Training in Progress...</h2><h3>{model_name}</h3>
         <div class="stat-grid">
           <div class="stat"><div class="value">GRPO + {method.upper()}</div><div class="label">Method</div></div>
           <div class="stat"><div class="value">{len(train_ds):,}</div><div class="label">Train Problems</div></div>
@@ -321,7 +322,7 @@ async def train(
             # THE R1 CHART: response length growing as the model learns to reason
             charts += '<div class="chart-container">' + make_line_chart(
                 data=reward_log, x_key="batch", y_keys=["mean_len"],
-                title="Response Length — the model teaching itself to reason",
+                title="Response Length (tokens)",
                 x_label="Reward Batch", y_label="Mean Completion Tokens",
                 colors=["#ef476f"],
             ) + '</div>'
@@ -373,13 +374,14 @@ async def train(
         output_dir=output_dir, num_train_epochs=epochs,
         per_device_train_batch_size=batch_size, learning_rate=lr,
         num_generations=num_generations, max_completion_length=max_completion_length,
-        beta=beta, reward_weights=[1.0, 0.2],
+        beta=beta,
+        gradient_checkpointing=True,  # trade compute for memory — lets bigger models fit
         logging_steps=5, save_strategy="epoch",
         bf16=use_bf16, fp16=use_fp16, report_to="none",
     )
     trainer = GRPOTrainer(
         model=model, args=grpo_config, train_dataset=train_ds,
-        reward_funcs=[accuracy_reward, format_reward],
+        reward_funcs=accuracy_reward,  # reward = correct equation (solve rate)
         peft_config=peft_config, processing_class=tokenizer,
         callbacks=[MetricsCallback()],
     )
@@ -415,7 +417,7 @@ async def train(
         ) + '</div>'
     await flyte.report.replace.aio(
         wrap_report(
-            f"<h2>GRPO Reasoning Training Complete</h2><h3>{model_name}</h3>"
+            f"<h2>GRPO Puzzle Training Complete</h2><h3>{model_name}</h3>"
             f'<div class="stat-grid">'
             f'<div class="stat"><div class="value">{final_acc:.1f}%</div><div class="label">Train Solve Rate</div></div>'
             f'<div class="stat"><div class="value">{stats["len_sum"] / max(stats["total"], 1):.0f}</div><div class="label">Mean Answer Tokens</div></div>'
@@ -516,7 +518,7 @@ async def evaluate(
     rate_chart = make_bar_chart(
         labels=["Solve Rate", "Mean Response Tokens"],
         series={"Base": [base_rate, base_ml], "GRPO": [ft_rate, ft_ml]},
-        title="Base vs GRPO — Countdown Reasoning",
+        title="Base vs GRPO — Countdown Puzzle",
         colors=["#adb5bd", "#0f3460"],
     )
 
@@ -555,12 +557,12 @@ async def evaluate(
 
     await flyte.report.replace.aio(
         wrap_report(
-            f"<h2>Evaluation Results — Countdown Reasoning</h2>"
+            f"<h2>Evaluation Results — Countdown Puzzle</h2>"
             f'<div class="stat-grid">'
             f'<div class="stat"><div class="value">{base_rate:.1f}%</div><div class="label">Base Solve Rate</div></div>'
             f'<div class="stat"><div class="value">{ft_rate:.1f}%</div><div class="label">GRPO Solve Rate</div></div>'
             f'<div class="stat"><div class="value"><span class="badge {imp_badge}">{improvement:+.1f}pp</span></div><div class="label">Improvement</div></div>'
-            f'<div class="stat"><div class="value">{base_ml:.0f} &rarr; {ft_ml:.0f}</div><div class="label">Response Tokens (reasoning!)</div></div>'
+            f'<div class="stat"><div class="value">{base_ml:.0f} &rarr; {ft_ml:.0f}</div><div class="label">Mean Response Tokens</div></div>'
             f'</div>'
             f'<div class="chart-container">{rate_chart}</div>'
             f"<h3>Reasoning traces (base vs GRPO)</h3>{examples_html}"
@@ -614,7 +616,7 @@ async def pipeline(
     steps = ["Prepare Data", "GRPO Train", "Evaluate"]
 
     await flyte.report.replace.aio(
-        wrap_report(f"<h2>GRPO Reasoning Pipeline</h2><h3>{model_name}</h3>"
+        wrap_report(f"<h2>GRPO Puzzle Pipeline</h2><h3>{model_name}</h3>"
                     f"{pipeline_step_indicator(0, steps)}"
                     f'<div class="card"><p>Generating Countdown problems...</p></div>'),
         do_flush=True,
@@ -622,7 +624,7 @@ async def pipeline(
     data_dir = await prepare_data(n_numbers, max_num, max_train_samples, max_eval_samples)
 
     await flyte.report.replace.aio(
-        wrap_report(f"<h2>GRPO Reasoning Pipeline</h2><h3>{model_name}</h3>"
+        wrap_report(f"<h2>GRPO Puzzle Pipeline</h2><h3>{model_name}</h3>"
                     f"{pipeline_step_indicator(1, steps)}"
                     f'<div class="card"><p>GRPO training — watch reasoning emerge...</p></div>'),
         do_flush=True,
@@ -633,7 +635,7 @@ async def pipeline(
     )
 
     await flyte.report.replace.aio(
-        wrap_report(f"<h2>GRPO Reasoning Pipeline</h2><h3>{model_name}</h3>"
+        wrap_report(f"<h2>GRPO Puzzle Pipeline</h2><h3>{model_name}</h3>"
                     f"{pipeline_step_indicator(2, steps)}"
                     f'<div class="card"><p>Evaluating base vs GRPO...</p></div>'),
         do_flush=True,
@@ -645,7 +647,7 @@ async def pipeline(
     imp_badge = "badge-success" if improvement > 0 else "badge-danger" if improvement < 0 else "badge-info"
     await flyte.report.replace.aio(
         wrap_report(
-            f"<h2>GRPO Reasoning Pipeline Complete</h2><h3>{model_name}</h3>"
+            f"<h2>GRPO Puzzle Pipeline Complete</h2><h3>{model_name}</h3>"
             f"{pipeline_step_indicator(3, steps)}"
             f'<div class="stat-grid">'
             f'<div class="stat"><div class="value">{metrics["base_solve_rate"]}%</div><div class="label">Base Solve Rate</div></div>'
