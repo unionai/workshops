@@ -45,13 +45,17 @@ gradio_env = flyte.app.AppEnvironment(
 )
 
 
-# Numbers, Target — a few solvable examples
+# Numbers, Target. Curated against the deployed model: the first five it solves,
+# the last two it misses (a human can see the answer exists, e.g. 3*9-7=20 and
+# 5*2*2=20), which honestly shows both what it learned and where it still slips.
 EXAMPLES = [
-    ["3, 7, 9", 20],
-    ["2, 5, 8", 42],
-    ["4, 4, 6", 10],
-    ["1, 3, 6, 8", 30],
-    ["5, 5, 2", 15],
+    ["2, 3, 4", 24],   # solves: 2 * 3 * 4
+    ["1, 2, 3", 6],    # solves: 1 + 2 + 3
+    ["6, 3, 2", 36],   # solves: 6 * 3 * 2
+    ["9, 9, 2", 20],   # solves: 9 + 9 + 2
+    ["5, 2, 3", 10],   # solves: 5 + 2 + 3
+    ["3, 7, 9", 20],   # misses: needs 3 * 9 - 7
+    ["5, 2, 2", 20],   # misses: needs 5 * 2 * 2
 ]
 
 

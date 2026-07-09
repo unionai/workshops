@@ -172,6 +172,27 @@ No solution was ever shown. The model discovers what works from its own tries.
 
 GRPO stands for Group Relative Policy Optimization. Advantages are computed *within* each group of attempts, which is why the group needs a mix of right and wrong answers to produce a learning signal. That is also why the task has to sit in the model's "learnable zone," meaning it is solvable often enough that some attempts succeed.
 
+## GRPO vs PPO vs DPO: Why GRPO Here
+
+GRPO is one of a few ways to train a model from feedback instead of from labeled answers. The three you will hear about most are PPO, DPO, and GRPO. They differ mostly in what extra pieces they need and whether the model gets to explore.
+
+| | **PPO** | **DPO** | **GRPO** (this tutorial) |
+|---|---|---|---|
+| How it learns | Model generates a response, a reward model scores it, a separate value model estimates a baseline, policy is nudged toward higher reward | No generation. Directly optimizes the policy on pairs of `(preferred answer, rejected answer)` | Model generates several responses per prompt, each is scored, and the group's average is the baseline for which to reinforce |
+| Extra models needed | A reward model **and** a value/critic model, plus a reference model | Just a reference model | Just a reference model (the reward is a program, no critic) |
+| Data it needs | Prompts plus a trained reward model | A dataset of preference pairs (chosen vs rejected) | Prompts plus a way to score an answer (a verifier or reward model) |
+| Does the model explore? | Yes (on-policy generation) | No (learns from a fixed set of pairs) | Yes (on-policy generation) |
+| Cost and complexity | Highest (juggles up to four models) | Lowest (no generation loop, no reward or value model) | Medium (generation loop, but no critic) |
+| Best for | Large-scale RLHF with a learned reward model | Cheap alignment when you already have preference data | Tasks where an answer can be **checked** (math, code, puzzles) |
+
+The short version:
+
+- **PPO** is the classic RLHF method (it trained the first ChatGPT). It is powerful but heavy: it needs a learned reward model to score responses and a separate value model to estimate a baseline, so you are training several models at once.
+- **DPO** skips reinforcement learning almost entirely. You hand it pairs of answers labeled better and worse, and it directly tunes the model to prefer the better one. It is simple and stable, but it only learns from the pairs you give it. The model never explores or discovers new solutions, and you need preference data.
+- **GRPO** keeps PPO's idea of the model exploring by generating its own attempts, but throws out the expensive value model. Instead of a learned baseline, it compares each attempt to the average of the group. That makes it much lighter than PPO, and it pairs perfectly with a **verifiable reward**, where a short program (not a trained reward model, not human labels) says whether an answer is correct.
+
+For Countdown that last point is the whole reason to pick GRPO. We can *check* an answer instantly with a few lines of code, so we do not need human preference pairs (DPO) or a trained reward model plus a critic (PPO). We just let the model try, check each try, and reinforce what worked.
+
 ## Designing the Reward
 
 In GRPO, the reward function *is* the task definition. The model has no other notion of "good." It optimizes exactly the number you return, and it will find the laziest path to a high number whether or not that path is what you intended. So most of the work is reward design, not RL. Ours is deliberately simple:
@@ -266,6 +287,19 @@ The first two axes are not fixed. A bigger model moves them:
 This is why a task that looks hopeless on a tiny model can work well with a larger base and more data, and why production RLVR systems run on large, capable models. A verifiable task with weak learnable-zone density at 0.5B often becomes an easy win at 7B or larger, sometimes with no other change than the base model. GRPO is the method; the base model is the fuel. Small models are used here for cost and speed, not because they are optimal.
 
 **The one-line takeaway:** match the task to what RL can do (sharpen a repeatable, verifiable skill that transfers), pick a base model capable enough to have a learnable zone, give it an unhackable reward, and read the actual outputs before you trust the number.
+
+## Expanding the Pipeline
+
+This tutorial runs the whole loop (generate, score, update) in a single GPU task on purpose, so it stays easy to follow. In a real system there are two natural ways to scale it out, and Flyte is a good fit for both.
+
+**Fan out the rollouts (scale one training).** In GRPO the wall-clock is dominated by *generation*, the model producing its attempts, not by the gradient step. Generation is also embarrassingly parallel, so it is the thing to spread out. The catch is that every step's attempts must come from the current policy, so whatever generates them needs the latest weights. Two levers here:
+
+- Swap the generation backend for **vLLM** (continuous batching, paged attention), which speeds up rollouts on a single GPU with no distribution at all.
+- For larger scale, stand up a **warm pool of inference workers** with a `flyte.ReusePolicy` so the model stays loaded across steps, have each worker generate a shard of the rollouts, and sync the policy to them each step. With **LoRA** the sync is cheap because the adapter delta is tiny (tens of MB), not the whole model. Flyte keeps the pool warm and orchestrates it; an RL engine (TRL's vLLM mode or veRL) owns the tight generate, sync, update loop.
+
+**Fan out independent runs (sweep configs).** Because each training run is self-contained, you can launch many at once with `flyte.map` or `asyncio.gather` to sweep a hyperparameter (`beta`, `n_numbers`, seed) and compare results, or keep the best model. This is parallel experiments rather than distributed training of one model, so it costs N times the GPUs but finishes in roughly the wall-clock of one run.
+
+What Flyte gives you is the substrate: warm worker pools, fan-out, caching, and the secure verifier. What it does not replace is the RL-engine internals such as per-step weight sync and off-policy correction. At small scale (a 0.5B on one T4) the single-GPU loop here is simplest and fast enough; the pool approach earns its complexity once the model is larger and generation is expensive.
 
 ## Scaling Up to Reasoning
 
