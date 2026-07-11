@@ -26,20 +26,20 @@ The key insight: there's no single "correct" answer to learn. Any code that pass
 
 ## What's in the Pipeline
 
-The workflow runs four steps:
+The workflow runs three steps by default, with an optional fourth (the learnability filter) you can switch on:
 
 ```
 ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐   ┌────────────┐
-│ Prepare Data │──▶│    Filter    │──▶│   GRPO Training   │──▶│  Evaluate  │
-│  (CPU task)  │   │  (GPU task)  │   │   (GPU task)      │   │ (GPU task) │
+│ Prepare Data │──▶│   Filter?    │──▶│   GRPO Training   │──▶│  Evaluate  │
+│  (CPU task)  │   │  (optional)  │   │   (GPU task)      │   │ (GPU task) │
 └──────────────┘   └──────────────┘   └──────────────────┘   └────────────┘
- MBPP candidate     Keep only the      GRPO with sandboxed    Base vs fine-tuned
- pool from HF       learnable          code execution         sandboxed comparison
-                    problems (cached)  (LoRA or full)
+ MBPP candidate     Opt-in via         GRPO with sandboxed    Base vs fine-tuned
+ pool from HF       --use_filter       code execution         sandboxed comparison
+                    (off by default)   (LoRA or full)
 ```
 
 1. **Prepare data** — Downloads the MBPP dataset from HuggingFace and builds a *candidate pool* of prompts with function signatures extracted from reference solutions.
-2. **Filter for learnability** — Samples the base model over the candidate pool and keeps only the problems it solves *sometimes but not always* — the zone where GRPO's within-group advantage is non-zero. [Why this matters ↓](#the-learnability-filter). This task is cached, so it runs once and later runs reuse the filtered set.
+2. **Filter for learnability** *(optional, off by default)* — Samples the base model over the candidate pool and keeps only the problems it solves *sometimes but not always* — the zone where GRPO's within-group advantage is non-zero. [Why this matters ↓](#the-learnability-filter). Off by default: the pipeline trains on the whole candidate pool. Turn it on with `--use_filter`; it's cached, so it runs once and later runs reuse the filtered set.
 3. **Train with GRPO** — Fine-tunes a model (LoRA by default, or full with `--method full`). For each prompt, generates multiple completions, executes them in a [sandbox](#sandboxed-code-execution), and rewards code that passes *all* tests.
 4. **Evaluate** — Runs held-out problems through both the base and fine-tuned model, comparing pass rates side by side.
 
@@ -83,7 +83,7 @@ That's equivalent to the defaults shown explicitly:
 
 ```bash
 flyte run workflow.py pipeline \
-  --model_name "Qwen/Qwen2.5-0.5B" \
+  --model_name "Qwen/Qwen2.5-Coder-0.5B" \
   --method lora \
   --epochs 1 \
   --lr 5e-5 \
@@ -92,20 +92,24 @@ flyte run workflow.py pipeline \
   --max_completion_length 128 \
   --max_candidate_samples 300 \
   --max_train_samples 100 \
-  --filter_samples 4 \
   --max_eval_samples 50 \
   --num_eval_examples 20
 ```
 
-Qwen2.5-0.5B is the sweet spot: small enough to train fast on a T4, strong enough
-to write valid Python (SmolLM2-135M can't). The T4 (Turing) has no bf16 support, so
-the workflow automatically trains in **fp16** rather than falling back to slow fp32.
+The default base is **Qwen2.5-Coder-0.5B** — the code-pretrained sibling of the
+general Qwen2.5-0.5B. The idea is that a base already trained on code should solve a
+larger fraction of raw MBPP, giving GRPO reward variance across the pool without
+curation — which is why the [learnability filter](#the-learnability-filter) is now
+**off by default**. Whether a 0.5B base is strong enough for that to produce real
+held-out gains is exactly what a run tells you; see [What to Expect ↓](#what-to-expect-on-a-05b--and-why-labs-get-real-coding-results)
+before reading the numbers. The T4 (Turing) has no bf16 support, so the workflow
+automatically trains in **fp16** rather than falling back to slow fp32.
 
-> **First run pays for the filter.** The learnability filter (step 2) samples the
-> base model over the candidate pool, which takes a few minutes. It's cached on its
-> inputs, so the *first* run does the work and every later run with the same model
-> and pool reuses the filtered dataset instantly — spend a run before the workshop
-> to warm the cache, then the live run goes straight to training.
+> **Filter is opt-in now.** By default the pipeline trains on the full candidate
+> pool (no filter pass). Add `--use_filter` to concentrate training on the problems
+> the base solves *sometimes* — that pass samples the base model over the pool and
+> takes a few minutes, but it's cached on its inputs, so the *first* run does the
+> work and later runs with the same model and pool reuse the filtered set instantly.
 
 > **Note:** `--batch_size` must be divisible by `--num_generations` (a GRPO
 > requirement — each optimizer step processes whole generation groups). The
@@ -117,7 +121,6 @@ the workflow automatically trains in **fp16** rather than falling back to slow f
 flyte run workflow.py pipeline \
   --max_candidate_samples 20 \
   --max_train_samples 6 \
-  --filter_samples 3 \
   --epochs 1 \
   --num_generations 2 \
   --batch_size 2 \
@@ -130,11 +133,13 @@ built. Good for verifying the pipeline works end to end before a longer run.
 
 ### Longer training run (bigger GPU)
 
-On an L40s / A100 you can push harder for stronger results:
+On an L40s / A100 you can push harder for stronger results. This example also turns
+the learnability filter back on (`--use_filter`) to concentrate the larger pool on
+problems the base solves *sometimes*:
 
 ```bash
 flyte run workflow.py pipeline \
-  --model_name "Qwen/Qwen2.5-0.5B" \
+  --model_name "Qwen/Qwen2.5-Coder-0.5B" \
   --method lora \
   --epochs 5 \
   --lr 5e-5 \
@@ -143,6 +148,7 @@ flyte run workflow.py pipeline \
   --max_completion_length 192 \
   --max_candidate_samples 800 \
   --max_train_samples 400 \
+  --use_filter \
   --filter_samples 6 \
   --max_eval_samples 50 \
   --num_eval_examples 50
@@ -151,7 +157,7 @@ flyte run workflow.py pipeline \
 ### Full fine-tuning (no LoRA)
 
 ```bash
-flyte run workflow.py pipeline --method full --model_name "Qwen/Qwen2.5-0.5B"
+flyte run workflow.py pipeline --method full --model_name "Qwen/Qwen2.5-Coder-0.5B"
 ```
 
 By default the pipeline uses LoRA adapters (`--method lora`), which freeze most weights and train small low-rank matrices. Use `--method full` to update all parameters — more expressive but uses more memory and is slower.
@@ -159,7 +165,7 @@ By default the pipeline uses LoRA adapters (`--method lora`), which freeze most 
 ### Bigger model
 
 ```bash
-flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-1.5B"
+flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-Coder-1.5B"
 ```
 
 ### Local execution (no cluster)
@@ -168,23 +174,24 @@ Add `--local` to run everything on your machine. Useful for debugging but slow w
 
 ```bash
 flyte run --local --tui workflow.py pipeline \
-  --max_candidate_samples 15 --max_train_samples 8 --filter_samples 2 --epochs 1
+  --max_candidate_samples 15 --max_train_samples 8 --epochs 1
 ```
 
 ## Parameters
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model_name` | `Qwen/Qwen2.5-0.5B` | HuggingFace model to fine-tune |
+| `--model_name` | `Qwen/Qwen2.5-Coder-0.5B` | HuggingFace model to fine-tune |
 | `--method` | `lora` | `lora` for LoRA adapters, `full` for full fine-tuning |
 | `--epochs` | `1` | Training epochs |
 | `--lr` | `5e-5` | Learning rate |
 | `--batch_size` | `6` | Completions per training step (must be divisible by `--num_generations`) |
 | `--num_generations` | `6` | Completions generated per prompt (the "Group" in GRPO) |
 | `--max_completion_length` | `128` | Max tokens per generated completion |
-| `--max_candidate_samples` | `300` | Size of the candidate pool the filter draws from |
-| `--max_train_samples` | `100` | Target cap on *learnable* problems to keep (for Qwen-0.5B only ~25% of the pool qualifies, so the pool size is usually the real driver) |
-| `--filter_samples` | `4` | Base-model samples per candidate; keep if `1 ≤ all-pass < filter_samples` |
+| `--use_filter` | `False` | Opt in to the [learnability filter](#the-learnability-filter). Off by default — training uses the whole candidate pool |
+| `--max_candidate_samples` | `300` | Size of the candidate pool (also what the filter draws from when `--use_filter` is set) |
+| `--max_train_samples` | `100` | Cap on training problems kept. With `--use_filter` this caps the *learnable* subset; without it, the training pool |
+| `--filter_samples` | `4` | *(only with `--use_filter`)* Base-model samples per candidate; keep if `1 ≤ all-pass < filter_samples` |
 | `--max_eval_samples` | `50` | Number of held-out eval problems |
 | `--num_eval_examples` | `20` | Problems used in the before/after comparison |
 | `--beta` | `0.04` | KL penalty vs. the base model — the main overfit/drift guard (see below) |
@@ -213,7 +220,7 @@ This is the "Group" in **G**RPO. Advantages are computed *within* the group of c
 
 ### `--filter_samples` — how hard the difficulty filter looks
 
-How many times the base model attempts each candidate during the [learnability filter](#the-learnability-filter). A problem is kept only if it's solved `1 ≤ x < filter_samples` times.
+*(Only relevant with `--use_filter`.)* How many times the base model attempts each candidate during the [learnability filter](#the-learnability-filter). A problem is kept only if it's solved `1 ≤ x < filter_samples` times.
 
 - **Higher** (6–8): a sharper "is this in the learnable zone?" estimate, and a wider learnable band — at linear cost to the (cached) filter pass.
 - **Lower** (3): cheaper, coarser. Below 3 the "sometimes" signal is too noisy to be meaningful.
@@ -253,25 +260,39 @@ Reference:    def max_of_two(a, b): return a if a > b else b
     assert max_of_two(4, 4) == 4
 ```
 
-Problems range from simple (`is_even`, `reverse_string`) to moderate (`fibonacci`, `remove_duplicates`) to harder (`heap operations`, `regex matching`). `--max_candidate_samples` sets the size of the pool the [learnability filter](#the-learnability-filter) draws from, `--max_train_samples` the number of learnable problems kept for training, and `--max_eval_samples` the held-out eval set.
+Problems range from simple (`is_even`, `reverse_string`) to moderate (`fibonacci`, `remove_duplicates`) to harder (`heap operations`, `regex matching`). `--max_candidate_samples` sets the size of the candidate pool, `--max_train_samples` caps the problems kept for training (the *learnable* subset when the [learnability filter](#the-learnability-filter) is enabled, otherwise the pool itself), and `--max_eval_samples` the held-out eval set.
 
 ## The Learnability Filter
+
+> **Opt-in (`--use_filter`), off by default.** With a binary reward the pipeline is
+> safe to run *without* it — impossible problems simply contribute no gradient (see
+> [The Reward Function ↓](#the-reward-function)) — so the default trains on the whole
+> candidate pool. This section explains what the filter buys you when you turn it on,
+> and why the default base is code-pretrained.
 
 GRPO computes advantages **within a group** of completions for the same prompt, so
 it only learns where that group has *reward variance*. Two kinds of problems teach
 it nothing:
 
-- **Impossible** — the base model never solves it, so every completion scores 0. Worse, these are exactly where reward hacking takes over: a constant like `return True` or `return -1` grabs a few asserts and, in an otherwise all-zero group, becomes the *highest-advantage* completion. GRPO then reinforces degenerate constants, and the fine-tuned model gets **worse**.
+- **Impossible** — the base model never solves it, so every completion scores 0. With a binary reward these just contribute **no gradient** (a flat all-zero group), so they're harmless — they only *waste compute*. (Partial credit is what makes them dangerous, and this tutorial doesn't use it — see [The Reward Function ↓](#the-reward-function).)
 - **Trivial** — the base model always solves it, so every completion scores 1 and the advantage is zero.
 
-A raw MBPP pool for a 0.5B model is mostly impossible problems, so unfiltered
-training collapses onto constants. The `filter_learnable` task fixes this at the
-data level: it samples the base model `filter_samples` times per candidate and keeps
-only the problems solved *sometimes but not always* (`1 ≤ all-pass count < filter_samples`)
-— the learnable middle where every group has a real gradient. The task is cached on
-its inputs, so the filtering cost is paid once.
+The more code a base model has seen, the more of a raw MBPP pool it solves
+*sometimes* — so the fraction of learnable groups is really a property of the base.
+That's the bet behind defaulting to the code-pretrained **Qwen2.5-Coder-0.5B**: a
+base with more usable variance across the pool needs less curation to find a
+gradient. How much variance a 0.5B actually has is empirical — watch the reward and
+pass-rate charts to see whether the groups are giving signal.
 
-This is the RLVR lesson worth demonstrating: **RL can only sharpen what the model can already do occasionally.** Curating for that zone is half the job — often more impactful than any hyperparameter.
+When you *do* enable it (`--use_filter`), the `filter_learnable` task concentrates
+compute where it counts: it samples the base model `filter_samples` times per
+candidate and keeps only the problems solved *sometimes but not always*
+(`1 ≤ all-pass count < filter_samples`) — the learnable middle where every group has
+a real gradient. It skips the wasted-compute problems rather than making training
+*safe* (the binary reward already does that). The task is cached on its inputs, so
+the filtering cost is paid once.
+
+This is the RLVR lesson worth demonstrating: **RL can only sharpen what the model can already do occasionally.** Whether you get that variance from a stronger base or by curating for it, it's the thing that makes GRPO work — often more impactful than any hyperparameter.
 
 ## The Reward Function
 
@@ -285,10 +306,16 @@ The reward is **binary** — all or nothing:
 Binary reward is deliberate. Partial credit (`passed/total`) is trivially hackable:
 a constant that returns the right *type* passes a fraction of the asserts, and on an
 impossible problem that fraction beats the genuine (failing) attempts — so GRPO
-learns to emit `return True`. All-or-nothing removes that gradient entirely. It only
-works because the [learnability filter](#the-learnability-filter) guarantees each
-retained problem still has variance in its group (some completions fully pass, some
-don't), so there's always a real signal to learn from.
+learns to emit `return True`. All-or-nothing removes that gradient entirely: an
+impossible problem produces an all-zero group with **no advantage and no gradient**,
+so it's inert rather than hackable.
+
+This is what makes it safe to run *without* the [learnability filter](#the-learnability-filter):
+impossible problems don't corrupt training, they just don't contribute. The learnable
+groups — problems where some completions fully pass and some don't — are where the
+signal comes from, and a code-pretrained base is meant to supply more of them. The
+filter is then an *efficiency* lever (spend compute only on those groups), not a
+correctness requirement.
 
 ## How to Think About Rewards
 
@@ -296,7 +323,7 @@ The reward function *is* the task definition. GRPO doesn't know what "good code"
 
 **1. The reward is a proxy — the model optimizes the proxy, literally.** This is the central hazard, usually called *reward hacking*. If a partially-correct constant scores 0.33 and the honest attempts score 0.0, the model learns to emit the constant. The fix isn't a better optimizer; it's a reward with no cheap exploit. Ask of any reward: *"what's the laziest output that scores well here?"* — and if that output isn't what you want, the reward is wrong.
 
-**2. Sparse vs. dense is a real trade-off.** A **binary** reward (all-or-nothing) is unhackable but *sparse* — on hard problems every attempt scores 0, so there's no gradient. A **dense** reward (partial credit) gives signal on near-misses but opens a hacking surface. This tutorial resolves the tension by moving the density into the **data** instead of the reward: the [learnability filter](#the-learnability-filter) guarantees each retained problem produces a mix of 0s and 1s, so a *binary* reward still yields a gradient. (If you genuinely need a dense reward, weight the parts so the cheap wins can't dominate — see the VeRPO reference below.)
+**2. Sparse vs. dense is a real trade-off.** A **binary** reward (all-or-nothing) is unhackable but *sparse* — on hard problems every attempt scores 0, so there's no gradient. A **dense** reward (partial credit) gives signal on near-misses but opens a hacking surface. This tutorial keeps the reward binary and gets its gradient from the **data**: the signal lives in problems the base solves *sometimes* (a mix of 0s and 1s in the group). A code-pretrained base supplies more of those; the optional [learnability filter](#the-learnability-filter) concentrates training on them. (If you genuinely need a dense reward, weight the parts so the cheap wins can't dominate — see the VeRPO reference below.)
 
 **3. Multi-part rewards encode multiple goals — weight them carefully.** The sibling [math tutorial](../llm-fine-tuning-grpo-math) uses `1.0 × correctness + 0.2 × format`: correctness is the goal, format is a gentle nudge to keep output parseable. Keep the "real" objective dominant, or the model will farm the cheap secondary reward (e.g. perfect formatting around wrong answers).
 
@@ -337,11 +364,11 @@ Be warned, and read this before you judge the numbers: on a **small model with ~
 | **Learnable zone** | tiny — a 0.5B solves almost nothing *sometimes* → dead groups | huge — a strong base solves lots *sometimes* → dense gradient everywhere |
 | **Dataset size** | ~100 MBPP problems | 10⁴–10⁶ problems (contests, repos, synthetic) |
 | **Transfer** | poor at N=100 (each problem an island) | emerges from *breadth* — at 100k problems, "write correct Python" becomes one broad, transferable skill |
-| **Reward harness** | binary tests + learnability filter | test suites + difficulty curricula + dedup + anti-hacking |
+| **Reward harness** | binary tests (+ optional learnability filter) | test suites + difficulty curricula + dedup + anti-hacking |
 
-Two things fail *simultaneously* in the 0.5B-on-100-problems toy setting: the **learnable zone** is nearly empty (the base rarely succeeds, so most groups give zero gradient), and **transfer** doesn't happen (100 diverse problems are 100 islands, not one skill). Both are fixed by scale — a stronger base fills in the learnable zone, and enough problems (10⁴+) turn "write correct Python" into a single broad skill with endless instances. Going 0.5B → 3B alone helps the first knob but not the second; you need **both** a bigger base and far more data.
+Two things tend to fail *simultaneously* in the 0.5B-on-~100-problems toy setting: the **learnable zone** can be nearly empty (if the base rarely succeeds, most groups give zero gradient), and **transfer** doesn't happen (100 diverse problems are 100 islands, not one skill). Both are ultimately fixed by scale — a stronger base fills in the learnable zone, and enough problems (10⁴+) turn "write correct Python" into a single broad skill with endless instances. Defaulting to the code-pretrained **Qwen2.5-Coder-0.5B** is a small nudge on the *first* knob — a code base should have more usable variance than a general one at the same size — but it does nothing for the second, and whether 0.5B is enough to move held-out numbers at all is exactly what a run has to show. Going 0.5B → bigger helps the first knob further; only far more data helps the second.
 
-So this tutorial is the right place to learn the *mechanics* (sandboxed verification, the learnability filter, binary reward, the training loop) — but to get genuinely *better code*, revisit it with a 7B+ base and thousands of problems on a bigger GPU. For a task engineered to give a clean win even in the toy regime (one skill, guaranteed-solvable, always-verifiable), and a full framework for scoring your own task, see the [Countdown tutorial's task-selection guide](../llm-fine-tuning-grpo-countdown#choosing-a-task--and-a-model--for-grpo).
+So this tutorial is the right place to learn the *mechanics* (sandboxed verification, binary reward, the optional learnability filter, the training loop) — but to get genuinely *better code*, revisit it with a 7B+ base and thousands of problems on a bigger GPU. For a task engineered to give a clean win even in the toy regime (one skill, guaranteed-solvable, always-verifiable), and a full framework for scoring your own task, see the [Countdown tutorial's task-selection guide](../llm-fine-tuning-grpo-countdown#choosing-a-task--and-a-model--for-grpo).
 
 ## Scaling This to Production
 
@@ -402,7 +429,7 @@ None of the design choices here are arbitrary — each maps to a published findi
 A few practical notes drawn from that work:
 
 - **Our filter is a cached, *offline* approximation of DAPO's *online* dynamic sampling.** DAPO re-filters every batch as the model improves (so problems that become trivial drop out mid-training); we measure difficulty once up front and cache it. Cheaper and workshop-friendly, but less adaptive.
-- **Filtering isn't free lunch.** It pays off when the data is genuinely too hard (raw MBPP for a 0.5B model). On data that's *already* in the learnable zone, difficulty-filtering can strip useful signal — so the sibling [math tutorial](../llm-fine-tuning-grpo-math) on GSM8K skips it.
+- **Filtering isn't free lunch** — which is why it's now off by default here. It pays off when the data is genuinely too hard (raw MBPP for a *general* small model). On data that's *already* mostly in the learnable zone — the bet behind the code-pretrained default base — difficulty-filtering can strip useful signal, so the sibling [math tutorial](../llm-fine-tuning-grpo-math) on GSM8K skips it too. Turn it back on (`--use_filter`) when a run shows most groups are dead (reward pinned near 0).
 - **Truncated completions are worth masking.** Verbose outputs cut off at `max_completion_length` become un-runnable; masking their reward (TRL's `mask_truncated_completions`, DAPO's "overlong filtering") avoids training on that garbage.
 - **The training curve can lie.** In every failed run here the *reward chart went up* — the reward-hacking and overfitting were only visible in the held-out eval and the actual generated code. Always read the completions, not just the loss/reward.
 

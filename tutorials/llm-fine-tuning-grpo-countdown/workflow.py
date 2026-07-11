@@ -375,6 +375,7 @@ async def train(
                 title="Solve Rate (Reward)", x_label="Reward Batch", y_label="Solved %",
                 colors=["#06d6a0", "#5a7db5"], y_max_cap=105.0,
                 y_display_names={"solve_rate": "Running Avg", "batch_rate": "Per Batch"},
+                faint_keys={"batch_rate"},
             ) + '</div>'
             # Track mean response length too. (With a <think> format + a bigger
             # model this is where you'd see chain-of-thought reasoning emerge and
@@ -488,6 +489,7 @@ async def train(
             title="Solve Rate (Reward)", x_label="Reward Batch", y_label="Solved %",
             colors=["#06d6a0", "#5a7db5"], y_max_cap=105.0,
             y_display_names={"solve_rate": "Running Avg", "batch_rate": "Per Batch"},
+            faint_keys={"batch_rate"},
         ) + '</div>'
         charts += '<div class="chart-container">' + make_line_chart(
             data=reward_log, x_key="batch", y_keys=["mean_len"],

@@ -30,7 +30,8 @@ It is an ideal task for reinforcement learning on a small model:
 
 ```bash
 cd tutorials/llm-fine-tuning-grpo-countdown
-uv venv .venv --python 3.11 && source .venv/bin/activate
+uv venv .venv --python 3.11
+source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
