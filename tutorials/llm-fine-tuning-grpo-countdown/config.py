@@ -11,7 +11,7 @@ gpu_env = flyte.TaskEnvironment(
     image=flyte.Image.from_debian_base(
         name="grpo-countdown",
     ).with_requirements("requirements.txt"),
-    resources=flyte.Resources(cpu=4, memory="32Gi", gpu="T4:1"),
+    resources=flyte.Resources(cpu=4, memory="32Gi", gpu=1),
     secrets=[
         flyte.Secret(key="HF_TOKEN", as_env_var="HF_TOKEN"),
     ],

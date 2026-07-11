@@ -43,8 +43,15 @@ def make_line_chart(
     y_max_cap: float | None = None,
     x_range_override: tuple[float, float] | None = None,
     y_display_names: dict[str, str] | None = None,
+    faint_keys: set[str] | None = None,
 ) -> str:
-    """Generate an SVG line chart from a list of dicts."""
+    """Generate an SVG line chart from a list of dicts.
+
+    Keys in ``faint_keys`` are drawn thin, semi-transparent, and without
+    markers, and are rendered underneath the other series so a noisy raw
+    series (e.g. per-batch) recedes behind its trend line.
+    """
+    faint_keys = faint_keys or set()
     default_colors = ["#5a7db5", "#0f3460", "#06d6a0", "#ffc107", "#6c757d"]
     colors = colors or default_colors
 
@@ -133,8 +140,12 @@ def make_line_chart(
             f'<text x="{ml + cw / 2}" y="{mt + ch / 2}" text-anchor="middle" '
             f'font-size="13" fill="#adb5bd" font-style="italic">Waiting for data...</text>'
         )
-    for si, key in enumerate(y_keys):
+    # Draw faint (de-emphasized) series first so prominent lines sit on top.
+    draw_order = sorted(range(len(y_keys)), key=lambda i: y_keys[i] not in faint_keys)
+    for si in draw_order:
+        key = y_keys[si]
         color = colors[si % len(colors)]
+        faint = key in faint_keys
         points = [(sx(d[x_key]), sy(d[key])) for d in data if key in d]
         if not points:
             continue
@@ -142,12 +153,17 @@ def make_line_chart(
             path_d = f"M {points[0][0]:.1f},{points[0][1]:.1f}"
             for px, py in points[1:]:
                 path_d += f" L {px:.1f},{py:.1f}"
-            dash = ' stroke-dasharray="6,3"' if si % 2 == 1 else ""
+            if faint:
+                style = 'stroke-width="1" opacity="0.28"'
+            else:
+                dash = ' stroke-dasharray="6,3"' if si % 2 == 1 else ""
+                style = f'stroke-width="2.5"{dash}'
             lines.append(
                 f'<path d="{path_d}" fill="none" stroke="{color}" '
-                f'stroke-width="2" stroke-linejoin="round"{dash}/>'
+                f'{style} stroke-linejoin="round"/>'
             )
-        if len(points) <= 30:
+        # Markers only on prominent series — they add noise to a faint one.
+        if not faint and len(points) <= 30:
             for px, py in points:
                 lines.append(
                     f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3" fill="{color}"/>'
@@ -177,9 +193,10 @@ def make_line_chart(
         for si, key in enumerate(y_keys):
             color = colors[si % len(colors)]
             ly = mt + 14 + si * 18
+            swatch_op = ' opacity="0.28"' if key in faint_keys else ""
             lines.append(
                 f'<rect x="{lx}" y="{ly - 6}" width="12" height="12" '
-                f'rx="2" fill="{color}"/>'
+                f'rx="2" fill="{color}"{swatch_op}/>'
             )
             label = names.get(key, key)
             lines.append(

@@ -450,6 +450,7 @@ async def train(
     lora_alpha: int = 32,
     beta: float = 0.04,
     use_chat_template: bool = True,
+    precision: str = "auto",
 ) -> flyte.io.Dir:
     """Fine-tune a model with GRPO — reward = do the tests pass?
 
@@ -504,14 +505,23 @@ async def train(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # T4 (Turing) has no bf16 — fall back to fp16, not fp32. fp32 would be ~2x
-    # the memory and much slower generation, which is the GRPO bottleneck.
-    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    use_fp16 = torch.cuda.is_available() and not use_bf16
+    # Precision selection. "auto": bf16 where supported, else fp16 (T4/Turing has
+    # no bf16), else fp32. Override with precision="fp32"/"bf16"/"fp16" — fp32 is
+    # the escape hatch when low-precision generation produces nan/inf logits and
+    # crashes GRPO sampling ("probability tensor contains inf/nan"), which we've
+    # seen on larger models (3B+) on new (Blackwell) GPUs even with eager
+    # attention. fp32 is ~2x memory and slower (generation is the GRPO bottleneck)
+    # but numerically bulletproof.
+    if precision == "auto":
+        use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+        use_fp16 = torch.cuda.is_available() and not use_bf16
+    else:
+        use_bf16 = precision == "bf16"
+        use_fp16 = precision == "fp16"
     train_dtype = (
         torch.bfloat16 if use_bf16 else torch.float16 if use_fp16 else torch.float32
     )
-    log.info(f"Training precision: {train_dtype} (qlora={is_qlora})")
+    log.info(f"Training precision: {train_dtype} (requested={precision}, qlora={is_qlora})")
 
     quant_config = None
     if is_qlora:
@@ -528,6 +538,12 @@ async def train(
         dtype=train_dtype,
         device_map="auto",
         quantization_config=quant_config,
+        # Use eager attention: SDPA's fused kernels can emit nan logits during
+        # left-padded GRPO generation (fully-masked rows, and a head_dim-128 path
+        # that's unstable on new Blackwell GPUs), which crashes sampling with
+        # "probability tensor contains inf/nan". Hit on 1.5B (head_dim 128) but not
+        # 0.5B (head_dim 64). Eager is slower but numerically safe.
+        attn_implementation="eager",
     )
 
     # -- LoRA / QLoRA (optional) --
@@ -625,6 +641,7 @@ async def train(
                 colors=["#0f3460", "#5a7db5"],
                 y_max_cap=1.05,
                 y_display_names={"avg_reward": "Running Avg", "batch_reward": "Per Batch"},
+                faint_keys={"batch_reward"},
             )
             charts_html += f'<div class="chart-container">{reward_chart}</div>'
 
@@ -638,6 +655,7 @@ async def train(
                 colors=["#06d6a0", "#5a7db5"],
                 y_max_cap=105.0,
                 y_display_names={"pass_rate": "Running Avg", "batch_pass_rate": "Per Batch"},
+                faint_keys={"batch_pass_rate"},
             )
             charts_html += f'<div class="chart-container">{pass_chart}</div>'
 
@@ -846,6 +864,7 @@ async def train(
             colors=["#0f3460", "#5a7db5"],
             y_max_cap=1.05,
             y_display_names={"avg_reward": "Running Avg", "batch_reward": "Per Batch"},
+            faint_keys={"batch_reward"},
         )
         final_charts += f'<div class="chart-container">{reward_chart}</div>'
 
@@ -859,6 +878,7 @@ async def train(
             colors=["#06d6a0", "#5a7db5"],
             y_max_cap=105.0,
             y_display_names={"pass_rate": "Running Avg", "batch_pass_rate": "Per Batch"},
+            faint_keys={"batch_pass_rate"},
         )
         final_charts += f'<div class="chart-container">{pass_chart}</div>'
 
@@ -1110,7 +1130,7 @@ async def evaluate(
 
 @cpu_env.task(report=True)
 async def pipeline(
-    model_name: str = "Qwen/Qwen2.5-0.5B",
+    model_name: str = "Qwen/Qwen2.5-Coder-0.5B",
     method: str = "lora",
     epochs: int = 1,
     lr: float = 5e-5,
@@ -1126,7 +1146,8 @@ async def pipeline(
     lora_alpha: int = 32,
     beta: float = 0.04,
     use_chat_template: bool = True,
-    use_filter: bool = True,
+    use_filter: bool = False,
+    precision: str = "auto",
 ) -> str:
     """
     GRPO fine-tuning pipeline — teach a model to write correct Python.
@@ -1193,7 +1214,7 @@ async def pipeline(
     finetuned_dir = await train(
         model_name, model_dir, train_dir, method, epochs, lr, batch_size,
         num_generations, max_completion_length, lora_r, lora_alpha, beta,
-        use_chat_template,
+        use_chat_template, precision,
     )
 
     await flyte.report.replace.aio(
