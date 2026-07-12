@@ -18,24 +18,31 @@ where GRPO's within-group advantage is non-zero. Combined with a binary
 constants like `return True` that hack partial credit on impossible problems.
 The filter task is cached, so it runs once and later runs reuse the filtered set.
 
-Usage:
-    # Quick sanity check
-    flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B" \\
-        --max_candidate_samples 20 --max_train_samples 10 --filter_samples 3 \\
-        --epochs 1 --num_generations 2 --batch_size 2
+The base model is the load-bearing choice. GRPO's gradient comes only from groups
+where *some* completions pass and some fail, so a base that almost never passes
+produces all-zero groups and no gradient. Qwen2.5-Coder-7B is the default because
+it is the smallest model here that yields a real held-out gain on MBPP; smaller
+models run to completion and produce charts without actually learning.
 
-    # Standard run
-    flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B"
+Usage:
+    # Standard run — the documented default (large-memory GPU, ~2-3 hours)
+    flyte run workflow.py pipeline
+
+    # Quick sanity check — verifies the pipeline end to end, NOT a learning signal
+    flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-Coder-0.5B" \\
+        --max_candidate_samples 20 --max_train_samples 6 \\
+        --epochs 1 --num_generations 2 --batch_size 2 --num_eval_examples 4
+
+    # Larger groups — more mixed pass/fail groups, proportionally more generation time
+    flyte run workflow.py pipeline --batch_size 16 --num_generations 16 \\
+        --max_candidate_samples 800
 
     # Full fine-tuning (no LoRA)
-    flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B" --method full
-
-    # Longer training
-    flyte run workflow.py pipeline --model_name "Qwen/Qwen2.5-0.5B" \\
-        --max_candidate_samples 400 --max_train_samples 200 --epochs 5 --num_eval_examples 30
+    flyte run workflow.py pipeline --method full --model_name "Qwen/Qwen2.5-Coder-0.5B"
 """
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -478,6 +485,13 @@ async def train(
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
         log.info(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
 
+        # On unified-memory parts (GB10/Grace-Blackwell) the GPU allocates from the
+        # same DRAM the OS lives in, so an over-large batch has nothing to OOM into:
+        # the driver spins on NV_ERR_NO_MEMORY, the kernel reclaims from everything
+        # else, and the whole box locks up instead of raising OutOfMemoryError. Cap
+        # the process so a bad config fails loudly and the host survives.
+        torch.cuda.set_per_process_memory_fraction(0.85)
+
     method_badge = (
         '<span class="badge badge-info">GRPO + LoRA</span>' if method == "lora"
         else '<span class="badge badge-danger">GRPO + Full Fine-Tune</span>'
@@ -553,6 +567,14 @@ async def train(
 
         if is_qlora:
             model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+        else:
+            # Gradient checkpointing on a PEFT model: the frozen base produces
+            # activations with requires_grad=False, so the checkpointed segment has
+            # nothing to backprop through and autograd errors with "element 0 of
+            # tensors does not require grad". Forcing the input embeddings to emit
+            # grad-requiring activations is the standard fix (prepare_model_for_kbit_training
+            # already does this on the qlora path).
+            model.enable_input_require_grads()
 
         peft_config = LoraConfig(
             r=lora_r,
@@ -780,7 +802,11 @@ async def train(
             num_generations=num_generations,
             max_completion_length=max_completion_length,
             beta=beta,  # KL anchor to the base model — prevents overfit-drift
-            gradient_checkpointing=is_qlora,  # save memory for the 4-bit 7B path
+            # Recompute activations instead of storing them. Costs ~25-30% backward
+            # time; without it a 7B LoRA run holds every layer's activations for the
+            # whole group and larger num_generations won't fit.
+            gradient_checkpointing=method in ("lora", "qlora"),
+            gradient_checkpointing_kwargs={"use_reentrant": False},
             logging_steps=5,
             save_strategy="epoch",
             bf16=use_bf16,
@@ -913,8 +939,21 @@ async def evaluate(
     num_examples: int = 30,
     use_chat_template: bool = True,
     method: str = "lora",
+    eval_k: int = 4,
+    eval_temperature: float = 0.8,
 ) -> str:
-    """Compare base vs GRPO-trained model on code generation."""
+    """Compare base vs GRPO-trained model on code generation.
+
+    Scored as mean pass@1 over `eval_k` sampled completions per problem, not a
+    single greedy draw. This matters: GRPO raises P(correct) — it turns a problem
+    the model solves 1-in-4 times into one it solves 3-in-4. A single greedy
+    sample collapses that probability back into one pass/fail bit and throws most
+    of the improvement away, which is why a real training gain can show up as a
+    flat eval. Averaging k samples estimates P(correct) directly, and cuts the
+    noise floor on a 50-problem set from roughly +/-7pp to +/-3pp.
+
+    Set eval_k=1 to recover the old greedy behaviour.
+    """
     import torch
     from datasets import load_from_disk
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -956,6 +995,12 @@ async def evaluate(
         )
 
     def generate_code(model, prompts, max_new_tokens=192):
+        """Return `eval_k` completions per prompt (list-of-lists).
+
+        Sampled at eval_temperature so the pass fraction estimates P(correct).
+        eval_k=1 falls back to greedy, matching the original single-draw eval.
+        """
+        greedy = eval_k <= 1
         results = []
         for prompt in prompts:
             # Prompt exactly as in training: chat template + code-only instruction
@@ -964,10 +1009,16 @@ async def evaluate(
             inputs = tokenizer(model_input, return_tensors="pt").to(model.device)
             with torch.no_grad():
                 outputs = model.generate(
-                    **inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id,
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=not greedy,
+                    temperature=None if greedy else eval_temperature,
+                    top_p=None if greedy else 0.95,
+                    num_return_sequences=1 if greedy else eval_k,
+                    pad_token_id=tokenizer.eos_token_id,
                 )
-            generated = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-            results.append(generated)
+            gen = outputs[:, inputs.input_ids.shape[1]:]
+            results.append([tokenizer.decode(g, skip_special_tokens=True) for g in gen])
         return results
 
     # -- Base model --
@@ -1008,13 +1059,44 @@ async def evaluate(
         torch.cuda.empty_cache()
 
     # -- Score (sandboxed) --
-    base_pass = 0
-    ft_pass = 0
+    # Every one of the eval_k samples per problem is scored. `*_solved` counts how
+    # many of the k passed, so its mean over problems is pass@1 = P(correct).
+    base_solved: list[int] = []
+    ft_solved: list[int] = []
     base_total_tests = 0
     base_passed_tests = 0
     ft_total_tests = 0
     ft_passed_tests = 0
     comparisons = []
+
+    async def score_samples(sbx, samples, func_def, setup, test_list):
+        """Run every sample for one problem.
+
+        Returns (n_all_pass, asserts_passed, asserts_total, shown, shown_ok) where
+        `shown` is the sample to display in the report. We pick the first sample
+        that actually passed, falling back to the first non-empty one. Showing
+        samples[0] unconditionally would be misleading: on a problem scored "3/4
+        samples" the first draw can be one of the failures, so the report would
+        print broken code next to a passing badge.
+        """
+        n_all_pass = 0
+        passed_tests = 0
+        total_tests = 0
+        shown = ""
+        shown_ok = False
+        for sample in samples:
+            if not sample.strip():
+                total_tests += len(test_list)
+                continue
+            code = assemble_code(func_def, sample, setup)
+            all_pass, p, t = await run_tests_sandboxed(sbx, code, test_list)
+            if all_pass:
+                n_all_pass += 1
+            passed_tests += p
+            total_tests += t
+            if (all_pass and not shown_ok) or not shown:
+                shown, shown_ok = sample, all_pass
+        return n_all_pass, passed_tests, total_tests, shown, shown_ok
 
     async with sb.on_device.session(network_mode="blocked", backend="bubblewrap") as sbx:
         for i in range(len(prompts)):
@@ -1022,54 +1104,59 @@ async def evaluate(
             setup = setup_codes[i] if setup_codes[i] else ""
             test_list = [l.strip() for l in tests_list[i].strip().split("\n") if l.strip().startswith("assert")]
 
-            # Build full code: setup + (signature if needed) + model completion
-            base_code = assemble_code(func_def, base_results[i], setup)
-            ft_code = assemble_code(func_def, ft_results[i], setup)
+            base_n, base_p, base_t, base_show, base_show_ok = await score_samples(
+                sbx, base_results[i], func_def, setup, test_list)
+            ft_n, ft_p, ft_t, ft_show, ft_show_ok = await score_samples(
+                sbx, ft_results[i], func_def, setup, test_list)
 
-            base_all = False
-            base_p = 0
-            base_t = 0
-            if base_results[i].strip():
-                base_all, base_p, base_t = await run_tests_sandboxed(sbx, base_code, test_list)
-            if base_all:
-                base_pass += 1
-            base_total_tests += base_t
+            base_solved.append(base_n)
+            ft_solved.append(ft_n)
             base_passed_tests += base_p
-
-            ft_all = False
-            ft_p = 0
-            ft_t = 0
-            if ft_results[i].strip():
-                ft_all, ft_p, ft_t = await run_tests_sandboxed(sbx, ft_code, test_list)
-            if ft_all:
-                ft_pass += 1
-            ft_total_tests += ft_t
+            base_total_tests += base_t
             ft_passed_tests += ft_p
+            ft_total_tests += ft_t
 
+            k = max(len(base_results[i]), 1)
             comparisons.append({
                 "name": names[i],
                 "prompt": prompts[i][:200],
-                "base_code": base_results[i][:300],
-                "grpo_code": ft_results[i][:300],
-                "base_passed": f"{base_p}/{base_t}",
-                "grpo_passed": f"{ft_p}/{ft_t}",
-                "base_all_pass": base_all,
-                "grpo_all_pass": ft_all,
+                # The displayed snippet is a *passing* sample where one exists, so
+                # the code shown matches the badge beside it.
+                "base_code": base_show[:300],
+                "grpo_code": ft_show[:300],
+                "base_code_ok": base_show_ok,
+                "grpo_code_ok": ft_show_ok,
+                "base_passed": f"{base_n}/{k} samples",
+                "grpo_passed": f"{ft_n}/{k} samples",
+                "base_all_pass": base_n == k,
+                "grpo_all_pass": ft_n == k,
+                "base_solve_frac": round(base_n / k, 2),
+                "grpo_solve_frac": round(ft_n / k, 2),
             })
 
     total = len(prompts)
-    base_rate = base_pass / total * 100
-    ft_rate = ft_pass / total * 100
+    k = max(eval_k, 1)
+    # pass@1 = mean over problems of (samples passed / k). The headline metric.
+    base_rate = sum(base_solved) / (total * k) * 100
+    ft_rate = sum(ft_solved) / (total * k) * 100
 
-    log.info(f"Base model: {base_rate:.1f}% all-pass ({base_pass}/{total})")
-    log.info(f"GRPO model: {ft_rate:.1f}% all-pass ({ft_pass}/{total})")
+    # How the movable mass shifted: GRPO can only act on problems the base solves
+    # *sometimes* — never-solved and always-solved problems have no gradient.
+    movable = sum(1 for c in base_solved if 0 < c < k)
+    base_never = sum(1 for c in base_solved if c == 0)
+    ft_never = sum(1 for c in ft_solved if c == 0)
+
+    log.info(f"Base model: {base_rate:.1f}% pass@1 (k={k}, {total} problems)")
+    log.info(f"GRPO model: {ft_rate:.1f}% pass@1 (k={k}, {total} problems)")
+    log.info(f"Movable band (base solves sometimes): {movable}/{total}; "
+             f"never-solved {base_never} -> {ft_never}")
 
     # -- Report --
     improvement = ft_rate - base_rate
     imp_badge = "badge-success" if improvement > 0 else "badge-danger" if improvement < 0 else "badge-info"
 
     bar_chart = make_bar_chart(
-        labels=["All Tests Pass", "Individual Tests"],
+        labels=[f"pass@1 (k={k})", "Individual Tests"],
         series={
             "Base": [base_rate, base_passed_tests / max(base_total_tests, 1) * 100],
             "GRPO": [ft_rate, ft_passed_tests / max(ft_total_tests, 1) * 100],
@@ -1079,47 +1166,91 @@ async def evaluate(
         y_max_cap=105.0,
     )
 
+    # Show a REPRESENTATIVE mix, not the first 15 problems in dataset order — that
+    # ordering is arbitrary and can easily contain no successes at all. Bucketing
+    # guarantees the report leads with problems GRPO actually fixed, while still
+    # showing what both models already solved and what neither could do.
+    gains = sorted(  # GRPO solves it more often than base
+        [c for c in comparisons if c["grpo_solve_frac"] > c["base_solve_frac"]],
+        key=lambda c: c["grpo_solve_frac"] - c["base_solve_frac"], reverse=True)
+    both_ok = [c for c in comparisons  # both solve it, at least sometimes
+               if c["grpo_solve_frac"] == c["base_solve_frac"] and c["base_solve_frac"] > 0]
+    both_bad = [c for c in comparisons  # neither ever solves it
+                if c["grpo_solve_frac"] == 0 and c["base_solve_frac"] == 0]
+    regress = sorted(  # base solved it more often than GRPO
+        [c for c in comparisons if c["grpo_solve_frac"] < c["base_solve_frac"]],
+        key=lambda c: c["grpo_solve_frac"] - c["base_solve_frac"])
+    log.info(f"Buckets — gained:{len(gains)} both_ok:{len(both_ok)} "
+             f"both_bad:{len(both_bad)} regressed:{len(regress)}")
+
+    buckets = [
+        ("GRPO improved it (passes more often after training)", "badge-success", gains[:5]),
+        ("Both solved it", "badge-info", both_ok[:3]),
+        ("Neither solved it", "badge-danger", both_bad[:3]),
+        ("GRPO regressed (base passed more often)", "badge-danger", regress[:2]),
+    ]
     examples_html = ""
-    for c in comparisons[:15]:
-        base_badge = "badge-success" if c["base_all_pass"] else "badge-danger"
-        ft_badge = "badge-success" if c["grpo_all_pass"] else "badge-danger"
-        examples_html += f"""
+    for label, badge, items in buckets:
+        if not items:
+            continue
+        examples_html += f'<h4><span class="badge {badge}">{label}</span> ({len(items)} shown)</h4>'
+        for c in items:
+            base_badge = "badge-success" if c["base_solve_frac"] > 0 else "badge-danger"
+            ft_badge = "badge-success" if c["grpo_solve_frac"] > 0 else "badge-danger"
+            # The snippet is a passing sample when one exists; say so, otherwise a
+            # reader can't tell whether the code shown is the code that worked.
+            base_note = "a passing sample" if c["base_code_ok"] else "a failing sample"
+            ft_note = "a passing sample" if c["grpo_code_ok"] else "a failing sample"
+            # escape: generated Python contains <, > and & (comparisons, generics)
+            examples_html += f"""
 <div class="card">
-<p><b>{c['name']}</b> —
+<p><b>{html.escape(str(c['name']))}</b> —
   Base: <span class="badge {base_badge}">{c['base_passed']}</span> |
   GRPO: <span class="badge {ft_badge}">{c['grpo_passed']}</span></p>
-<p><b>Base:</b><pre style="background:#f5f5f5;padding:8px;font-size:0.85em;border-radius:4px;">{c['base_code'][:200]}</pre></p>
-<p><b>GRPO:</b><pre style="background:#f0fff0;padding:8px;font-size:0.85em;border-radius:4px;">{c['grpo_code'][:200]}</pre></p>
+<p><b>Base</b> <i>({base_note})</i>:<pre style="white-space:pre-wrap;background:#f5f5f5;padding:8px;font-size:0.85em;border-radius:4px;">{html.escape(c['base_code'])}</pre></p>
+<p><b>GRPO</b> <i>({ft_note})</i>:<pre style="white-space:pre-wrap;background:#f0fff0;padding:8px;font-size:0.85em;border-radius:4px;">{html.escape(c['grpo_code'])}</pre></p>
 </div>"""
 
     await flyte.report.replace.aio(
         wrap_report(
             f"<h2>Evaluation Results — Code Generation</h2>"
             f'<div class="stat-grid">'
-            f'  <div class="stat"><div class="value">{base_rate:.1f}%</div><div class="label">Base Pass Rate</div></div>'
-            f'  <div class="stat"><div class="value">{ft_rate:.1f}%</div><div class="label">GRPO Pass Rate</div></div>'
+            f'  <div class="stat"><div class="value">{base_rate:.1f}%</div><div class="label">Base pass@1</div></div>'
+            f'  <div class="stat"><div class="value">{ft_rate:.1f}%</div><div class="label">GRPO pass@1</div></div>'
             f'  <div class="stat"><div class="value"><span class="badge {imp_badge}">{improvement:+.1f}pp</span></div><div class="label">Improvement</div></div>'
-            f'  <div class="stat"><div class="value">{total}</div><div class="label">Problems Tested</div></div>'
+            f'  <div class="stat"><div class="value">{total}&times;{k}</div><div class="label">Problems &times; Samples</div></div>'
             f'</div>'
             f'<div class="chart-container">{bar_chart}</div>'
+            f'<div class="card"><p>Scored as <b>mean pass@1 over {k} samples</b> per problem '
+            f"(temperature {eval_temperature}) — GRPO raises <i>P(correct)</i>, which a single "
+            f"greedy draw would round away to a pass/fail bit.</p>"
+            f"<p>GRPO can only move problems the base model solves <i>sometimes</i>: "
+            f"<b>{movable}/{total}</b> were in that band. Never-solved went "
+            f"<b>{base_never} &rarr; {ft_never}</b>.</p></div>"
             f"<table>"
-            f"<tr><th></th><th>All Tests Pass</th><th>Individual Tests</th></tr>"
-            f"<tr><td><b>Base model</b></td><td>{base_rate:.1f}% ({base_pass}/{total})</td><td>{base_passed_tests}/{base_total_tests}</td></tr>"
-            f"<tr><td><b>GRPO-trained</b></td><td>{ft_rate:.1f}% ({ft_pass}/{total})</td><td>{ft_passed_tests}/{ft_total_tests}</td></tr>"
+            f"<tr><th></th><th>pass@1 (k={k})</th><th>Individual Tests</th></tr>"
+            f"<tr><td><b>Base model</b></td><td>{base_rate:.1f}% ({sum(base_solved)}/{total * k})</td><td>{base_passed_tests}/{base_total_tests}</td></tr>"
+            f"<tr><td><b>GRPO-trained</b></td><td>{ft_rate:.1f}% ({sum(ft_solved)}/{total * k})</td><td>{ft_passed_tests}/{ft_total_tests}</td></tr>"
             f"</table>"
-            f"<h3>Examples</h3>"
+            f"<h3>Example problems (base vs GRPO)</h3>"
             f"{examples_html}"
         ),
         do_flush=True,
     )
 
     return json.dumps({
-        "base_pass_rate": round(base_rate, 1),
+        "base_pass_rate": round(base_rate, 1),   # mean pass@1 over k samples
         "grpo_pass_rate": round(ft_rate, 1),
         "improvement": round(ft_rate - base_rate, 1),
+        "eval_k": k,
         "base_tests": f"{base_passed_tests}/{base_total_tests}",
         "grpo_tests": f"{ft_passed_tests}/{ft_total_tests}",
         "num_problems": total,
+        "movable_band": movable,          # problems the base solved sometimes-but-not-always
+        "base_never_solved": base_never,
+        "grpo_never_solved": ft_never,
+        "buckets": {"gained": len(gains), "both_ok": len(both_ok),
+                    "both_bad": len(both_bad), "regressed": len(regress)},
         "comparisons": comparisons[:15],
     })
 
@@ -1130,22 +1261,30 @@ async def evaluate(
 
 @cpu_env.task(report=True)
 async def pipeline(
-    model_name: str = "Qwen/Qwen2.5-Coder-0.5B",
+    # Defaults are the smallest configuration that produces a real held-out gain on
+    # MBPP. A 7B *code-pretrained base* is the load-bearing choice: GRPO's gradient
+    # comes only from groups with mixed pass/fail, and sub-2B models almost never
+    # pass, so their groups are all-zero and teach nothing. See the README's
+    # "Choosing a Base Model". use_chat_template is off to match the base model —
+    # Qwen ships a ChatML template in its base tokenizer, and applying it makes the
+    # model ramble instead of completing the MBPP stub.
+    model_name: str = "Qwen/Qwen2.5-Coder-7B",
     method: str = "lora",
-    epochs: int = 1,
+    epochs: int = 2,
     lr: float = 5e-5,
-    batch_size: int = 6,
-    num_generations: int = 6,
-    max_completion_length: int = 128,
+    batch_size: int = 8,
+    num_generations: int = 8,
+    max_completion_length: int = 192,
     max_train_samples: int = 100,
     max_candidate_samples: int = 300,
     filter_samples: int = 4,
     max_eval_samples: int = 50,
-    num_eval_examples: int = 20,
+    num_eval_examples: int = 50,
+    eval_k: int = 4,
     lora_r: int = 16,
     lora_alpha: int = 32,
     beta: float = 0.04,
-    use_chat_template: bool = True,
+    use_chat_template: bool = False,
     use_filter: bool = False,
     precision: str = "auto",
 ) -> str:
@@ -1227,7 +1366,10 @@ async def pipeline(
         do_flush=True,
     )
 
-    result = await evaluate(model_name, model_dir, finetuned_dir, train_dir, num_eval_examples, use_chat_template, method)
+    result = await evaluate(
+        model_name, model_dir, finetuned_dir, train_dir, num_eval_examples,
+        use_chat_template, method, eval_k,
+    )
     metrics = json.loads(result)
 
     improvement = metrics["improvement"]
