@@ -40,6 +40,74 @@ pre { overflow-x: auto; padding: 14px; border-radius: 6px;
 CHART_JS_CDN = '<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>'
 
 
+LOCAL_METADATA = "/tmp/flyte/metadata"
+
+
+def show_latest():
+    """Display the most recent local run's HTML report — for notebooks.
+
+    Use this after a `!flyte run --local ...` cell, which runs in a subshell and so
+    hands you no run object:
+
+        !flyte run --local step3_agent_report.py analyze --question "..."
+
+        from report import show_latest
+        show_latest()
+
+    If you drive Flyte from Python instead, prefer `show(run)` — it targets that
+    exact run rather than whatever finished last.
+    """
+    import pathlib
+
+    from IPython.display import HTML, Markdown
+
+    reports = sorted(
+        pathlib.Path(LOCAL_METADATA).rglob("report.html"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    if not reports:
+        return Markdown(
+            f"No report found under `{LOCAL_METADATA}`. Run a step with "
+            "`--local` first — and note only tasks marked `@env.task(report=True)` "
+            "produce one (steps 2, 3 and 4)."
+        )
+    return HTML(reports[-1].read_text())
+
+
+def show(run):
+    """Display a run's HTML report inline — for notebooks (Colab, Jupyter).
+
+        import flyte
+        flyte.init()                       # local: no cluster needed
+        run = flyte.run(analyze, question="...")
+        run.wait()
+
+        from report import show
+        show(run)                          # renders the charts in the next cell
+
+    On a local run, `run.url` is the metadata directory and the report is written
+    inside it. On a remote run it's a console link, so we hand back the link rather
+    than pretending we can inline it.
+    """
+    import pathlib
+
+    from IPython.display import HTML, Markdown
+
+    url = str(run.url)
+    if url.startswith("http"):
+        return Markdown(f"[View the report in Flyte →]({url})")
+
+    reports = sorted(
+        pathlib.Path(url).rglob("report.html"), key=lambda p: p.stat().st_mtime
+    )
+    if not reports:
+        return Markdown(
+            f"No report found under `{url}` — is the task decorated with "
+            "`@env.task(report=True)`?"
+        )
+    return HTML(reports[-1].read_text())
+
+
 def chart_html(spec: dict, canvas_id: str) -> str:
     """A self-contained chart: a canvas plus the script that draws it.
 
