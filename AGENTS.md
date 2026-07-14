@@ -38,7 +38,11 @@ flyte deploy <app_file.py> <env_name>
 
 - `uv` for environment management, not pip or conda
 - Each tutorial has its own `requirements.txt`
-- Use `.with_pip_packages()` for remote image builds (not `.with_requirements()`)
+- Use `.with_pip_packages()` for remote image builds, not `.with_requirements()`.
+  `.with_requirements()` stores a **relative path** and re-resolves it at runtime, so it breaks
+  anywhere the working directory isn't yours and the file isn't in the code bundle — most
+  notably when an app pod launches a task (`[Errno 2] No such file or directory:
+  'requirements.txt'`). Keep `requirements.txt` for the local venv, and keep the two in sync.
 - Flyte 2 SDK only: `import flyte`, `@env.task`
 - Test locally before remote deployment
 - Each tutorial includes a README with setup, steps, and example commands

@@ -1,0 +1,9 @@
+flyte[sandbox,tui]>=2.0
+pydantic-monty
+duckdb>=1.1.0
+anthropic
+python-dotenv
+
+# Step 5's chat app.
+fastapi
+uvicorn
