@@ -184,10 +184,20 @@ def chat_env(local: bool = False) -> AgentChatAppEnvironment:
         # locally: no cluster to dispatch to, nobody to authenticate as.
         else {"task_entrypoint": answer, "passthrough_auth": True, "requires_auth": True}
     )
+    # A header button to the project's runs, clickable *while* a question is still
+    # executing — the per-answer link below only appears once the run finishes, and
+    # the chat UI's progress stream carries phases, not URLs.
+    #
+    #   export FLYTE_RUNS_URL=https://<your-endpoint>/v2/domain/development/project/flytesnacks/runs
+    buttons = []
+    if runs_url := os.getenv("FLYTE_RUNS_URL"):
+        buttons.append({"button_text": "Runs in Flyte", "button_url": runs_url})
+
     return AgentChatAppEnvironment(
         name="taxi-analyst-chat",
         agent=agent,
         **durable,
+        additional_buttons=buttons,
         title="NYC Taxi analyst",
         subtitle="Ask a question. Claude writes a program, the sandbox runs it, "
         "and every query it writes becomes a durable task.",
@@ -215,6 +225,8 @@ def chat_env(local: bool = False) -> AgentChatAppEnvironment:
         depends_on=[task_env],
         image=image,  # fastapi + uvicorn are in the shared image (config.py)
         secrets=task_env.secrets,
+        # Carried into the pod, which re-imports this module to build the app.
+        env_vars={"FLYTE_RUNS_URL": os.getenv("FLYTE_RUNS_URL", "")},
         # The app pod only orchestrates — the analysis runs in `answer` — but the
         # agent loop and the chat UI still need headroom.
         resources=flyte.Resources(cpu=1, memory="2Gi"),

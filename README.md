@@ -9,6 +9,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 
 | Example | Description |
 |---------|-------------|
+| [Code Mode — NYC Taxi analyst](tutorials/code-mode-analysis/) | Claude writes one program, the Monty sandbox runs it, and its loops fan out into durable parallel tasks over real NYC taxi data |
 | [LangGraph Research Pipeline](tutorials/langgraph_agent_research/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks |
 | [LangGraph ReAct Agent](tutorials/starter-examples/langgraph-react-agent/) | Build a ReAct agent with LangGraph + OpenAI on Flyte |
 | [Stable Diffusion](tutorials/starter-examples/stable-diffusion/) | Generate images from text prompts with SDXL Turbo on GPU |
@@ -36,6 +37,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 
 | Tutorial | Description |
 |----------|-------------|
+| [Code Mode — NYC Taxi analyst](tutorials/code-mode-analysis/) | The agent writes a *program* instead of calling tools one at a time. It runs in the Monty sandbox, and a loop in the generated code becomes a fan-out of durable, parallel query tasks over 3M+ real taxi trips |
 | [LangGraph Research Pipeline](tutorials/langgraph_agent_research/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks via Tavily web search |
 | [LangGraph ReAct Agent](tutorials/starter-examples/langgraph-react-agent/) | Single-file ReAct agent with LangGraph |
 | [Planner Multi-Agent System](tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb) | Scalable planner multi-agent system |
