@@ -4,6 +4,9 @@
 # tasks on CPU nodes and the detector training on GPU (T4) nodes.
 
 flyte[tui]>=2.0
+# flyteplugins-lance isn't on PyPI yet — install it from the plugin PR
+# (flyteorg/flyte-sdk#1313), pinned to its head commit, out of the plugins/lance subdir.
+flyteplugins-lance @ git+https://github.com/flyteorg/flyte-sdk.git@8dcfc882a7cd3f66bc8efc600cebb594893eb219#subdirectory=plugins/lance
 pylance>=0.19.0
 pyarrow>=17.0.0
 pillow>=10.0.0

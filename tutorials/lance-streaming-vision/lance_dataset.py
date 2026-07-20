@@ -24,9 +24,13 @@ import json
 import os
 import random
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 from PIL import Image, ImageDraw
+
+if TYPE_CHECKING:
+    import lance
 
 # ----------------------------------------------------------------------------
 # Arrow schema for the Lance dataset
@@ -325,25 +329,26 @@ def build_lance_dataset(tiny_root: str, lance_uri: str, write_chunk: int = 512) 
 # Stream from Lance
 # ----------------------------------------------------------------------------
 
-def stream_batches(lance_uri: str, batch_size: int, columns: list[str] | None = None):
+
+def stream_batches(
+    ds: "lance.LanceDataset", batch_size: int, columns: list[str] | None = None
+):
     """Yield Arrow RecordBatches from the Lance dataset. This is the streaming
     read: Lance pulls only the requested columns, row-group by row-group, with a
     single dataset handle — no per-sample connection setup.
     """
-    import lance
 
-    ds = lance.dataset(lance_uri)
     yield from ds.scanner(columns=columns, batch_size=batch_size).to_batches()
 
 
-def read_batches(lance_uri: str, batch_size: int, columns: list[str], shuffle: bool):
+def read_batches(
+    ds: "lance.LanceDataset", batch_size: int, columns: list[str], shuffle: bool
+):
     """Yield Arrow batches from the Lance dataset. `shuffle=False` streams
     sequentially (fast, for eval); `shuffle=True` draws a fresh random row order
     each epoch and fetches it with `Dataset.take` — Lance's random access, which
     is what SGD needs and what sequential-only formats can't do."""
-    import lance
 
-    ds = lance.dataset(lance_uri)
     if not shuffle:
         yield from ds.scanner(columns=columns, batch_size=batch_size).to_batches()
         return
@@ -358,13 +363,13 @@ def decode_image(png_bytes: bytes) -> "Image.Image":
     return Image.open(io.BytesIO(png_bytes)).convert("RGB")
 
 
-def num_detector_labels(lance_uri: str) -> int:
+def num_detector_labels(ds: "lance.LanceDataset") -> int:
     """Number of labels for a torchvision detector = max class id + 2
     (+1 because we shift class ids off background=0, +1 for background itself).
     Derived by scanning the `object_classes` column so it fits either dataset.
     """
     max_cls = 0
-    for batch in stream_batches(lance_uri, batch_size=1024, columns=["object_classes"]):
+    for batch in stream_batches(ds, batch_size=1024, columns=["object_classes"]):
         for classes in batch.column("object_classes").to_pylist():
             if classes:
                 max_cls = max(max_cls, max(classes))
@@ -380,8 +385,10 @@ class LanceImageStream:
     reserves label 0 for background.
     """
 
-    def __init__(self, lance_uri: str, batch_size: int = 64, shuffle: bool = False):
-        self.lance_uri = lance_uri
+    def __init__(
+        self, ds: "lance.LanceDataset", batch_size: int = 64, shuffle: bool = False
+    ):
+        self.ds = ds
         self.batch_size = batch_size
         self.shuffle = shuffle
 
@@ -390,7 +397,7 @@ class LanceImageStream:
         import torch
 
         cols = ["image", "bboxes", "object_classes", "width", "height"]
-        for batch in read_batches(self.lance_uri, self.batch_size, cols, self.shuffle):
+        for batch in read_batches(self.ds, self.batch_size, cols, self.shuffle):
             images = batch.column("image").to_pylist()
             bboxes = batch.column("bboxes").to_pylist()
             classes = batch.column("object_classes").to_pylist()
@@ -424,11 +431,13 @@ def detection_collate(batch):
     return list(images), list(targets)
 
 
-def make_torch_dataset(lance_uri: str, batch_size: int = 64, shuffle: bool = False):
+def make_torch_dataset(
+    ds: "lance.LanceDataset", batch_size: int = 64, shuffle: bool = False
+):
     """Wrap `LanceImageStream` as a real `torch.utils.data.IterableDataset`."""
     import torch
 
-    stream = LanceImageStream(lance_uri, batch_size=batch_size, shuffle=shuffle)
+    stream = LanceImageStream(ds, batch_size=batch_size, shuffle=shuffle)
 
     class _DS(torch.utils.data.IterableDataset):
         def __iter__(self):
@@ -442,6 +451,8 @@ if __name__ == "__main__":
     import shutil
     import tempfile
 
+    import lance
+
     tmp = tempfile.mkdtemp(prefix="lance_smoke_")
     tiny = os.path.join(tmp, "tiny")
     lance_uri = os.path.join(tmp, "dataset.lance")
@@ -452,8 +463,9 @@ if __name__ == "__main__":
     conv = build_lance_dataset(tiny, lance_uri)
     print("  ", conv)
     print("Streaming batches...")
+    ds = lance.dataset(lance_uri)
     total = 0
-    for batch in stream_batches(lance_uri, batch_size=8, columns=["image", "bboxes"]):
+    for batch in stream_batches(ds, batch_size=8, columns=["image", "bboxes"]):
         total += batch.num_rows
     print(f"  streamed {total} rows")
     shutil.rmtree(tmp)
