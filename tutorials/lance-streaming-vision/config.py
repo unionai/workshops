@@ -2,9 +2,12 @@ import flyte
 
 # One image for the whole pipeline. Default torch/torchvision wheels ship CUDA,
 # so the same image runs the data tasks on CPU nodes and the detector on GPU.
-base_image = flyte.Image.from_debian_base(
-    name="lance-streaming-vision",
-).with_requirements("requirements.txt")
+base_image = (
+    flyte.Image.from_debian_base(name="lance-streaming-vision")
+    # git is needed to pip-install flyteplugins-lance from its GitHub PR until it's
+    # published to PyPI (see requirements.txt).
+    .with_apt_packages("git").with_requirements("requirements.txt")
+)
 
 # GPU environment — detector training, evaluation, and inference.
 # T4 (16 GB) is plenty for a MobileNet-backboned Faster R-CNN. Typed "T4:1" so

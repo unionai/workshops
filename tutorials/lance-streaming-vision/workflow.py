@@ -31,17 +31,13 @@ import time
 
 import flyte
 import flyte.report
-from flyte.io import Dir
+import flyte.storage as storage
+import lance
+from flyte.io import DataFrame, Dir
 
 import lance_dataset as lds
 from config import cpu_env, gpu_env
 from report_helpers import bar_chart, line_chart, stat, wrap_report
-
-_REMOTE_SCHEMES = ("s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://")
-
-
-def _is_remote(path: str) -> bool:
-    return path.startswith(_REMOTE_SCHEMES)
 
 
 # ----------------------------------------------------------------------------
@@ -113,7 +109,7 @@ async def prepare_tiny_files(
 # Stage 2: convert the tiny files into a single Lance dataset (once)
 # ----------------------------------------------------------------------------
 @cpu_env.task(report=True)
-async def convert_to_lance(tiny_dir: Dir) -> Dir:
+async def convert_to_lance(tiny_dir: Dir) -> DataFrame:
     """One-time conversion: tiny files -> a single streaming-optimized Lance
     dataset. This cost is paid once and amortized over every future run."""
     local_root = await tiny_dir.download()
@@ -147,29 +143,34 @@ async def convert_to_lance(tiny_dir: Dir) -> Dir:
     """
     await flyte.report.replace.aio(wrap_report(html), do_flush=True)
 
-    return await Dir.from_local(lance_uri)
+    # Hand the Lance dataset off as a typed DataFrame. Flyte uploads the local
+    # .lance directory to blob storage, and the "lance" format tells every
+    # downstream task how to open it.
+    return DataFrame(uri=lance_uri, format="lance")
 
 
 # ----------------------------------------------------------------------------
 # Stage 3: benchmark the two data paths head-to-head
 # ----------------------------------------------------------------------------
 @cpu_env.task(report=True)
-async def benchmark_loading(tiny_dir: Dir, lance_dir: Dir, batch_size: int = 64) -> dict:
+async def benchmark_loading(
+    tiny_dir: Dir, ds: lance.LanceDataset, batch_size: int = 64
+) -> dict:
     """Race the two data paths **against real object storage** — nothing is
     downloaded and nothing is simulated:
 
       A. Per-file (today): walk the tiny-file tree and open every image directly
          from the blob store — one object-store GET per file.
-      B. Lance: open the dataset by its URI and stream it lazily — Lance reads
-         only the row-groups/columns it needs, with a single dataset handle.
+      B. Lance: stream the dataset lazily — Lance reads only the row-groups/columns
+         it needs, with a single dataset handle.
 
-    On a Union cluster both `tiny_dir.path` and `lance_dir.path` are `s3://` URIs,
-    so this measures true object-store behaviour. Locally they're filesystem
-    paths, so it measures local disk (still real, just fast)."""
-    import lance
+    `ds` arrives already open: Flyte decoded the "lance" DataFrame into a
+    lance.LanceDataset, resolving the URI and object-store credentials for us. On a
+    Union cluster both `tiny_dir.path` and `ds.uri` are `s3://` URIs, so this
+    measures true object-store behaviour. Locally they're filesystem paths, so it
+    measures local disk (still real, just fast)."""
 
-    lance_uri = lance_dir.path
-    backend = "object storage" if _is_remote(lance_uri) else "local disk"
+    backend = "object storage" if storage.is_remote(ds.uri) else "local disk"
 
     # --- Path A: per-file reads straight from storage (no download) ---
     t0 = time.perf_counter()
@@ -183,10 +184,9 @@ async def benchmark_loading(tiny_dir: Dir, lance_dir: Dir, batch_size: int = 64)
         n_a += 1
     time_a = time.perf_counter() - t0
 
-    # --- Path B: stream lazily from the Lance dataset's URI (no download) ---
+    # --- Path B: stream lazily from the Lance dataset (no download) ---
     t0 = time.perf_counter()
     n_b = 0
-    ds = lance.dataset(lance_uri)
     for batch in ds.scanner(columns=["image"], batch_size=batch_size).to_batches():
         for png in batch.column("image").to_pylist():
             lds.decode_image(png)
@@ -341,7 +341,7 @@ def _draw_boxes(image_tensor, class_names, pred=None, gt=None, score_thr: float 
 
 @gpu_env.task(report=True)
 async def stream_train(
-    lance_dir: Dir,
+    ds: lance.LanceDataset,
     source: str = "cppe5",
     epochs: int = 30,
     batch_size: int = 8,
@@ -351,22 +351,25 @@ async def stream_train(
     """Train a real object detector (torchvision Faster R-CNN) entirely from the
     Lance stream — reading batches straight from the dataset's object-store URI,
     no download. Runs on GPU (T4). Returns a Dir holding the trained weights +
-    config."""
+    config.
+
+    `ds` arrives already open: Flyte decoded the "lance" DataFrame into a
+    lance.LanceDataset (URI + credentials resolved), so we just stream from it."""
+
     import json
 
     import torch
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    lance_uri = lance_dir.path  # stream directly from object storage
     # shuffle=True draws a fresh random row order each epoch via Lance random
     # access — proper SGD shuffling straight off object storage.
-    dataset = lds.make_torch_dataset(lance_uri, batch_size=batch_size, shuffle=True)
+    dataset = lds.make_torch_dataset(ds, batch_size=batch_size, shuffle=True)
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, num_workers=0, collate_fn=lds.detection_collate
     )
 
-    num_labels = lds.num_detector_labels(lance_uri)  # fits either dataset
+    num_labels = lds.num_detector_labels(ds)  # fits either dataset
     model = _build_detector(num_labels=num_labels).to(device)
     opt = torch.optim.SGD(
         [p for p in model.parameters() if p.requires_grad],
@@ -454,19 +457,24 @@ async def stream_train(
 # Stage 5: evaluate the trained detector on a held-out split (COCO mAP)
 # ----------------------------------------------------------------------------
 @gpu_env.task(report=True)
-async def evaluate(model_dir: Dir, val_lance_dir: Dir, batch_size: int = 4) -> dict:
+async def evaluate(
+    model_dir: Dir, val_ds: lance.LanceDataset, batch_size: int = 4
+) -> dict:
     """Evaluate the trained detector on the validation Lance dataset with COCO
-    mean average precision (torchmetrics), streaming val straight from its URI."""
+    mean average precision (torchmetrics), streaming val straight from Lance.
+
+    `val_ds` arrives already open — Flyte decoded the "lance" DataFrame into a
+    lance.LanceDataset for us."""
+
     import torch
     from torchmetrics.detection import MeanAveragePrecision
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_path = await model_dir.download()  # small weights file
-    val_uri = val_lance_dir.path  # stream val directly from object storage
     model, config = _load_detector(model_path, device)
     class_names = config["class_names"]
 
-    dataset = lds.make_torch_dataset(val_uri, batch_size=batch_size)
+    dataset = lds.make_torch_dataset(val_ds, batch_size=batch_size)
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, num_workers=0, collate_fn=lds.detection_collate
     )
@@ -537,22 +545,23 @@ async def evaluate(model_dir: Dir, val_lance_dir: Dir, batch_size: int = 4) -> d
 @gpu_env.task(report=True)
 async def explore_inference(
     model_dir: Dir,
-    val_lance_dir: Dir,
+    val_ds: lance.LanceDataset,
     num_images: int = 8,
     score_thr: float = 0.5,
 ) -> None:
     """Run the trained detector on a handful of validation frames and render the
-    predicted boxes (green) against ground truth (blue)."""
+    predicted boxes (green) against ground truth (blue). `val_ds` arrives already
+    open — Flyte decoded the "lance" DataFrame into a lance.LanceDataset."""
+
     import torch
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_path = await model_dir.download()  # small weights file
-    val_uri = val_lance_dir.path  # stream val directly from object storage
     model, config = _load_detector(model_path, device)
     class_names = config["class_names"]
 
     # Pull the first `num_images` samples off the stream.
-    dataset = lds.make_torch_dataset(val_uri, batch_size=num_images)
+    dataset = lds.make_torch_dataset(val_ds, batch_size=num_images)
     images, targets = [], []
     for img, tgt in dataset:
         images.append(img)
@@ -617,10 +626,10 @@ async def pipeline(
         views_per_scene=views_per_scene,
         img_size=img_size,
     )
-    lance_dir = await convert_to_lance(tiny_dir)
-    bench = await benchmark_loading(tiny_dir, lance_dir, batch_size=batch_size)
+    lance_df = await convert_to_lance(tiny_dir)
+    bench = await benchmark_loading(tiny_dir, lance_df, batch_size=batch_size)
     model_dir = await stream_train(
-        lance_dir,
+        lance_df,
         source=source,
         epochs=epochs,
         batch_size=train_batch_size,
@@ -638,9 +647,9 @@ async def pipeline(
         views_per_scene=views_per_scene,
         img_size=img_size,
     )
-    val_lance_dir = await convert_to_lance(val_tiny_dir)
-    metrics = await evaluate(model_dir, val_lance_dir)
-    await explore_inference(model_dir, val_lance_dir)
+    val_lance_df = await convert_to_lance(val_tiny_dir)
+    metrics = await evaluate(model_dir, val_lance_df)
+    await explore_inference(model_dir, val_lance_df)
 
     html = f"""
     <h2>Lance + Flyte · convert once, stream forever</h2>
