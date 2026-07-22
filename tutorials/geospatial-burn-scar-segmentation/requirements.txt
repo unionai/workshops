@@ -1,0 +1,9 @@
+# Python 3.12+ (numpy 2.5 / rasterio 1.5 / tifffile dropped Python 3.11)
+flyte[tui]>=2.0
+torch==2.13.0
+timm==1.0.28
+einops==0.8.2
+numpy==2.5.1
+rasterio==1.5.0
+huggingface_hub==1.24.0
+pillow==12.3.0
