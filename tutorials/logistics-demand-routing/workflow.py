@@ -95,7 +95,7 @@ def distance_matrix(points) -> list[list[int]]:
 # Task 1: Load demand
 # ------------------------------------------------------------------
 
-@cpu_env.task(report=True, cache="auto")
+@cpu_env.task(report=True)
 async def load_demand(n_zones: int = 60, subset: str = "january_2015") -> flyte.io.Dir:
     """
     Load real half-hourly pickup counts per location, keep the busiest N zones.
@@ -225,7 +225,7 @@ def _get_pipeline(model_repo: str):
     return _PIPE_CACHE[model_repo]
 
 
-@forecast_env.task(retries=2, cache="auto")
+@forecast_env.task(retries=2)
 async def forecast_batch(
     zones_dir: flyte.io.Dir,
     zone_indices: list[int],
@@ -309,7 +309,12 @@ async def summarize_forecasts(zones_dir: flyte.io.Dir, batches: list[str]) -> st
     charts = ""
     for r in show:
         z = zones[r["zone"]]
-        charts += f'<div class="chart-container">{rh.forecast_chart(z["series"][:-len(r["median"])], r["actual"], r["median"], r["lo"], r["hi"], title=f"Zone {z['"'"'id'"'"']} — 24 h ahead")}</div>'
+        history = z["series"][:-len(r["median"])]
+        chart = rh.forecast_chart(
+            history, r["actual"], r["median"], r["lo"], r["hi"],
+            title=f"Zone {z['id']} — 24 h ahead",
+        )
+        charts += f'<div class="chart-container">{chart}</div>'
 
     map_zones = [
         {"lat": zones[r["zone"]]["lat"], "lng": zones[r["zone"]]["lng"], "demand": r["sum"]}

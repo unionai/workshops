@@ -22,12 +22,6 @@ base_image = (
     )
 )
 
-cpu_env = flyte.TaskEnvironment(
-    name="logistics-cpu",
-    image=base_image,
-    resources=flyte.Resources(cpu=4, memory="16Gi"),
-)
-
 # Forecasting fans out across zone batches. The Chronos weights are ~800 MB, so a warm
 # pool means they deserialize once per replica rather than once per batch.
 forecast_env = flyte.TaskEnvironment(
@@ -42,5 +36,14 @@ solver_env = flyte.TaskEnvironment(
     name="logistics-solver",
     image=base_image,
     resources=flyte.Resources(cpu=8, memory="16Gi"),
-    depends_on=[cpu_env, forecast_env],
+)
+
+# `depends_on` runs CALLER -> CALLEE. `pipeline` lives in cpu_env and invokes tasks in
+# BOTH other environments, so cpu_env declares them. Getting this backwards works locally
+# and fails remotely with "Environment not found in image cache".
+cpu_env = flyte.TaskEnvironment(
+    name="logistics-cpu",
+    image=base_image,
+    resources=flyte.Resources(cpu=4, memory="16Gi"),
+    depends_on=[forecast_env, solver_env],
 )
