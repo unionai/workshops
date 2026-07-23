@@ -3,17 +3,17 @@ import flyte
 # CPU-only. Mask2Former Swin-Base runs a single forward per image in ~0.3 s on CPU, so a
 # GPU would queue longer than it computes.
 base_image = (
-    flyte.Image.from_debian_base(name="panoptic-segmentation-v1", python_version=(3, 12))
+    flyte.Image.from_debian_base(name="panoptic-video-v1", python_version=(3, 12))
     .with_pip_packages(
         "flyte[tui]>=2.0",
         "torch==2.13.0",
         "transformers==5.14.1",
         # Mask2Former post-processing requires scipy; without it the failure is an opaque
         # requires_backends ImportError at first inference, not at import.
-        "scipy==1.16.2",
+        "scipy==1.18.0",
         "pillow==12.3.0",
         "numpy==2.5.1",
-        "pyarrow==21.0.0",
+        "av==18.0.0",
         "huggingface_hub==1.24.0",
         "unionai-reuse>=0.1.10",
     )

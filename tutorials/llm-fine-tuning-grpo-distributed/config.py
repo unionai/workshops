@@ -82,6 +82,13 @@ GPU = os.getenv("GRPO_GPU", "L40s:1")  # lowercase 's' — "L40S:1" is not a val
 GPU_CPU = int(os.getenv("GRPO_GPU_CPU", "6"))
 GPU_MEM = os.getenv("GRPO_GPU_MEM", "48Gi")
 
+# Ephemeral disk for the GPU pods. The learner and EACH rollout replica download
+# the full base model to local disk (await Dir.download()), so this must comfortably
+# exceed the model size: ~14GB for a 7B, ~28GB for a 14B, plus room for the adapter
+# checkpoints written each round. 100Gi covers a 14B with headroom; override for
+# larger models. Too small a value surfaces as a "no space left on device" mid-run.
+GPU_DISK = os.getenv("GRPO_GPU_DISK", "100Gi")
+
 # One image shared by the orchestrator and the learner. They need the same
 # packages, and giving them separate names would build the identical layer stack
 # twice — a slow, pointless duplicate on every cold registry.
@@ -132,7 +139,7 @@ verify_env = flyte.TaskEnvironment(
 rollout_env = flyte.TaskEnvironment(
     name="grpo-dist-rollout",
     image=flyte.Image.from_debian_base(name="grpo-dist-rollout").with_pip_packages(*ROLLOUT_PACKAGES),
-    resources=flyte.Resources(cpu=GPU_CPU, memory=GPU_MEM, gpu=GPU),
+    resources=flyte.Resources(cpu=GPU_CPU, memory=GPU_MEM, gpu=GPU, disk=GPU_DISK),
     reusable=flyte.ReusePolicy(
         replicas=(1, 4),
         concurrency=1,
@@ -175,7 +182,15 @@ _learner_deps = [verify_env] if LEVEL == "1" else [verify_env, rollout_env]
 learner_env = flyte.TaskEnvironment(
     name="grpo-dist-learner",
     image=train_image,
-    resources=flyte.Resources(cpu=GPU_CPU, memory=GPU_MEM, gpu=GPU),
+    resources=flyte.Resources(cpu=GPU_CPU, memory=GPU_MEM, gpu=GPU, disk=GPU_DISK),
+    env_vars={
+        # A 14B in bf16 is ~28GB of frozen weights; the LoRA update has only ~16GB of
+        # headroom left on a 44GB-usable L40s, so fragmentation matters. Without this
+        # the 14B update OOMs with ~1GB "reserved but unallocated" (classic
+        # fragmentation) even though the live footprint would fit. expandable_segments
+        # lets the allocator grow/shrink arenas instead of stranding them.
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    },
     secrets=[flyte.Secret(key="HF_TOKEN", as_env_var="HF_TOKEN")],
     depends_on=_learner_deps,
 )

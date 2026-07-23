@@ -132,7 +132,7 @@ async def train_distributed(
     lora_r: int = 16,
     lora_alpha: int = 32,
     max_completion_length: int = 192,
-    micro_batch_size: int = 8,
+    micro_batch_size: int = 2,   # small enough that the DEFAULT 14B learner update fits a 44GB L40s
     shard_size: int = 4,
     use_chat_template: bool = False,
     temperature: float = 0.9,
@@ -444,7 +444,7 @@ async def distributed_pipeline(
     lora_r: int = 16,
     lora_alpha: int = 32,
     max_completion_length: int = 192,
-    micro_batch_size: int = 8,
+    micro_batch_size: int = 2,   # small enough that the DEFAULT 14B learner update fits a 44GB L40s
     shard_size: int = 4,
     max_candidate_samples: int = 300,
     max_eval_samples: int = 50,

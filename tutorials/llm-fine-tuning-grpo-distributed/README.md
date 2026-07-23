@@ -106,51 +106,126 @@ Level 1 still generates on the training GPU, so that card holds weights, optimiz
 activations *and* a KV cache for `batch_size × num_generations` sequences. On a 48GB L40s with
 a 14B base, that is the binding constraint.
 
-Level 2 moves generation out. Each round:
+Level 2 moves generation out onto its own warm pool, so the learner card holds only training
+memory. The learner drives one round at a time; each round fans out twice — once to generate,
+once to verify — and rolls the results back up into a single gradient step:
 
 ```
-1. learner  : save the current LoRA adapter        -> flyte.io.Dir
-2. rollouts : fan out to the vLLM pool             (rollout.py, L40s, reusable)
-3. verify   : fan out to the sandbox pool          (verify.py, CPU, reusable)
-4. roll up  : (prompt, completion, logprob, reward)
-5. learner  : group advantages -> GRPO loss -> one optimizer step
+                  ┌───────────────────────────────────────────────┐
+                  │  learner   (1× L40s, NOT reusable)             │
+                  │  holds base + LoRA + optimizer state,          │
+                  │  one long-lived task driving every round       │
+                  └───────────────┬───────────────────────────────┘
+                                  │
+        (1) save current LoRA adapter ──► flyte.io.Dir   (tens of MB, not the 28GB base)
+                                  │
+        (2) split `prompts_per_round` prompts into `rollout_workers` chunks
+                                  │
+              ┌───────────────────┴───────────────────┐
+              ▼                                        ▼
+   ┌─────────────────────┐                 ┌─────────────────────┐   rollout_env
+   │  generate_rollouts   │                 │  generate_rollouts   │   REUSABLE, GPU
+   │  vLLM engine (warm,  │        …        │  vLLM engine (warm,  │   replicas=(1,4)
+   │  cached in-process)  │                 │  cached in-process)  │   concurrency=1
+   │  + hot-swap adapter  │                 │  + hot-swap adapter  │   1× L40s each
+   └──────────┬──────────┘                 └──────────┬──────────┘
+              │  n=`num_generations` completions per prompt        │
+              └────────────────────┬───────────────────────────────┘
+                                   │
+        (3) flatten to (prompt, completion, logprob) rows,
+            re-chunk into shards of `shard_size`
+                                   │
+        ┌──────────────┬───────────┴──────────┬─────────── … up to replicas×concurrency
+        ▼              ▼                       ▼
+  ┌───────────┐  ┌───────────┐          ┌───────────┐          verify_env
+  │verify_shard│ │verify_shard│    …     │verify_shard│          REUSABLE, CPU
+  │ userns box │ │ userns box │          │ userns box │          replicas=(2,20)
+  │ run tests  │ │ run tests  │          │ run tests  │          concurrency=8
+  └─────┬──────┘ └─────┬──────┘          └─────┬──────┘          (≤160 shards at once)
+        │  reward = 1.0 iff ALL tests pass, else 0.0             │
+        └──────────────────────┬────────────────────────────────┘
+                               │
+        (4) regroup rewards by prompt (groups of `num_generations`)
+                               │
+        (5) learner: within-group advantages → GRPO loss → ONE optimizer step
+                               │
+                               └────────────► next round (back to step 1)
 ```
 
-The learner is one long-lived task that drives all of it, not one task per round. It loads a
-14B base once and keeps optimizer state in memory; per-round tasks would reload the model every
-round and either lose Adam's moments or serialize them to blob storage each time.
+The learner is one long-lived task, not one task per round. It loads the base once and keeps
+optimizer state in memory; per-round tasks would reload the model every round and either lose
+Adam's moments or serialize them to blob storage each time.
 
 **Weight sync is the part no orchestrator does for you**, and here it is about six lines: the
-learner writes the adapter, the rollout workers load it by path. That is cheap only because we
-train LoRA — the adapter is tens of MB while the base is ~28GB, and the base never moves.
+learner writes the adapter (step 1), the rollout workers load it by path (step 2). That is cheap
+only because we train LoRA — the adapter is tens of MB while the base is ~28GB, and the base
+never moves.
+
+### How the two fan-outs work
+
+Both pools are the same idea — a warm set of workers you dispatch shards to with
+`asyncio.gather` — but they shard *different* things and isolate for *different* reasons.
+
+**Rollout sharding (by prompt).** `prompts_per_round` prompts are split into `rollout_workers`
+chunks (`distributed.py` uses `chunk(requests, ceil(len/workers))`), and each chunk becomes one
+`generate_rollouts` task call. A worker asks its vLLM engine for `num_generations` completions
+per prompt in one batched `generate()` — vLLM's continuous batching keeps the GPU busy across the
+whole chunk. Each completion comes back with the summed log-prob of its sampled tokens, which the
+learner needs for the importance ratio. Workers are **stateful on purpose**: the vLLM engine is
+cached in a process global and reused across rounds (see "Reuse" below), so only the LoRA adapter
+changes round to round.
+
+**Verify sharding (by completion).** All completions from all rollout workers are flattened and
+re-chunked into shards of `shard_size` — a *different* partition, because verification cost scales
+with the number of completions, not prompts. Each shard is one `verify_shard` call that opens a
+single `userns` sandbox and runs every completion's test suite sequentially inside it, returning a
+binary reward per completion. Workers here are **stateless on purpose**: a fresh sandbox per shard,
+so code from one completion can't observe or clobber another's files. The two knobs are
+independent — `rollout_workers` sets generation parallelism, `shard_size` sets verification
+parallelism (`ceil(total_completions / shard_size)` shards, capped by the pool's `replicas ×
+concurrency`).
 
 ### Reuse is what makes the rollout pool viable
 
-`rollout.py` caches the vLLM engine in a module global:
+`rollout.py` caches the vLLM engine in a module global that survives across task invocations —
+and across whole *runs* — because a reusable replica outlives the run that created it:
 
 ```python
-_ENGINE = None   # survives across task invocations on a reusable replica
+_ENGINE = None
+_ENGINE_BASE = None   # the REMOTE path of the base model the engine was built from
 
-if _ENGINE is None:
-    _ENGINE = LLM(model=_BASE_PATH, enable_lora=True, max_lora_rank=lora_rank, ...)
+if _ENGINE is None or _ENGINE_BASE != base_dir.path:
+    _ENGINE = LLM(model=..., enable_lora=True, max_lora_rank=_MAX_LORA_RANK, dtype=...)
+    _ENGINE_BASE = base_dir.path
 ```
 
-Building the engine and loading 28GB takes minutes. On a *non*-reusable environment every call
-is a fresh container, `_ENGINE` is always `None`, and this would be strictly slower than
-generating in-process. Reuse is not an optimization here; it is the enabling condition.
+Building the engine and loading 28GB takes minutes. On a *non*-reusable environment every call is
+a fresh container, `_ENGINE` is always `None`, and this would be strictly slower than generating
+in-process. Reuse is not an optimization here; it is the enabling condition. **Measured on a
+7B/L40s run: rollout `118s → 6s` from round 0 to round 1** — the cold start is paid once, then
+every later round reuses the warm engine.
 
-### The trap: vLLM caches LoRA adapters by integer id
+### Stale state is the price of reuse — key every cache on identity
 
-```python
-lora_request=LoRARequest(f"policy-r{round_id}", round_id + 1, adapter_path)
-```
+A warm replica outliving its run is the whole point, but it makes stale in-process state the
+central hazard. Everything cached must be keyed on something that changes when the work changes,
+never on "have I built anything yet." Two real traps, both fixed in `rollout.py`:
 
-`round_id` **must** increase every round. vLLM keys its adapter cache on the integer id — reuse
-an id and it serves the *previously cached* adapter and silently ignores the new weights on
-disk. Training then looks like it runs fine while every round rolls out the round-0 policy.
+**1. The engine, keyed on the base model.** An earlier, sloppier version guarded only on
+`_ENGINE is None`. When a 14B run landed on a replica still warm from a 0.5B run, it reused the
+0.5B engine — which was built with `max_lora_rank=8` and rejected the 14B run's rank-16 adapter
+(`ValueError: LoRA rank 16 is greater than max_lora_rank 8`). That error was lucky: without it,
+the run would have **silently generated from the 0.5B weights** and trained against garbage.
+Keying on `base_dir.path` (and freeing the old engine before building the new one) fixes it —
+`download_model` is cached per `model_name`, so the same model reuses the engine and a different
+model rebuilds.
 
-This is the nastiest failure mode in the design because nothing errors. **Symptom:** mean reward
-wanders around its round-0 value forever. If you see that, check this before anything else.
+**2. The adapter, keyed on its path.** vLLM caches LoRA adapters by integer id and serves the
+cached weights whenever an id repeats. Numbering adapters by `round_id` is unsafe across runs:
+run B's round 0 collides with run A's round 0 on a warm replica and serves A's stale adapter.
+`rollout.py` instead assigns every *distinct adapter remote path* a fresh monotonic id, so a new
+adapter always gets a new id — within a run and across runs. **Symptom if you get this wrong:**
+mean reward wanders around its round-0 value forever while nothing errors.
 
 ---
 
@@ -232,17 +307,46 @@ The default is `Qwen/Qwen2.5-Coder-14B`. Level 2 is what makes 14B comfortable �
 
 ## Memory: 14B LoRA on a 48GB L40s
 
+An L40s advertises 48GB but only ~44.4GB is usable after the driver. A 14B in bf16 is ~28GB of
+frozen weights, leaving ~16GB for everything else:
+
 | | Level 1 | Level 2 |
 |---|---|---|
 | base weights (bf16) | ~28 GB | ~28 GB |
 | LoRA + optimizer | ~1 GB | ~1 GB |
-| activations (grad ckpt) | ~4–8 GB | ~4–8 GB |
+| activations (grad ckpt) | scales with `micro_batch_size` | scales with `micro_batch_size` |
 | **KV cache for generation** | **on the same card** | **on the rollout workers** |
-| verdict | tight — lower `batch_size`/`num_generations` if you OOM | comfortable |
+| verdict | tight — lower `batch_size`/`num_generations` if you OOM | fits, but mind `micro_batch_size` |
 
-Generation and training competing for one card is exactly what Level 2 removes. If you are
-running Level 1 at 14B and hitting OOM, that is the constraint talking — drop to 7B, shrink the
-group, or move to Level 2.
+Level 2 removes generation from the learner card, which is what makes 14B viable at all — but it
+is not automatically comfortable. Two settings are load-bearing, and both are defaults here:
+
+- **`micro_batch_size` is the activation-memory knob.** At the tutorial defaults, a 14B update
+  OOM'd on the L40s at `micro_batch_size=4` (42.8GB live, ~1GB stranded to fragmentation). The
+  default is **2**; drop to **1** if you still OOM, or if you widen `max_completion_length`.
+- **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** (set on `learner_env`) lets the
+  allocator reclaim fragmented arenas. Without it, a 14B update can OOM with a gigabyte
+  "reserved but unallocated" — memory that would fit, stranded by fragmentation.
+
+If you are running **Level 1** at 14B and hitting OOM, that is generation and training sharing
+the card — drop to 7B, shrink the group, or move to Level 2.
+
+## Results
+
+A real Level 2 run on the documented target (L40s, 8 rounds, 16 prompts/round × 8 generations,
+50-problem held-out eval at pass@1 over 4 samples):
+
+| Base | Base pass@1 | GRPO pass@1 | Improvement |
+|---|---|---|---|
+| Qwen2.5-Coder-7B | 38.0% | 40.5% | **+2.5pp** |
+
+Of 50 eval problems, 21 sat in the movable band (base solves them *sometimes*) — that is the
+mass GRPO can act on, and the never-solved count stayed flat (22 → 22), exactly as theory
+predicts. The per-round training reward rose from ~0.48 to a ~0.61 peak with the expected RL
+noise, and the warm rollout engine made every round after the first ~20× cheaper to generate
+(`118s → 6s`). This is a modest-but-real gain at small scale; labs get large coding gains by
+pairing a strong base with 10⁴–10⁶ problems, and the pipeline here is what lets you scale the
+rollout/verify halves to get there.
 
 ---
 
