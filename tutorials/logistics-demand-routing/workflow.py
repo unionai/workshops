@@ -36,6 +36,7 @@ import flyte
 import flyte.io
 import flyte.report
 
+import basemap
 import report_helpers as rh
 from config import cpu_env, forecast_env, solver_env
 
@@ -320,6 +321,19 @@ async def summarize_forecasts(zones_dir: flyte.io.Dir, batches: list[str]) -> st
         {"lat": zones[r["zone"]]["lat"], "lng": zones[r["zone"]]["lng"], "demand": r["sum"]}
         for r in results
     ]
+    # This task renders its own map, so it fetches its own basemap — `build_routes` runs in
+    # a different task and its locals are not in scope here.
+    MAP_W, MAP_H = 980, 640
+    map_bbox = basemap.fit_bbox_to_aspect(
+        basemap.pad_bbox([z["lat"] for z in map_zones], [z["lng"] for z in map_zones]),
+        MAP_W, MAP_H)
+    bg_uri, attribution = "", ""
+    try:
+        tiles, _ = basemap.fetch_basemap(map_bbox, zoom=13, style="dark")
+        if tiles is not None:
+            bg_uri, attribution = basemap.image_to_uri(tiles), basemap.ATTRIBUTION
+    except Exception as e:  # noqa: BLE001 — decoration only
+        log.warning(f"basemap unavailable ({str(e)[:100]})")
 
     html = f"""
     <h2>Forecast — 24 hours ahead, zero-shot</h2>
@@ -354,7 +368,7 @@ async def summarize_forecasts(zones_dir: flyte.io.Dir, batches: list[str]) -> st
     {charts}
 
     <div class="chart-container">
-      {rh.demand_map(map_zones, title="Forecast demand, next 24 h", scale_label="Forecast pickups")}
+      {rh.demand_map(map_zones, title="Forecast demand, next 24 h", scale_label="Forecast pickups", width=MAP_W, height=MAP_H, bg_uri=bg_uri, bbox=map_bbox, attribution=attribution)}
     </div>
 
     <div class="note">
@@ -463,6 +477,8 @@ async def build_routes(
     vehicles: int = 6,
     capacity_slack: float = 1.25,
     solver_seconds: int = 15,
+    basemap_zoom: int = 13,
+    basemap_style: str = "dark",
 ) -> str:
     """
     Turn forecast demand into a routing plan, and compare it to the naive alternative.
@@ -484,6 +500,29 @@ async def build_routes(
     await flyte.report.replace.aio(rh.wrap_report(
         f"<h2>Routing</h2><p>Solving a {len(results)}-stop problem for {vehicles} vehicles…</p>"
     ), do_flush=True)
+
+    # Fetch a real basemap once; both maps below share the same Mercator window so the
+    # routes land on the actual streets rather than near them.
+    served_pre = [zones[r["zone"]] for r in results]
+    map_bbox = basemap.pad_bbox([z["lat"] for z in served_pre] + [depot["lat"]],
+                                [z["lng"] for z in served_pre] + [depot["lng"]])
+    # Match the bbox shape to the map frame, or the basemap gets stretched to fit.
+    # Frame shape follows the geography, not the other way round. Manhattan's bbox is
+    # markedly portrait; forcing it into a 720x560 landscape frame would expand the window
+    # to mostly water. One aspect is shared by the hero map and the two comparison maps so
+    # all three show the identical window.
+    MAP_W, MAP_H = 980, 640          # hero map fills the report width (landscape)
+    CMP_W, CMP_H = 468, 306          # comparison pair, same aspect as the hero
+    map_bbox = basemap.fit_bbox_to_aspect(map_bbox, MAP_W, MAP_H)
+    bg_uri, attribution = "", ""
+    try:
+        tiles, _ = basemap.fetch_basemap(map_bbox, zoom=basemap_zoom, style=basemap_style)
+        if tiles is not None:
+            bg_uri = basemap.image_to_uri(tiles)
+            attribution = basemap.ATTRIBUTION
+            log.info(f"basemap {tiles.size[0]}x{tiles.size[1]} @z{basemap_zoom}")
+    except Exception as e:  # noqa: BLE001 — decoration; never fail routing for a map tile
+        log.warning(f"basemap unavailable ({str(e)[:120]}) — plain background")
 
     served = [zones[r["zone"]] for r in results]
     demands = [0] + [max(1, int(round(r["peak"]))) for r in results]  # index 0 == depot
@@ -531,17 +570,17 @@ async def build_routes(
     </div>
 
     <div class="chart-container">
-      {rh.route_map(map_zones, opt_routes, depot, title="Optimized routes (OR-Tools, guided local search)")}
+      {rh.route_map(map_zones, opt_routes, depot, title="Optimized routes (OR-Tools, guided local search)", width=MAP_W, height=MAP_H, bg_uri=bg_uri, bbox=map_bbox, attribution=attribution)}
       {rh.vehicle_legend(opt_routes)}
     </div>
 
     <h3>Optimized vs nearest-neighbour</h3>
     <div class="grid2">
       <div class="chart-container">
-        {rh.route_map(map_zones, naive_routes, depot, title=f"Nearest-neighbour — {naive_total/1000:.1f} km", animate=False, height=440)}
+        {rh.route_map(map_zones, naive_routes, depot, title=f"Nearest-neighbour — {naive_total/1000:.1f} km", animate=False, width=CMP_W, height=CMP_H, bg_uri=bg_uri, bbox=map_bbox, attribution=attribution)}
       </div>
       <div class="chart-container">
-        {rh.route_map(map_zones, opt_routes, depot, title=f"Optimized — {opt_total/1000:.1f} km", animate=False, height=440)}
+        {rh.route_map(map_zones, opt_routes, depot, title=f"Optimized — {opt_total/1000:.1f} km", animate=False, width=CMP_W, height=CMP_H, bg_uri=bg_uri, bbox=map_bbox, attribution=attribution)}
       </div>
     </div>
 

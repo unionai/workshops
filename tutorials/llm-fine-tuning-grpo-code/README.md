@@ -579,6 +579,13 @@ inference workers each step, off-policy correction, matching generation throughp
 That lives in your trainer↔inference integration (TRL's vLLM mode, veRL). Union gives you the
 distributed substrate and the secure verifier; you plug in the RL engine.
 
+**All of the above is implemented in [`../llm-fine-tuning-grpo-distributed`](../llm-fine-tuning-grpo-distributed)**,
+including the weight-sync step. It ships in two levels: fan out verification onto a reusable
+pool while keeping this TRL trainer intact, then disaggregate the whole loop (vLLM rollout
+workers + sandbox pool + learner) with the GRPO objective written out. It also documents the
+constraint you will hit first — a reusable environment cannot set `pod_template`, so a warm
+pool cannot run the bubblewrap backend.
+
 ## Why Code Generation for GRPO?
 
 Code is an ideal RL task because it is:

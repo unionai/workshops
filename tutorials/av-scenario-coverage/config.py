@@ -20,20 +20,20 @@ base_image = (
 
 # Per-scenario rendering fans out. A 7-camera scenario is ~118 MB of 4K video, so these
 # want more memory and network than CPU.
-scenario_env = flyte.TaskEnvironment(
-    name="avcov-scenario",
+perception_env = flyte.TaskEnvironment(
+    name="av-perception",
     image=base_image,
     resources=flyte.Resources(cpu=4, memory="16Gi"),
     reusable=flyte.ReusePolicy(replicas=(2, 6), concurrency=2, idle_ttl=600,
                                scaledown_ttl=120),
 )
 
-# `depends_on` runs CALLER -> CALLEE. `pipeline` lives here and invokes `render_scenario`
-# in scenario_env, so the dependency is declared here. Reversing it works locally and
+# `depends_on` runs CALLER -> CALLEE. `pipeline` lives here and invokes `detect_and_render`
+# in perception_env, so the dependency is declared here. Reversing it works locally and
 # fails remotely with "Environment not found in image cache".
-cpu_env = flyte.TaskEnvironment(
-    name="avcov-cpu",
+coverage_env = flyte.TaskEnvironment(
+    name="av-coverage",
     image=base_image,
     resources=flyte.Resources(cpu=4, memory="16Gi"),
-    depends_on=[scenario_env],
+    depends_on=[perception_env],
 )

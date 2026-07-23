@@ -17,6 +17,8 @@ base_image = (
         "pyarrow==25.0.0",
         "numpy==2.5.1",
         "huggingface_hub==1.24.0",
+        # Basemap tiles are stitched with Pillow and embedded as base64.
+        "pillow==12.3.0",
         # Required by any environment that sets a ReusePolicy.
         "unionai-reuse>=0.1.10",
     )

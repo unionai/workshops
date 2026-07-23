@@ -1,10 +1,8 @@
-# CPU-only — no GPU needed anywhere in this pipeline.
 flyte[tui]>=2.0
-# Chronos v2 renamed the predict_quantiles kwarg `context` -> `inputs`; pin so the
-# tutorial doesn't silently break on the next minor release.
 chronos-forecasting==2.3.1
 ortools==9.15.6755
 torch==2.13.0
 pyarrow==25.0.0
 numpy==2.5.1
 huggingface_hub==1.24.0
+pillow==12.3.0

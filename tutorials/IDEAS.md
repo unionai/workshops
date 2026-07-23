@@ -126,15 +126,15 @@ Vertical pages live in `website-content/verticals/`. Several have an explicit
 | Model training | Covered | bert-fine-tuning-{emotion,sentiment}, llm-fine-tuning-lora-qlora |
 | Data Processing | Partial | lance-streaming-vision |
 | Inference | Partial | gemma4-chat, detr-object-detection (app) |
-| **Geospatial** | **Gap — building now** | — |
+| Geospatial | **BUILT** ✅ green remotely | [geospatial-burn-scar-segmentation](geospatial-burn-scar-segmentation/) |
 | **Media** | **Gap** | — |
-| **Logistics** | **Gap** | — |
-| **Autonomous Systems** | **Gap** | rl-unitree-* are locomotion, not AV perception |
+| Logistics | **BUILT** ✅ green remotely | [logistics-demand-routing](logistics-demand-routing/) |
+| Autonomous Systems | **BUILT ×2** ✅ green remotely | [av-perception-replay](av-perception-replay/), [av-scenario-coverage](av-scenario-coverage/) |
 | **Observability** | **Gap** | — |
 | **Context Engineering** | **Gap** | code-mode-analysis is adjacent |
 | **Financial Services** | **Weak** | fraud-detection-feast (tabular, no visual payoff) |
 
-### 1. Geospatial — burn scar mapping (IN PROGRESS)
+### 1. Geospatial — burn scar mapping (BUILT)
 
 Wildfire burn scar segmentation on Harmonized Landsat–Sentinel-2 imagery with NASA/IBM's
 Prithvi geospatial foundation model, plus a live STAC query → chip → segment → mosaic
@@ -171,34 +171,63 @@ fan-out over a real AOI.
   `[-121.45, 39.95, -121.05, 40.30]`) so the fan-out is visually dense, and re-render the
   mosaic progressively so a screen recording always has motion.
 
-### 2. Autonomous Systems — multi-sensor perception replay (BLOCKED on a licence call)
+### 2. Autonomous Systems — TWO tutorials (BUILT)
 
-3D detection on real driving logs: LiDAR + multi-camera.
+The licence question is resolved: **NVIDIA Cosmos data, not KITTI.** KITTI is CC BY-NC-SA
+3.0 (non-commercial) and both HF mirrors mislabel it `unknown`. Udacity's datasets *are*
+genuinely MIT (`datasets/LICENSE.md`) but every LiDAR set is torrent-only — S3 paths 403,
+bucket listing denied — so it is impractical. Both NVIDIA sets below are ungated with
+clean commercial terms.
 
-- **Money shot:** the coolest *motion* of the whole lineup — 6-camera ring with 3D boxes
-  tracking across frames, rotating LiDAR point cloud, BEV with boxes sliding along
-  trajectories. Inherently video; nothing needs animating.
-- **Research verdict — the original premise fails.** There is **no ungated HF mirror of
-  nuScenes with actual sensor data**. nuScenes, Argoverse and Waymo have no HF org at all;
-  every promising `nuscenes-mini` repo is an empty shell (`.gitattributes` + README, 0 GB).
-  There are also **no pretrained 3D detectors on HF** — `mmdetection3d` returns zero
-  results, and the only real weights are ONNX inside Autoware.
-- **The two viable paths, and the tradeoff:**
-  1. **KITTI** — `dpdl-benchmark/kitti` (ungated, 5.65 GB parquet, full 3D labels *and*
-     `image/file_name`) + `Chaitanya89/KITTI`'s `data_object_calib.zip` (26.8 MB) joined on
-     frame stem for the real `P2` projection. Complete and workable — but KITTI is
-     **CC BY-NC-SA 3.0, non-commercial**. Both HF mirrors mislabel it `license: unknown`.
-  2. **`nvidia/PhysicalAI-Autonomous-Vehicle-Cosmos-Drive-Dreams`** — ungated and
-     **CC BY 4.0, commercially clean**, with real LiDAR + 3D boxes sharded per clip
-     (~359 MB lidar tar + 5.8 MB object info). Camera video is "coming soon", so it is
-     LiDAR/BEV only for now — which is still the best motion visual.
-- **Decision needed:** accept KITTI's non-commercial terms, or build LiDAR-only on the
-  NVIDIA data. Held back rather than guessed, since ChaBuD and segformer-ADE were both
-  rejected on exactly this basis.
-- **Also:** don't promise a pretrained detector — render ground-truth boxes, optionally
-  adding `depth-anything/Depth-Anything-V2-Small-hf` (24.8M, Apache-2.0) for colored
-  pseudo-LiDAR from the mono camera.
-- **Cost:** heaviest build — sensor calibration and camera-projection math.
+Also confirmed: **there are no usable pretrained 3D detectors on Hugging Face.**
+`mmdetection3d` returns nothing; `pointpillars`/`bevformer` hits have single-digit
+downloads; the only real weights are ONNX inside Autoware. Don't promise 3D detection.
+
+#### 2a. [av-perception-replay](av-perception-replay/) — BEV from annotations
+
+- **Dataset:** `nvidia/PhysicalAI-Autonomous-Vehicle-Cosmos-Drive-Dreams` — **CC-BY-4.0,
+  ungated.** Per clip: 3D boxes with persistent track IDs, 9 HD-map layers, ego pose,
+  7-camera intrinsics, captions.
+- **Cost:** annotations ~9 MB/clip; `lidar_raw` is ~370 MB/clip and is **skipped** — the
+  BEV comes from map + boxes, so this is ~40x cheaper for no visual loss.
+- **Result:** green remotely, CPU, **50 s**. 3 clips, 318 tracks, 53,682 annotations.
+- **Screening is the highest-leverage step:** a blind clip gave 19 tracks / 8 objects per
+  frame; caption-scored screening found 156 tracks / **140 per frame** — 17x.
+- **Trap:** map layers use **four different geometry schemas**
+  (`polylines3d.polylines[].vertices`, `polyline3d.vertices`, `surface.vertices`,
+  `cuboid3d.vertices`). Handling one gives 584 features and *no error*; handling all four
+  gives 1,302.
+
+#### 2b. [av-scenario-coverage](av-scenario-coverage/) — POV + detection
+
+- **Dataset:** `nvidia/PhysicalAI-WorldModel-Synthetic-Autonomous-Driving-Scenarios` —
+  **OpenMDW 1.1, ungated**, card states "ready for commercial/non-commercial use".
+  6,072 scenarios; 6,010 have the full **7-camera rig**; 4K/24fps/~460 frames;
+  per-camera Qwen2.5-7B captions + `weather`/`time_of_day`/`surface_type`/`region`.
+- **Model:** `google/owlv2-base-patch16-ensemble` (Apache-2.0, ungated) —
+  **open-vocabulary** detection, prompted with free text.
+- **Result:** green remotely, CPU. Detection ~1.8 s/frame.
+- **Two things detection buys over rendering:**
+  1. *Label verification* — the clip filed under `emergency` had **no emergency vehicle
+     detected** across 14 frames.
+  2. *Sim-to-real gap, measured* — mean confidence **0.18-0.34** vs 0.5-0.8 typical on
+     real photos. NVIDIA warns about the gap qualitatively; this is a number.
+- **Traps:** OWLv2's image processor needs **`scipy`** or it dies with an opaque
+  `requires_backends` error at first inference, not at import. There is **no
+  `time_of_day` value called "Day"** — real values are `Mid-day`/`Morning`/`Afternoon`/
+  `Evening`/`Dusk`/`Twilight`/`Daytime`/`Night`, so `startswith("day")` matched 0 of 40.
+  Metadata is **not uniform**: some `emergency` campaigns ship only `caption_key`, so
+  unlabelled must be distinguished from a real zero or the coverage matrix lies.
+- **Honest caveat:** fully synthetic. NVIDIA states it "exhibits a sim-to-real appearance
+  gap" and that some authored behaviours "may appear unnatural". Reports repeat this.
+
+#### 2c. Cosmos *generation* — NOT BUILT, the ambitious version
+
+Run Cosmos world-model generation (structured input -> generated video) to **synthesise the
+long-tail scenario the coverage matrix says you're missing**. Closes the loop with 2b and
+is the strongest AV story available. Needs a large video diffusion model and real GPU time
+vs 1.8 s/frame CPU for detection. Verify Cosmos weights are ungated and measure the GPU
+footprint before committing.
 
 ### 3. Media — video to searchable index
 
@@ -248,9 +277,59 @@ Structured risk-factor extraction from real SEC EDGAR filings, compared across c
 
 ### Build order
 
-Geospatial first (in progress), then Autonomous Systems pending dataset confirmation, then
-Media, Logistics, Fintech, Observability, Context Engineering. One at a time, each reviewed
-before the next so the report template compounds.
+**Done and green on Union (remote), in build order:**
+
+1. [geospatial-burn-scar-segmentation](geospatial-burn-scar-segmentation/) — GPU, ~19 min
+2. [logistics-demand-routing](logistics-demand-routing/) — CPU, ~105 s
+3. [av-perception-replay](av-perception-replay/) — CPU, ~50 s
+4. [av-scenario-coverage](av-scenario-coverage/) — CPU, ~2-4 min
+
+**Remaining:** Media, Fintech (EDGAR), Observability, Context Engineering, and optionally
+Cosmos *generation* (2c above).
+
+### Lessons that cost real time — apply to every remaining build
+
+**A green pipeline does not mean correct output.** Two of the worst bugs produced valid
+runs with plausible numbers, and were only caught by a human opening the report:
+
+- *Sentinel-2 band misregistration.* The 10 m (RGB) and 20 m (NIR/SWIR) bands do not share
+  a pixel grid. Reusing one pixel window read a 2x larger footprint from the 20 m bands and
+  ran off their edge entirely, filling NIR/SWIR with zeros. Symptom: the lower half of the
+  mosaic rendered solid blue. Fixing it moved mean burn fraction from 3.8% to **37.8%**.
+  Define tiles in **world coordinates** and let each band resolve its own window.
+- *Caching silently empties reports.* A cached task does not execute its body, and the
+  reports are written by those bodies. Cache hit -> correct outputs, blank report, no
+  error. Tell-tale: a task completing in **0 secs**. Keep caching **off** for any run you
+  intend to look at or record.
+
+**Assume nothing is internally uniform.** Three separate instances: Sentinel-2 band
+resolutions, Cosmos's four map-geometry schemas, and per-family scenario metadata. Each
+produced plausible-but-wrong output rather than an error. Always print per-category counts
+after parsing.
+
+**Remote runs are mandatory; local cannot catch these.** All of the following worked
+perfectly locally and failed only on Union:
+
+- Missing system lib (`libexpat.so.1`) — rasterio's wheel bundles 43 shared libs but links
+  two from the OS. Parse `DT_NEEDED` from the wheel's ELF headers rather than guessing.
+- **Local modules not bundled** — Flyte ships the *module-level import closure* of the
+  entry file. A helper imported inside a function body never ships. Import at module scope.
+- **`depends_on` direction** — runs CALLER -> CALLEE. Got this backwards twice. The env
+  containing `pipeline` declares the others. Fails with "Environment not found in image
+  cache".
+- **OOM race on a shared model cache** — `concurrency > 1` runs coroutines in one process;
+  an unguarded cache lets each build its own copy of the model. Guard with `asyncio.Lock`.
+- **`InlineIOMaxBytesBreached`** — task IO is capped at 10 MB and base64 adds 33%. Pass
+  images as `flyte.io.Dir`/`File` references, never inline. It fails at the *join*, after
+  every upstream task has already done its work.
+
+**Screening beats rendering.** Caption-scoring Cosmos clips found 140 objects/frame vs 8
+for a blind pick — 17x — for seconds of cost. Do the cheap selection step first.
+
+**Pin versions and verify them.** My guesses were wrong repeatedly: `huggingface_hub` is
+1.x not 0.35, pyarrow 25 not 22, pandas 3.x. `chronos-forecasting` v2 renamed
+`predict_quantiles(context=)` to `inputs=`. `datasets` removed loading scripts in **4.0**.
+The accelerator literal is `L40s:1`, lowercase s.
 
 ## Notes
 

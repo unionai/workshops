@@ -16,8 +16,8 @@ base_image = (
 
 # Per-clip work fans out. Each clip's annotation bundle is ~9 MB, so these are small,
 # fast, independently retryable tasks — the same shape as the geospatial tile fan-out.
-clip_env = flyte.TaskEnvironment(
-    name="av-clip",
+scene_env = flyte.TaskEnvironment(
+    name="av-scene",
     image=base_image,
     resources=flyte.Resources(cpu=2, memory="8Gi"),
     reusable=flyte.ReusePolicy(replicas=(2, 6), concurrency=3, idle_ttl=600,
@@ -25,13 +25,13 @@ clip_env = flyte.TaskEnvironment(
 )
 
 # `depends_on` points from CALLER to CALLEE, and the direction is easy to get backwards.
-# `pipeline` lives here in cpu_env and invokes `replay_clip`, which lives in clip_env — so
-# cpu_env declares the dependency, not the other way round. Reversing it fails only on a
-# remote run, with "Environment 'av-clip' not found in image cache"; locally there is no
+# `pipeline` lives here in replay_env and invokes `reconstruct_scene`, which lives in
+# scene_env — so replay_env declares the dependency, not the other way round. Reversing it
+# fails only on a remote run with "Environment not found in image cache"; locally there is no
 # image cache and it works fine either way.
-cpu_env = flyte.TaskEnvironment(
-    name="av-cpu",
+replay_env = flyte.TaskEnvironment(
+    name="av-replay",
     image=base_image,
     resources=flyte.Resources(cpu=4, memory="16Gi"),
-    depends_on=[clip_env],
+    depends_on=[scene_env],
 )

@@ -64,24 +64,45 @@ def _mercator_y(lat: float) -> float:
 
 
 class Projection:
-    """Project lon/lat into SVG pixel space, preserving aspect ratio."""
+    """
+    Project lon/lat into SVG pixel space using Web Mercator.
 
-    def __init__(self, lats, lngs, width: int, height: int, pad: int = 28):
+    Pass an explicit `bbox` (west, south, east, north) to lock the window to a basemap
+    image. Without it the projection fits the data extent, which is fine for a bare plot
+    but will NOT line up with a fetched map tile — points end up offset from the streets.
+    """
+
+    def __init__(self, lats, lngs, width: int, height: int, pad: int = 28, bbox=None):
+        self.height = height
+        self.pad = pad
+        if bbox is not None:
+            west, south, east, north = bbox
+            self.x0, self.x1 = west, east
+            self.y0, self.y1 = _mercator_y(south), _mercator_y(north)
+            dx = (self.x1 - self.x0) or 1e-6
+            dy = (self.y1 - self.y0) or 1e-6
+            # Fill the frame exactly — the basemap was cropped to this same window.
+            self.sx = width / dx
+            self.sy = height / dy
+            self.ox = 0.0
+            self.oy = 0.0
+            self._fixed = True
+            return
+
         ys = [_mercator_y(v) for v in lats]
         self.x0, self.x1 = min(lngs), max(lngs)
         self.y0, self.y1 = min(ys), max(ys)
         dx = (self.x1 - self.x0) or 1e-6
         dy = (self.y1 - self.y0) or 1e-6
-        # One scale for both axes keeps the geography honest.
-        self.s = min((width - 2 * pad) / dx, (height - 2 * pad) / dy)
-        self.ox = pad + ((width - 2 * pad) - dx * self.s) / 2
-        self.oy = pad + ((height - 2 * pad) - dy * self.s) / 2
-        self.height = height
-        self.pad = pad
+        s_ = min((width - 2 * pad) / dx, (height - 2 * pad) / dy)
+        self.sx = self.sy = s_
+        self.ox = pad + ((width - 2 * pad) - dx * s_) / 2
+        self.oy = pad + ((height - 2 * pad) - dy * s_) / 2
+        self._fixed = False
 
     def __call__(self, lat: float, lng: float) -> tuple[float, float]:
-        x = self.ox + (lng - self.x0) * self.s
-        y = self.oy + (self.y1 - _mercator_y(lat)) * self.s
+        x = self.ox + (lng - self.x0) * self.sx
+        y = self.oy + (self.y1 - _mercator_y(lat)) * self.sy
         return x, y
 
 
@@ -107,8 +128,22 @@ def _ramp_color(t: float) -> str:
 # Maps
 # ------------------------------------------------------------------
 
+def _basemap_layer(bg_uri, width, height, attribution=""):
+    """SVG background image + attribution. Empty string when no basemap was fetched."""
+    if not bg_uri:
+        return f'<rect width="{width}" height="{height}" fill="#f8fafc" rx="8"/>'
+    return (
+        f'<image href="{bg_uri}" x="0" y="0" width="{width}" height="{height}" '
+        f'preserveAspectRatio="none"/>'
+        f'<rect width="{width}" height="{height}" fill="#0b1220" opacity="0.18"/>'
+        + (f'<text x="{width-6}" y="{height-6}" text-anchor="end" font-size="9" '
+           f'fill="#94a3b8" opacity="0.85">{attribution}</text>' if attribution else "")
+    )
+
+
 def demand_map(zones: list[dict], title: str = "", width: int = 720, height: int = 560,
-               scale_label: str = "Forecast demand") -> str:
+               scale_label: str = "Forecast demand", bg_uri: str = "", bbox=None,
+               attribution: str = "") -> str:
     """
     Bubble map of per-zone demand. `zones` need `lat`, `lng`, `demand`.
 
@@ -117,7 +152,8 @@ def demand_map(zones: list[dict], title: str = "", width: int = 720, height: int
     """
     if not zones:
         return ""
-    proj = Projection([z["lat"] for z in zones], [z["lng"] for z in zones], width, height)
+    proj = Projection([z["lat"] for z in zones], [z["lng"] for z in zones], width, height,
+                      bbox=bbox)
     dmax = max(z["demand"] for z in zones) or 1.0
     dmin = min(z["demand"] for z in zones)
     rng = (dmax - dmin) or 1.0
@@ -125,11 +161,12 @@ def demand_map(zones: list[dict], title: str = "", width: int = 720, height: int
     svg = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
         f'style="width:100%;max-width:{width}px;height:auto;">',
-        f'<rect width="{width}" height="{height}" fill="#f8fafc" rx="8"/>',
+        _basemap_layer(bg_uri, width, height, attribution),
     ]
     if title:
-        svg.append(f'<text x="{width/2}" y="22" text-anchor="middle" font-size="14" '
-                   f'font-weight="600" fill="#1e3a5f">{title}</text>')
+        svg.append(f'<rect x="0" y="0" width="{width}" height="30" fill="#0b1220" opacity="0.55"/>')
+        svg.append(f'<text x="{width/2}" y="21" text-anchor="middle" font-size="14" '
+                   f'font-weight="600" fill="#e2e8f0">{title}</text>')
 
     for z in sorted(zones, key=lambda z: z["demand"]):
         x, y = proj(z["lat"], z["lng"])
@@ -153,7 +190,8 @@ def demand_map(zones: list[dict], title: str = "", width: int = 720, height: int
 
 
 def route_map(zones: list[dict], routes: list[dict], depot: dict, title: str = "",
-              width: int = 720, height: int = 560, animate: bool = True) -> str:
+              width: int = 720, height: int = 560, animate: bool = True,
+              bg_uri: str = "", bbox=None, attribution: str = "") -> str:
     """
     Draw solved vehicle routes over the zone map.
 
@@ -167,16 +205,17 @@ def route_map(zones: list[dict], routes: list[dict], depot: dict, title: str = "
         return ""
     lats = [z["lat"] for z in zones] + [depot["lat"]]
     lngs = [z["lng"] for z in zones] + [depot["lng"]]
-    proj = Projection(lats, lngs, width, height)
+    proj = Projection(lats, lngs, width, height, bbox=bbox)
 
     svg = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
         f'style="width:100%;max-width:{width}px;height:auto;">',
-        f'<rect width="{width}" height="{height}" fill="#f8fafc" rx="8"/>',
+        _basemap_layer(bg_uri, width, height, attribution),
     ]
     if title:
-        svg.append(f'<text x="{width/2}" y="22" text-anchor="middle" font-size="14" '
-                   f'font-weight="600" fill="#1e3a5f">{title}</text>')
+        svg.append(f'<rect x="0" y="0" width="{width}" height="30" fill="#0b1220" opacity="0.55"/>')
+        svg.append(f'<text x="{width/2}" y="21" text-anchor="middle" font-size="14" '
+                   f'font-weight="600" fill="#e2e8f0">{title}</text>')
 
     # unvisited zones first, faintly
     for z in zones:
@@ -212,10 +251,17 @@ def route_map(zones: list[dict], routes: list[dict], depot: dict, title: str = "
             svg.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{min(rr,9):.1f}" fill="{color}" '
                        f'stroke="#fff" stroke-width="1"/>')
 
-    svg.append(f'<rect x="{dx-6:.1f}" y="{dy-6:.1f}" width="12" height="12" rx="2" '
-               f'fill="{DEPOT_COLOR}" stroke="#fff" stroke-width="1.5"/>')
-    svg.append(f'<text x="{dx:.1f}" y="{dy-11:.1f}" text-anchor="middle" font-size="10" '
-               f'font-weight="600" fill="{DEPOT_COLOR}">Depot</text>')
+    # Depot marker, deliberately oversized. At 12px with a 10px label it vanished in a
+    # screen recording; the depot is the anchor of the whole plan and should read instantly.
+    svg.append(f'<circle cx="{dx:.1f}" cy="{dy:.1f}" r="16" fill="#f8fafc" opacity="0.30"/>')
+    svg.append(f'<circle cx="{dx:.1f}" cy="{dy:.1f}" r="11" fill="#fbbf24" stroke="#fff" '
+               f'stroke-width="3"/>')
+    svg.append(f'<circle cx="{dx:.1f}" cy="{dy:.1f}" r="4" fill="#7c2d12"/>')
+    lw = 62
+    svg.append(f'<rect x="{dx-lw/2:.1f}" y="{dy-40:.1f}" width="{lw}" height="21" rx="5" '
+               f'fill="#111827" opacity="0.88"/>')
+    svg.append(f'<text x="{dx:.1f}" y="{dy-25:.1f}" text-anchor="middle" font-size="14" '
+               f'font-weight="700" fill="#fbbf24" letter-spacing="0.4">DEPOT</text>')
     svg.append("</svg>")
     return "\n".join(svg)
 

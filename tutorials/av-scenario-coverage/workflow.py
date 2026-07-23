@@ -35,7 +35,7 @@ import flyte.report
 import detect
 import report_helpers as rh
 import video
-from config import cpu_env, scenario_env
+from config import coverage_env, perception_env
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ BASE = f"https://huggingface.co/datasets/{REPO}/resolve/main"
 API = f"https://huggingface.co/api/datasets/{REPO}"
 
 SCENARIO_FAMILIES = ["emergency", "lanechange", "nudging"]
-PIPELINE_STEPS = ["Index Scenarios", "Render Surround", "Coverage Report"]
+PIPELINE_STEPS = ["Survey Scenarios", "Detect & Evaluate", "Coverage Report"]
 
 # Actual `time_of_day` values in the dataset. There is NO value called "Day" — the bright
 # ones are these, and a naive `startswith("day")` test matches nothing at all.
@@ -69,8 +69,8 @@ def _fetch(url: str, timeout: int = 120) -> bytes:
 # Task 1: index scenarios
 # ------------------------------------------------------------------
 
-@cpu_env.task(report=True)
-async def index_scenarios(n_sample: int = 150, n_pick: int = 3,
+@coverage_env.task(report=True)
+async def survey_scenarios(n_sample: int = 150, n_pick: int = 3,
                           prefer_daylight: bool = True) -> str:
     """
     Sample scenario metadata and build the coverage matrix.
@@ -228,16 +228,19 @@ async def index_scenarios(n_sample: int = 150, n_pick: int = 3,
 # Task 2: render one scenario  (fans out)
 # ------------------------------------------------------------------
 
-@scenario_env.task(retries=2)
-async def render_scenario(family: str, scenario_id: str, cameras: list[str],
+@perception_env.task(retries=2)
+async def detect_and_render(family: str, scenario_id: str, cameras: list[str],
                           n_frames: int = 16, tile_w: int = 320,
                           run_detection: bool = True,
                           det_threshold: float = 0.12) -> flyte.io.Dir:
     """Download this scenario's cameras, decode, detect, and composite a surround sequence.
 
-    Detection runs on `front_wide` only. Running it on all seven cameras would cost 7x for
-    little extra signal — front_wide is the view a perception stack leans on, and it is the
-    one whose detections are worth showing next to the scenario label.
+    Detection runs on **every** camera, not just the forward view. That costs ~7x, but it
+    buys the most interesting comparison in the pipeline: three of the seven cameras are
+    200-degree fisheyes, and OWLv2 was trained on rectilinear photographs. Detection
+    quality should fall off sharply on the warped views — which is exactly why production
+    stacks rectify fisheye before detection. Reporting per-camera rates makes that visible
+    instead of assumed.
     """
     work = tempfile.mkdtemp(prefix="scn_")
     frames_by_cam, got = {}, []
@@ -260,17 +263,33 @@ async def render_scenario(family: str, scenario_id: str, cameras: list[str],
         raise RuntimeError(f"{scenario_id}: no cameras decoded")
 
     # ---- open-vocabulary detection on the forward view ----
-    det_summary, det_error = None, ""
-    if run_detection and "front_wide" in frames_by_cam:
+    det_summary, det_error, per_camera = None, "", {}
+    if run_detection and frames_by_cam:
         try:
-            per_frame = detect.detect(frames_by_cam["front_wide"], threshold=det_threshold)
-            det_summary = detect.summarize(per_frame)
-            frames_by_cam["front_wide"] = [
-                detect.draw_detections(img, dets)
-                for img, dets in zip(frames_by_cam["front_wide"], per_frame)
-            ]
-            log.info(f"{scenario_id}: {det_summary['total_detections']} detections, "
-                     f"mean score {det_summary['overall_mean_score']:.3f}, "
+            all_frames = []
+            for cam in list(frames_by_cam):
+                per_frame = detect.detect(frames_by_cam[cam], threshold=det_threshold)
+                per_camera[cam] = detect.summarize(per_frame)
+                per_camera[cam]["fisheye"] = "fisheye" in cam
+                all_frames.extend(per_frame)
+                frames_by_cam[cam] = [
+                    detect.draw_detections(img, dets)
+                    for img, dets in zip(frames_by_cam[cam], per_frame)
+                ]
+            det_summary = detect.summarize(all_frames)
+            pin = [v for v in per_camera.values() if not v["fisheye"]]
+            fis = [v for v in per_camera.values() if v["fisheye"]]
+            det_summary["pinhole_mean_score"] = (
+                sum(v["overall_mean_score"] for v in pin) / len(pin) if pin else 0.0)
+            det_summary["fisheye_mean_score"] = (
+                sum(v["overall_mean_score"] for v in fis) / len(fis) if fis else 0.0)
+            det_summary["pinhole_per_frame"] = (
+                sum(v["total_detections"] for v in pin) / max(sum(v["frames"] for v in pin), 1))
+            det_summary["fisheye_per_frame"] = (
+                sum(v["total_detections"] for v in fis) / max(sum(v["frames"] for v in fis), 1))
+            log.info(f"{scenario_id}: {det_summary['total_detections']} detections across "
+                     f"{len(per_camera)} cameras | pinhole {det_summary['pinhole_mean_score']:.3f} "
+                     f"vs fisheye {det_summary['fisheye_mean_score']:.3f} | "
                      f"emergency_hit={det_summary['emergency_hit']}")
         except Exception as e:  # noqa: BLE001 — detection is additive; never sink the render
             det_error = str(e)[:200]
@@ -291,6 +310,7 @@ async def render_scenario(family: str, scenario_id: str, cameras: list[str],
         "frames": len(composited),
         "bytes": sum(len(j) for j in composited),
         "detection": det_summary,
+        "detection_per_camera": per_camera,
         "detection_error": det_error,
     }
     with open(os.path.join(out_dir, "stats.json"), "w") as f:
@@ -303,7 +323,7 @@ async def render_scenario(family: str, scenario_id: str, cameras: list[str],
 # Pipeline
 # ------------------------------------------------------------------
 
-@cpu_env.task(report=True)
+@coverage_env.task(report=True)
 async def pipeline(n_scenarios: int = 3, n_sample: int = 150, n_frames: int = 16,
                    tile_w: int = 320, fps: int = 8, full_rig: bool = True) -> str:
     """Index the dataset, render surround views, and report coverage gaps."""
@@ -316,14 +336,14 @@ async def pipeline(n_scenarios: int = 3, n_sample: int = 150, n_frames: int = 16
         )
 
     await step(1, "Sampling scenario metadata…")
-    index_json = await index_scenarios(n_sample=n_sample, n_pick=n_scenarios)
+    index_json = await survey_scenarios(n_sample=n_sample, n_pick=n_scenarios)
     index = json.loads(index_json)
     picked = index["picked"]
 
     await step(2, f"Rendering {len(picked)} surround views…")
-    with flyte.group("render-scenarios"):
+    with flyte.group("detect-scenarios"):
         results = await asyncio.gather(*[
-            render_scenario(
+            detect_and_render(
                 family=p["family"], scenario_id=p["id"],
                 cameras=(p["cameras"] if full_rig else
                          [c for c in video.DEFAULT_RIG if c in p["cameras"]]),
@@ -357,11 +377,11 @@ async def pipeline(n_scenarios: int = 3, n_sample: int = 150, n_frames: int = 16
         players += (
             f"<h3><span class='badge'>{meta['family']}</span> "
             f"{meta['time_of_day']} · {meta['weather']} · {meta['region']}</h3>"
-            f"<div class='note' style='margin-top:4px;'>{meta['caption'][:320]}</div>"
+            f"<div class='note' style='margin-top:4px;'><i>&ldquo;{meta['caption'][:320]}&rdquo;</i></div>"
             + rh.surround_player_html(
                 uris, slug=st["id"][-8:], fps=fps,
                 caption=f"{st['n_cameras']} cameras · {st['frames']} frames · "
-                        f"boxes drawn on front_wide by OWLv2",
+                        f"OWLv2 boxes on every camera",
             )
         )
         d = st.get("detection")
@@ -379,11 +399,38 @@ async def pipeline(n_scenarios: int = 3, n_sample: int = 150, n_frames: int = 16
                 if d["emergency_hit"] else
                 "<span style='color:#b91c1c;font-weight:600;'>not found</span>"
             )
+            pc = st.get("detection_per_camera") or {}
+            cam_rows = "".join(
+                f"<tr><td>{c.replace('_',' ')}"
+                + ("<span class='badge' style='margin-left:6px;'>fisheye</span>" if v['fisheye'] else "")
+                + f"</td><td>{v['total_detections']}</td>"
+                f"<td>{v['total_detections']/max(v['frames'],1):.1f}</td>"
+                f"<td>{v['overall_mean_score']:.3f}</td></tr>"
+                for c, v in sorted(pc.items(), key=lambda kv: -kv[1]['overall_mean_score'])
+            )
+            drop = ""
+            if d.get("pinhole_mean_score") and d.get("fisheye_mean_score"):
+                delta = 100 * (1 - d["fisheye_mean_score"] / d["pinhole_mean_score"])
+                drop = (f"<div class='note' style='margin-top:8px;'>"
+                        f"<b>Rectilinear vs fisheye:</b> mean confidence "
+                        f"<b>{d['pinhole_mean_score']:.3f}</b> on the four standard cameras "
+                        f"vs <b>{d['fisheye_mean_score']:.3f}</b> on the three 200&deg; "
+                        f"fisheyes — a <b>{delta:.0f}%</b> drop, and "
+                        f"{d['pinhole_per_frame']:.1f} vs {d['fisheye_per_frame']:.1f} "
+                        f"detections per frame. OWLv2 never saw that warping in training, "
+                        f"which is why production stacks rectify fisheye before detection."
+                        f"</div>")
             players += f"""
               <div class="card">
-                <b>Detection — {d['total_detections']} boxes over {d['frames']} frames</b>
-                &nbsp;·&nbsp; mean confidence <b>{d['overall_mean_score']:.3f}</b>
-                {f"&nbsp;·&nbsp; emergency vehicle: {verdict}" if expected else ""}
+                <b>Scenario detection evaluation</b> &nbsp;·&nbsp; {d['total_detections']} objects
+                across {st['n_cameras']} cameras &nbsp;·&nbsp;
+                avg confidence <b>{d['overall_mean_score']:.2f}</b>
+                {f"<br><b>Emergency vehicle:</b> {verdict}" if expected else ""}
+                {drop}
+                <table style="margin-top:8px;">
+                  <tr><th>Camera</th><th>Boxes</th><th>Per frame</th><th>Mean score</th></tr>
+                  {cam_rows}
+                </table>
                 <table style="margin-top:8px;">
                   <tr><th>Prompt</th><th>Frames hit</th><th>Boxes</th><th>Mean score</th></tr>
                   {det_rows}
@@ -416,7 +463,7 @@ async def pipeline(n_scenarios: int = 3, n_sample: int = 150, n_frames: int = 16
         coverage, to be paired with real fleet data — not as a substitute for it.
       </div>
       <div class="note">
-        <b>Boxes on the forward view come from OWLv2</b>, an open-vocabulary detector
+        <b>Every box is a live prediction.</b> OWLv2 runs on all seven cameras, an open-vocabulary detector
         prompted with free text ("a police car", "an ambulance", "a person") rather than a
         fixed class list. Two things this measures that rendering cannot: whether a clip
         filed under <code>emergency</code> actually contains an emergency vehicle, and how

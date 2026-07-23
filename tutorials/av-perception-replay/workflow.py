@@ -41,7 +41,7 @@ import flyte.report
 
 import bev
 import report_helpers as rh
-from config import clip_env, cpu_env
+from config import replay_env, scene_env
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ DENSE_TERMS = ["pedestrian", "crosswalk", "intersection", "traffic light", "cycl
                "buildings"]
 SPARSE_TERMS = ["night", "nighttime", "dark", "highway", "tunnel", "rain", "snow"]
 
-PIPELINE_STEPS = ["Screen Clips", "Replay Scenes", "Compare"]
+PIPELINE_STEPS = ["Rank Clips", "Reconstruct Scenes", "Compare"]
 
 
 def _fetch(url: str, timeout: int = 90) -> bytes:
@@ -84,8 +84,8 @@ def score_caption(text: str) -> int:
 # Task 1: screen clips
 # ------------------------------------------------------------------
 
-@cpu_env.task(report=True)
-async def screen_clips(n_sample: int = 200, top_k: int = 3) -> str:
+@replay_env.task(report=True)
+async def rank_clips_by_density(n_sample: int = 200, top_k: int = 3) -> str:
     """Rank clips by caption-derived scene density and keep the best."""
     await flyte.report.replace.aio(rh.wrap_report(
         "<h2>Screening clips</h2><p>Listing the dataset and sampling captions…</p>"
@@ -153,8 +153,8 @@ async def screen_clips(n_sample: int = 200, top_k: int = 3) -> str:
 # Task 2: replay one clip  (fans out)
 # ------------------------------------------------------------------
 
-@clip_env.task(retries=2)
-async def replay_clip(clip_id: str, n_frames: int = 60, fwd: float = 80.0,
+@scene_env.task(retries=2)
+async def reconstruct_scene(clip_id: str, n_frames: int = 60, fwd: float = 80.0,
                       side: float = 45.0, size: int = 720) -> flyte.io.Dir:
     """Download one clip's annotations and render a BEV frame sequence."""
     import glob
@@ -244,8 +244,8 @@ async def replay_clip(clip_id: str, n_frames: int = 60, fwd: float = 80.0,
 # Task 3: compare
 # ------------------------------------------------------------------
 
-@cpu_env.task(report=True)
-async def compare_clips(clip_dirs: list[flyte.io.Dir]) -> str:
+@replay_env.task(report=True)
+async def compare_scenes(clip_dirs: list[flyte.io.Dir]) -> str:
     """Aggregate statistics across the replayed clips."""
     import collections
 
@@ -315,7 +315,7 @@ async def compare_clips(clip_dirs: list[flyte.io.Dir]) -> str:
 # Pipeline
 # ------------------------------------------------------------------
 
-@cpu_env.task(report=True)
+@replay_env.task(report=True)
 async def pipeline(
     n_clips: int = 3,
     n_sample: int = 200,
@@ -330,7 +330,7 @@ async def pipeline(
         + rh.progress_html(PIPELINE_STEPS, 1, "Scoring clip captions for scene density…")
     ), do_flush=True)
 
-    screen_json = await screen_clips(n_sample=n_sample, top_k=n_clips)
+    screen_json = await rank_clips_by_density(n_sample=n_sample, top_k=n_clips)
     chosen = json.loads(screen_json)["chosen"]
 
     await flyte.report.replace.aio(rh.wrap_report(
@@ -339,9 +339,9 @@ async def pipeline(
                            f"Rendering {n_clips} scenes ({n_frames} frames each)…")
     ), do_flush=True)
 
-    with flyte.group("replay-clips"):
+    with flyte.group("reconstruct-scenes"):
         results = await asyncio.gather(
-            *[replay_clip(clip_id=c["clip"], n_frames=n_frames, fwd=fwd, side=side)
+            *[reconstruct_scene(clip_id=c["clip"], n_frames=n_frames, fwd=fwd, side=side)
               for c in chosen],
             return_exceptions=True,
         )
@@ -352,7 +352,7 @@ async def pipeline(
     if not clip_dirs:
         raise RuntimeError("Every clip failed to replay.")
 
-    compare_json = await compare_clips(clip_dirs=clip_dirs)
+    compare_json = await compare_scenes(clip_dirs=clip_dirs)
 
     # ---- final report: the replays themselves, on this report ----
     players = ""
