@@ -67,6 +67,21 @@ ROLLOUT_PACKAGES = (
 
 GPU = os.getenv("GRPO_GPU", "L40s:1")  # lowercase 's' — "L40S:1" is not a valid accelerator
 
+# CPU/RAM for the two GPU environments, overridable per-run.
+#
+# Kept modest (6 CPU / 48 GiB) on purpose, but NOT because a bigger request fails
+# to schedule — in our own testing an 8 CPU / 64 GiB L40s pod scheduled instantly
+# when an L40s node was free. A 14B lives in *GPU* memory, so host RAM barely
+# matters here; a smaller footprint just fits more node types and leaves headroom
+# below the node's allocatable ceiling (kubelet/system-daemon reservations put
+# allocatable a little under nominal). The real thing that makes a GPU task wait
+# is node *availability* — if the L40s nodepool has no free node and isn't
+# autoscaling one, the task sits in WAITING_FOR_RESOURCES regardless of how small
+# you make the request. Watch the scheduler message: "N/M nodes are available"
+# with no "exceed limits" on the GPU nodepool means capacity, not request size.
+GPU_CPU = int(os.getenv("GRPO_GPU_CPU", "6"))
+GPU_MEM = os.getenv("GRPO_GPU_MEM", "48Gi")
+
 # One image shared by the orchestrator and the learner. They need the same
 # packages, and giving them separate names would build the identical layer stack
 # twice — a slow, pointless duplicate on every cold registry.
@@ -117,13 +132,24 @@ verify_env = flyte.TaskEnvironment(
 rollout_env = flyte.TaskEnvironment(
     name="grpo-dist-rollout",
     image=flyte.Image.from_debian_base(name="grpo-dist-rollout").with_pip_packages(*ROLLOUT_PACKAGES),
-    resources=flyte.Resources(cpu=8, memory="64Gi", gpu=GPU),
+    resources=flyte.Resources(cpu=GPU_CPU, memory=GPU_MEM, gpu=GPU),
     reusable=flyte.ReusePolicy(
         replicas=(1, 4),
         concurrency=1,
         idle_ttl=600,       # a GPU replica is expensive to rebuild — hold it longer
         scaledown_ttl=300,
     ),
+    env_vars={
+        # from_debian_base ships the CUDA *runtime* but not the *toolkit*, so there
+        # is no nvcc in the image. vLLM's FlashInfer top-k/top-p sampler JIT-compiles
+        # a kernel on first use, and with no nvcc that dies at engine init with:
+        #   RuntimeError: Could not find nvcc and default cuda_home=... doesn't exist
+        # This is NOT GPU-specific — observed on an L40s (Ampere). Forcing vLLM's
+        # native PyTorch sampler skips the compile entirely and needs no toolkit.
+        # (The alternative is to bake the full CUDA toolkit into the image, which
+        # adds gigabytes and minutes to every build for one kernel.)
+        "VLLM_USE_FLASHINFER_SAMPLER": "0",
+    },
     secrets=[flyte.Secret(key="HF_TOKEN", as_env_var="HF_TOKEN")],
 )
 
@@ -149,7 +175,7 @@ _learner_deps = [verify_env] if LEVEL == "1" else [verify_env, rollout_env]
 learner_env = flyte.TaskEnvironment(
     name="grpo-dist-learner",
     image=train_image,
-    resources=flyte.Resources(cpu=8, memory="64Gi", gpu=GPU),
+    resources=flyte.Resources(cpu=GPU_CPU, memory=GPU_MEM, gpu=GPU),
     secrets=[flyte.Secret(key="HF_TOKEN", as_env_var="HF_TOKEN")],
     depends_on=_learner_deps,
 )

@@ -36,11 +36,33 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
 
-# Process-global engine + the base-model path it was built for. Survives across
-# task calls on a reusable replica; None on the first call to each replica.
+# Process-global engine cache. Survives across task calls on a reusable replica —
+# and, crucially, across *separate runs*, because a warm replica outlives the run
+# that created it (idle_ttl). That longevity is the whole point (skip cold starts)
+# but it makes stale state the central hazard: everything cached here must be keyed
+# on identity that changes when the work changes, never on "have I built anything".
+#
+# `_ENGINE_BASE` is the *remote* path of the base model the engine was built from
+# (Dir.path). download_model is cached per model_name, so the same model yields the
+# same remote path across runs (reuse the engine, good) and a different model yields
+# a different path (rebuild, essential — otherwise a 7B run silently generates from
+# a warm replica's 0.5B engine).
 _ENGINE = None
-_ENGINE_MODEL_PATH: str | None = None
-_BASE_PATH: str | None = None
+_ENGINE_BASE: str | None = None
+
+# vLLM caches LoRA adapters by integer id and serves the cached weights if an id
+# repeats. `round_id` alone is unsafe across runs: run B's round 0 would collide
+# with run A's round 0 on a warm replica and serve A's stale adapter. Instead we
+# assign every *distinct adapter remote path* a fresh monotonic id, so a new
+# adapter always gets a new id — within a run and across runs.
+_ADAPTER_IDS: dict[str, int] = {}
+_NEXT_ADAPTER_ID = 1
+
+# A generous ceiling so any reasonable LoRA rank reuses the same engine (an engine
+# built with max_lora_rank=R serves every adapter of rank <= R). Rebuilding the
+# engine per rank would defeat reuse; this decouples the two.
+_MAX_LORA_RANK = 64
+
 _WORKER_ID = f"{os.getpid()}"
 
 
@@ -75,38 +97,81 @@ async def generate_rollouts(
     """Generate `num_generations` completions per prompt under the current policy.
 
     Args:
-        round_id: MUST increase every round. vLLM caches LoRA adapters by integer
-            id — if you reuse an id, it serves the *previously cached* adapter and
-            silently ignores the new weights on disk. Training then looks like it
-            runs fine while every round rolls out the round-0 policy. This is the
-            single nastiest failure mode in this design, and it fails silently.
+        round_id: kept for logging/telemetry only. Adapter identity is derived from
+            the adapter's remote path, not this number, so correctness no longer
+            depends on round_id being fresh (see `_ADAPTER_IDS`). vLLM caches LoRA
+            adapters by integer id and would serve a stale adapter if an id
+            repeated; keying the id on the adapter path removes that trap entirely.
+        lora_rank: validated against the engine's fixed `_MAX_LORA_RANK` ceiling.
     """
-    global _ENGINE, _ENGINE_MODEL_PATH, _BASE_PATH
+    global _ENGINE, _ENGINE_BASE, _NEXT_ADAPTER_ID
 
+    import torch
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
 
-    # Download the base weights once per replica, not once per round.
-    if _BASE_PATH is None:
-        _BASE_PATH = await base_dir.download()
-        log.info(f"[rollout {_WORKER_ID}] base weights -> {_BASE_PATH}")
+    if lora_rank > _MAX_LORA_RANK:
+        # Fail loudly rather than let vLLM reject the adapter mid-generation with a
+        # confusing "rank > max_lora_rank" deep in EngineCore.
+        raise ValueError(
+            f"lora_rank={lora_rank} exceeds the rollout engine's max_lora_rank "
+            f"({_MAX_LORA_RANK}). Raise _MAX_LORA_RANK in rollout.py to use a larger rank."
+        )
 
-    if _ENGINE is None or _ENGINE_MODEL_PATH != _BASE_PATH:
-        log.info(f"[rollout {_WORKER_ID}] building vLLM engine (cold start)")
+    # Build (or rebuild) the engine keyed on the base model's REMOTE identity, not
+    # on "have I built anything". A warm replica from a previous run may already
+    # hold an engine for a *different* base model; reusing it would silently
+    # generate from the wrong weights. Comparing base_dir.path catches that.
+    base_key = base_dir.path
+    if _ENGINE is None or _ENGINE_BASE != base_key:
+        # If a warm replica already holds an engine for a different base model, free
+        # its GPU memory before building the new one — otherwise the old (e.g. 0.5B)
+        # engine's weights + KV cache linger and can crowd out the new (e.g. 7B) one.
+        if _ENGINE is not None:
+            log.info(f"[rollout {_WORKER_ID}] base changed ({_ENGINE_BASE} -> {base_key}); freeing old engine")
+            del _ENGINE
+            _ENGINE = None
+            import gc
+
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        local_base = await base_dir.download()
+        # bf16 only exists on Ampere+ (A100/L40s/H100…). Turing cards (T4, V100)
+        # have no bf16 path, and passing dtype="bfloat16" there aborts engine
+        # startup. Detect and drop to fp16 — the learner (distributed.py) does the
+        # same, so generation and training stay on the same dtype.
+        engine_dtype = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
+        log.info(
+            f"[rollout {_WORKER_ID}] building vLLM engine (cold start), "
+            f"dtype={engine_dtype}, base={base_key}"
+        )
         _ENGINE = LLM(
-            model=_BASE_PATH,
+            model=local_base,
             enable_lora=True,
-            max_lora_rank=lora_rank,
-            dtype="bfloat16",
+            max_lora_rank=_MAX_LORA_RANK,
+            dtype=engine_dtype,
             # Leave headroom: the adapter, CUDA graphs, and NCCL buffers all live
             # outside the fraction vLLM reserves for weights + KV cache.
             gpu_memory_utilization=0.85,
             max_model_len=2048,
             enforce_eager=False,
         )
-        _ENGINE_MODEL_PATH = _BASE_PATH
+        _ENGINE_BASE = base_key
+        # A fresh engine has an empty LoRA cache, so our path->id map must reset too,
+        # or a stale id from the previous engine could be reused against a new one.
+        _ADAPTER_IDS.clear()
+        _NEXT_ADAPTER_ID = 1
     else:
         log.info(f"[rollout {_WORKER_ID}] reusing warm engine for round {round_id}")
+
+    # Give each distinct adapter path a fresh, stable int id (see _ADAPTER_IDS).
+    adapter_key = adapter_dir.path
+    adapter_id = _ADAPTER_IDS.get(adapter_key)
+    if adapter_id is None:
+        adapter_id = _NEXT_ADAPTER_ID
+        _ADAPTER_IDS[adapter_key] = adapter_id
+        _NEXT_ADAPTER_ID += 1
 
     # The adapter changes every round; the engine does not.
     adapter_path = await adapter_dir.download()
@@ -126,8 +191,10 @@ async def generate_rollouts(
     outputs = _ENGINE.generate(
         prompts,
         sampling,
-        # Fresh name AND fresh int id per round — see the round_id docstring above.
-        lora_request=LoRARequest(f"policy-r{round_id}", round_id + 1, adapter_path),
+        # Unique int id per distinct adapter path (see _ADAPTER_IDS), so vLLM never
+        # serves a stale cached adapter — the correctness fix that replaces the old
+        # "round_id must be fresh" contract.
+        lora_request=LoRARequest(f"policy-{adapter_id}", adapter_id, adapter_path),
     )
 
     samples: list[RolloutSample] = []
