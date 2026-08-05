@@ -163,27 +163,51 @@ never moves.
 
 ### How the two fan-outs work
 
-Both pools are the same idea — a warm set of workers you dispatch shards to with
-`asyncio.gather` — but they shard *different* things and isolate for *different* reasons.
+Both pools are the same idea — a warm set of workers you dispatch shards to with `asyncio.gather`
+— but they shard *different* things and isolate for *different* reasons.
 
-**Rollout sharding (by prompt).** `prompts_per_round` prompts are split into `rollout_workers`
-chunks (`distributed.py` uses `chunk(requests, ceil(len/workers))`), and each chunk becomes one
-`generate_rollouts` task call. A worker asks its vLLM engine for `num_generations` completions
-per prompt in one batched `generate()` — vLLM's continuous batching keeps the GPU busy across the
-whole chunk. Each completion comes back with the summed log-prob of its sampled tokens, which the
-learner needs for the importance ratio. Workers are **stateful on purpose**: the vLLM engine is
-cached in a process global and reused across rounds (see "Reuse" below), so only the LoRA adapter
-changes round to round.
+**Rollout sharding (by prompt).** The round's `prompts_per_round` prompts are split into
+`rollout_workers` chunks (`distributed.py` uses `chunk(requests, ceil(len/workers))`), and each
+chunk becomes one `generate_rollouts` task call. A worker asks its vLLM engine for
+`num_generations` completions per prompt in one batched `generate()` — vLLM's continuous batching
+keeps the GPU busy across the whole chunk. Each completion comes back with the **summed log-prob
+of its sampled tokens**, which the learner needs for the importance ratio. Workers are **stateful
+on purpose**: the vLLM engine is cached in a process global and reused across rounds (see "Reuse"
+below), so only the LoRA adapter changes round to round.
 
-**Verify sharding (by completion).** All completions from all rollout workers are flattened and
-re-chunked into shards of `shard_size` — a *different* partition, because verification cost scales
-with the number of completions, not prompts. Each shard is one `verify_shard` call that opens a
-single `userns` sandbox and runs every completion's test suite sequentially inside it, returning a
-binary reward per completion. Workers here are **stateless on purpose**: a fresh sandbox per shard,
-so code from one completion can't observe or clobber another's files. The two knobs are
-independent — `rollout_workers` sets generation parallelism, `shard_size` sets verification
-parallelism (`ceil(total_completions / shard_size)` shards, capped by the pool's `replicas ×
-concurrency`).
+**Verify sharding (by completion).** All completions from *all* rollout workers are flattened and
+**re-chunked** into shards of `shard_size` — a different partition, because verification cost
+scales with the number of completions, not prompts. Each shard is one `verify_shard` call that
+opens a single `userns` sandbox and runs every completion's test suite inside it, returning a
+binary reward per completion (`1.0` iff *all* tests pass). Workers here are **stateless on
+purpose**: a fresh sandbox per shard, so code from one completion can't observe or clobber
+another's files.
+
+The two knobs are independent — that decoupling is the whole reason to split generation and
+verification onto separate pools:
+
+| | shards *by* | parallelism knob | worker state | scales with |
+|---|---|---|---|---|
+| **Rollout** | prompt | `rollout_workers` | **stateful** — warm vLLM engine, reused across rounds | # prompts |
+| **Verify** | completion | `shard_size` | **stateless** — fresh sandbox per shard | # completions |
+
+**A concrete round** (the tuned 14B run: `prompts_per_round=24`, `num_generations=16`,
+`rollout_workers=2`, `shard_size=8`):
+
+1. **Publish.** Learner saves the current LoRA adapter to a `Dir` (~tens of MB).
+2. **Rollout.** 24 prompts → 2 chunks of 12 → 2 `generate_rollouts` calls. Each worker generates
+   16 completions per prompt → **384 completions** total (24 × 16), each with its log-prob.
+3. **Verify.** 384 completions flattened and re-chunked by 8 → **48 `verify_shard` calls**, run
+   concurrently across the pool (up to `replicas × concurrency` = 160 shards at once). Each returns
+   a 0/1 reward.
+4. **Regroup.** The 384 rewards are put back into **24 groups of 16** — one group per prompt.
+   Order matters: advantages are computed *within* a prompt's group, so a group must be exactly its
+   own 16 completions.
+5. **Update.** Within-group advantages → GRPO loss → one optimizer step → new adapter → back to 1.
+
+Nudging one knob doesn't touch the other: `rollout_workers` changes only how many GPUs generate in
+parallel; `shard_size` changes only how finely those 384 completions are spread across the CPU
+verifier pool (`ceil(384 / shard_size)` shards).
 
 ### Reuse is what makes the rollout pool viable
 
@@ -331,22 +355,55 @@ is not automatically comfortable. Two settings are load-bearing, and both are de
 If you are running **Level 1** at 14B and hitting OOM, that is generation and training sharing
 the card — drop to 7B, shrink the group, or move to Level 2.
 
-## Results
+## Results — from reward drift to a +15pp gain
 
-A real Level 2 run on the documented target (L40s, 8 rounds, 16 prompts/round × 8 generations,
-50-problem held-out eval at pass@1 over 4 samples):
+Four real Level 2 runs on the documented target (L40s, held-out pass@1 over 4 samples). Runs 1–2
+share **identical settings** and differ only in base model; runs 3–4 progressively tune the 14B.
+(Base pass@1 is re-measured each run by sampling, so it drifts a point or two between runs — the
+**Δ within a run** is the number that matters, not the base column across runs.)
 
-| Base | Base pass@1 | GRPO pass@1 | Improvement |
-|---|---|---|---|
-| Qwen2.5-Coder-7B | 38.0% | 40.5% | **+2.5pp** |
+| # | Base | Settings | Base → GRPO | Δ | Never-solved |
+|---|---|---|---|---|---|
+| 1 | Qwen2.5-Coder-7B | naive (`beta=0.04`, 8 rounds × 16 prompts × 8 gens, `inner_epochs=1`) | 38.0% → 40.5% | **+2.5pp** | 22 → 22 |
+| 2 | Qwen2.5-Coder-14B | naive (same as #1) | 45.0% → 42.0% | **−3.0pp** | 19 → **23** |
+| 3 | Qwen2.5-Coder-14B | + tighter leash & bigger groups (`beta=0.1`, 12 × 24 × **16**, len 256) | 55.5% → 59.8% | **+4.2pp** | 27 → 23 |
+| 4 | Qwen2.5-Coder-14B | + **`inner_epochs=3`**, `lora_r=32` | 54.2% → **69.2%** | **+15.0pp** | 29 → **20** |
 
-Of 50 eval problems, 21 sat in the movable band (base solves them *sometimes*) — that is the
-mass GRPO can act on, and the never-solved count stayed flat (22 → 22), exactly as theory
-predicts. The per-round training reward rose from ~0.48 to a ~0.61 peak with the expected RL
-noise, and the warm rollout engine made every round after the first ~20× cheaper to generate
-(`118s → 6s`). This is a modest-but-real gain at small scale; labs get large coding gains by
-pairing a strong base with 10⁴–10⁶ problems, and the pipeline here is what lets you scale the
-rollout/verify halves to get there.
+Read top to bottom, this is the RLVR playbook: pick a base that can already sometimes succeed,
+leash it so it doesn't drift, widen the learnable set, then actually *squeeze each batch*.
+
+**#1 vs #2 — same config, opposite outcome.** The 7B improved; the stronger 14B *regressed*, with
+the same hyperparameters. Its per-round training reward climbed `0.40 → 0.57` even as held-out fell
+`45% → 42%`, and `never_solved` rose 19 → 23 — the policy drifted from the base and **lost**
+problems it could already solve. Rising train reward is not evidence of learning; this is the
+textbook **reward-drift** signature. A stronger base has a *smaller* movable band (less to gain)
+and more competence to lose, so `beta=0.04` is a loose enough leash to help the 7B and over-drift
+the 14B. **RL amplifies existing competence; with too long a leash it erodes it.**
+
+**#3 — recover the drift, and beat the 7B.** Tighter KL leash (`beta 0.04 → 0.1`) stopped the
+drift — training reward now rose only gently and held-out moved *with* it. Bigger groups
+(`num_generations 8 → 16`) turned hard-but-solvable problems from dead all-fail groups into live
+ones (movable band grew to 39/100), the no-filter way to widen the learnable set. Plus more data
+(24 × 12) and a 100-problem eval to cut the ±3pp noise floor. Result: **+4.2pp**, and
+`never_solved` fell — the mirror image of #2. Real, but modest: the data is small, so the gain is
+small.
+
+**#4 — squeeze each batch: the big unlock.** Runs 1–3 all used `inner_epochs=1` — one gradient
+step per round, then the 384 hard-won completions are discarded. That leaves most of the signal on
+the floor. Raising **`inner_epochs=3`** reuses each batch for three clipped-surrogate steps (the
+importance ratio and `clip_eps` exist precisely for this off-policy reuse), and `lora_r=32` gives
+the adapter room to express the change. Training reward climbed strongly and steadily
+(`0.36 → 0.66`) with held-out rising alongside it, `never_solved` fell **29 → 20** (GRPO *gained* 9
+problems the base never once solved), and the leash (`beta=0.1`) held it all together without
+drift. Result: **+15.0pp** — 3.5× the previous best, from the same data. The lever was optimizing
+harder per batch, not more data or a bigger model.
+
+The pipeline ran identically across all four: L40s scheduled, 28GB downloads, engine reuse
+(`~180–240s → ~20s` cold→warm on the 14B), every round, the memory fixes holding. That is the
+point — the substrate is solid; the RL dynamics are yours to tune. **Do not chase the
+training-reward curve; the held-out number is the only one that counts.** The stacked levers here
+(leash → groups → epochs → capacity) took the 14B from −3pp to +15pp on a few hundred problems;
+scaling the *data* with the rollout/verify pools is how you go further still.
 
 ---
 
@@ -373,8 +430,11 @@ Override the accelerator if you aren't on L40s — note the lowercase `s`, `"L40
 valid accelerator string:
 
 ```bash
-export GRPO_GPU="A100:1"
+export GRPO_GPU="A100:1"      # and GRPO_GPU_DISK if your model is larger than a 14B
 ```
+
+See the [Environment variables](#environment-variables) table for the full set (disk, host
+CPU/RAM, level gate, sandbox backend).
 
 ## Run
 
@@ -422,7 +482,7 @@ Shared:
 | `--num_generations` | `8` | Group size. More groups with mixed pass/fail = more gradient. |
 | `--shard_size` | `4` | Completions per verifier task call. Smaller = more parallelism, more dispatch overhead. |
 | `--beta` | `0.04` | KL leash to the base policy. 0 disables. |
-| `--lora_r` / `--lora_alpha` | `16` / `32` | Adapter capacity. `lora_r` must be ≤ vLLM's `max_lora_rank`. |
+| `--lora_r` / `--lora_alpha` | `16` / `32` | Adapter capacity. `lora_r` must be ≤ the rollout engine's `_MAX_LORA_RANK` (64 in `rollout.py`). |
 | `--eval_k` | `4` | Samples per problem at eval. `1` = greedy, and throws away most of the measured gain. |
 
 Level 2 only:
@@ -431,9 +491,21 @@ Level 2 only:
 |---|---|---|
 | `--rounds` | `8` | Policy updates. One rollout + verify + step cycle each. |
 | `--prompts_per_round` | `16` | Problems sampled per round. Completions per round = this × `num_generations`. |
-| `--rollout_workers` | `2` | Parallel `generate_rollouts` calls. Capped by `rollout_env` max replicas. |
-| `--inner_epochs` | `1` | Gradient steps per rollout batch. `1` is strictly on-policy (ratio ≡ 1, clipping never engages). `>1` is where the clipped surrogate starts doing work, at the cost of stale data. |
-| `--micro_batch_size` | `8` | Sequences per forward pass. The knob that keeps 14B inside memory. |
+| `--rollout_workers` | `2` | Parallel `generate_rollouts` calls (prompt-sharding). Capped by `rollout_env` max replicas. |
+| `--inner_epochs` | `1` | Gradient steps per rollout batch. `1` is strictly on-policy (ratio ≡ 1, clipping never engages) and discards each batch after one step; `>1` reuses it via the clipped surrogate. **The highest-impact knob here** — `3` took the 14B from +4.2pp to +15.0pp (see [Results](#results--from-reward-drift-to-a-15pp-gain)). Pair with `beta` so the harder optimization doesn't drift. |
+| `--micro_batch_size` | `2` | Sequences per forward pass in the update. The activation-memory knob that keeps 14B on an L40s; drop to `1` if you OOM. |
+
+### Environment variables
+
+Set on the launch command; read in `config.py`.
+
+| Var | Default | What it does |
+|---|---|---|
+| `GRPO_GPU` | `L40s:1` | Accelerator for the learner and rollout pool. Lowercase `s`. |
+| `GRPO_GPU_CPU` / `GRPO_GPU_MEM` | `6` / `48Gi` | Host CPU/RAM for the GPU pods. |
+| `GRPO_GPU_DISK` | `100Gi` | Ephemeral disk. Must exceed the model size — the learner and each rollout replica download the full base to local disk (~28GB for a 14B). Too small → "no space left on device" mid-run. |
+| `GRPO_LEVEL` | `2` | Set to `1` for a Level 1 run so it doesn't build the (multi-GB) vLLM image it never uses. |
+| `GRPO_SANDBOX_BACKEND` | *(auto)* | Force a sandbox backend (`userns` / `bubblewrap` / `sandbox-exec`). Errors if unavailable rather than downgrading. |
 
 ## Files
 
@@ -443,21 +515,25 @@ Level 2 only:
 | `common.py` | Prompting, code assembly, sandboxed execution, dataset, model download |
 | `verify.py` | The verifier pool — backend resolution and `verify_shard` |
 | `workflow.py` | **Level 1**: TRL trainer with a fanned-out reward, plus evaluation |
-| `rollout.py` | **Level 2**: vLLM generation workers with LoRA hot-swap |
+| `rollout.py` | **Level 2**: vLLM generation workers (prompt-sharding), engine reuse, LoRA hot-swap |
 | `learner.py` | **Level 2**: advantages, the clipped surrogate, the KL term |
 | `distributed.py` | **Level 2**: the disaggregated loop |
+| `smoke_test.py` | Verifier-pool smoke test — scoring, network isolation, and reuse, no GPU needed |
 
 ## Symptom → cause
 
 | Symptom | Look at |
 |---|---|
-| Mean reward never moves off its round-0 value | The `round_id` LoRA-cache trap — rollouts are serving a stale adapter |
+| Mean reward never moves off its round-0 value | A stale adapter on a warm replica. `rollout.py` keys adapter ids on the adapter path to prevent this; if you changed that, check it first. |
+| `LoRA rank R > max_lora_rank r` at rollout | A warm replica is reusing an engine built for a different run's rank. Fixed by keying the engine on `base_dir.path`; raise `_MAX_LORA_RANK` if you legitimately need a bigger rank. |
 | Live groups near zero every round | Base model too weak, or problems too hard. Not a hyperparameter problem. |
 | Policy loss is 0.0 every step | Expected with `inner_epochs=1`. Not a bug. Read reward instead. |
 | One verifier `worker_id` per shard | Pool is cold-starting; reuse isn't engaging |
 | Mean ratio far from 1.0 with `inner_epochs=1` | Dropout is active somewhere, or generation/training dtypes disagree |
 | Train reward climbs, held-out pass rate drops | Classic reward drift — raise `--beta` |
-| OOM on the learner at 14B | Level 1 shares the card with generation. Shrink the group or move to Level 2. |
+| CUDA OOM on the learner at 14B (Level 2) | Lower `--micro_batch_size` (default 2 → 1); confirm `expandable_segments` is set on `learner_env`. |
+| `no space left on device` mid-run | `GRPO_GPU_DISK` is smaller than the model — the base downloads to local disk on every GPU pod. |
+| `Could not find nvcc` at vLLM engine init | A JIT-compiling vLLM path (e.g. FlashInfer sampler) + no CUDA toolkit in the image. `VLLM_USE_FLASHINFER_SAMPLER=0` is set on `rollout_env` to avoid it. |
 
 ## Background
 
