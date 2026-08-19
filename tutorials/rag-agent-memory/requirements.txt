@@ -1,0 +1,26 @@
+flyte[tui]>=2.0
+
+# The vector store and the embedding model. These two carry steps 0, 1 and 3
+# on their own — no LLM, no API key.
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# The LLM. See llm.py; Claude is the default.
+anthropic>=0.40.0
+python-dotenv
+
+# step0_index.py --source hf
+datasets>=3.0.0
+
+# step3_visualize.py
+umap-learn>=0.5.5
+plotly>=5.20.0
+numpy
+
+# step5_chat_app.py. Pinned to 6.x: v6 removed Chatbot's `type` argument, which
+# v5 required, so a range spanning both cannot work unchanged.
+gradio>=6.0
+
+# Optional. Only needed if you point llm.py at an OpenAI-compatible endpoint
+# (OpenAI itself, or a local vLLM / Ollama server). See llm.py.
+openai>=1.50.0
