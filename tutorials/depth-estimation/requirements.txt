@@ -1,0 +1,7 @@
+flyte[tui]>=2.0
+torch==2.13.0
+transformers==5.14.1
+pillow==12.3.0
+numpy==2.5.1
+h5py==3.16.0
+huggingface_hub==1.24.0

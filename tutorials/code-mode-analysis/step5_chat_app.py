@@ -234,7 +234,7 @@ def chat_env(local: bool = False) -> AgentChatAppEnvironment:
         # when idle and the next visitor waits through a cold start. Keep one replica
         # warm and let it burst to three. Set this back to (0, 1) after the workshop —
         # an always-on replica costs money whether anyone is using it or not.
-        scaling=Scaling(replicas=(1, 3), scaledown_after=timedelta(minutes=30)),
+        scaling=Scaling(replicas=(0, 1), scaledown_after=timedelta(minutes=30)),
     )
 
 

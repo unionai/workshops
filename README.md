@@ -59,6 +59,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 |----------|-------------|
 | [LoRA / QLoRA / Full](tutorials/llm-fine-tuning-lora-qlora/) | Fine-tune an LLM on text-to-SQL with LoRA, QLoRA, or full fine-tuning — live training reports, FastAPI serving, Gradio UI |
 | [GRPO — Code Generation](tutorials/llm-fine-tuning-grpo-code/) | Teach a model to write Python with GRPO — reward = sandboxed test execution, MBPP dataset, live reward/pass-rate charts |
+| [GRPO — Distributed](tutorials/llm-fine-tuning-grpo-distributed/) | Scale GRPO across the cluster — fan out sandboxed verification to a reusable pool, then disaggregate rollouts onto vLLM workers with LoRA weight sync |
 | [GRPO](tutorials/llm-fine-tuning-grpo/) | GRPO fine-tuning on math/reasoning tasks |
 | [DPO](tutorials/llm-fine-tuning-dpo/) | Direct Preference Optimization for alignment |
 | [PPO](tutorials/llm-fine-tuning-ppo/) | Proximal Policy Optimization for RLHF |

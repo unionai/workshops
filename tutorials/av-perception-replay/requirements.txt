@@ -1,0 +1,4 @@
+flyte[tui]>=2.0
+numpy==2.5.1
+pillow==12.3.0
+huggingface_hub==1.24.0

@@ -1,0 +1,8 @@
+flyte[tui]>=2.0
+chronos-forecasting==2.3.1
+ortools==9.15.6755
+torch==2.13.0
+pyarrow==25.0.0
+numpy==2.5.1
+huggingface_hub==1.24.0
+pillow==12.3.0
