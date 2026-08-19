@@ -573,17 +573,125 @@ error rather than a silent fallback — useful if you want the failure to be lou
 
 ---
 
-## Where to take it next
+## What this tutorial deliberately doesn't do
 
-- **Re-ranking.** Retrieve 20 with the bi-encoder, then re-score with a cross-encoder
-  and keep 4. Usually the single biggest quality win available.
-- **Threshold on similarity.** Right now every question gets an answer. Refuse below
+Worth saying plainly, so nobody walks away thinking they've seen production RAG:
+
+- **There is no evaluation.** Nothing here tells you whether retrieval is *good* —
+  only what it returned. That's the biggest gap, and it's the first thing to fix if
+  you take this anywhere real. See "measure it" below.
+- **Retrieval is a single dense lookup.** One embedding model, one top-k, no
+  re-ranking, no keyword matching, no query rewriting. This is the simplest thing
+  that works, not the best thing.
+- **Chunking is naive.** Fixed-size character splitting with overlap. It ignores
+  document structure entirely — headings, code blocks and tables all get chopped
+  mid-thought.
+- **Memory is single-user and never forgets.** No `entity_id`, no decay, no conflict
+  resolution when you contradict yourself.
+
+You can see the consequences in the tutorial's own output: ask *"How do I use GRPO?"*
+and `detr-object-detection` comes back at #2. A small corpus and a bare dense lookup
+will do that. Everything below is how people fix it.
+
+---
+
+## The rest of the RAG landscape
+
+A map, roughly in order of value-for-effort. Almost everything here changes only
+`store.retrieve()` or `step0_index.py` — the rest of the pipeline doesn't care.
+
+### Make retrieval better (start here)
+
+- **Re-ranking.** Retrieve 20 with the fast bi-encoder, then re-score those 20 with a
+  **cross-encoder** that reads query and chunk *together* rather than embedding them
+  separately. Slower per candidate, far more accurate, and you only run it on 20.
+  Usually the single biggest quality win available. *(Change: `store.retrieve()`.)*
+- **Hybrid search.** Dense embeddings are bad at exact tokens — error codes, flag
+  names, `--no-use_retrieval`. Keyword search (BM25) is great at those and bad at
+  paraphrase. Run both, merge with Reciprocal Rank Fusion. The two failure modes
+  barely overlap, which is why hybrid beats either alone.
+- **Contextual retrieval.** Before embedding each chunk, prepend a sentence or two of
+  LLM-generated context situating it in its document ("This is from the GRPO
+  tutorial's section on reward functions"). Fixes the chunk-lost-its-context problem
+  at its root. Costs one cheap model call per chunk at index time — and prompt
+  caching makes that far less painful than it sounds.
+- **Query rewriting.** The user's phrasing isn't always the best search string.
+  Rewrite it, expand it into several queries and merge results, or use **HyDE** —
+  have the model write a *hypothetical answer*, embed that, and search with it, on the
+  theory that a fake answer looks more like a real answer than the question does.
+- **Metadata filtering.** Store `source`, date, or type alongside each chunk (this
+  tutorial already stores `source`) and filter *before* the vector search. Cheapest
+  possible precision win when your corpus has obvious partitions.
+- **Smarter chunking.** Split on document structure instead of character counts.
+  **Sentence-window**: embed one sentence, return its neighbours. **Parent-document**:
+  embed small chunks for precision, hand the model the whole parent section for
+  context. Both decouple "what you match on" from "what you send," which is the
+  insight.
+
+### Give it a different shape
+
+- **Hierarchical / tree (RAPTOR).** Recursively cluster chunks and summarize each
+  cluster, building a tree from raw text up to whole-corpus summaries, then retrieve
+  at whichever level fits. Flat top-k structurally *cannot* answer "what are the main
+  themes across all 48 tutorials?" — no single chunk contains the answer. A tree can.
+- **Graph RAG.** Extract entities and relationships into a knowledge graph, then
+  traverse it. Built for multi-hop questions — "which tutorials use the same base
+  model as the GRPO one?" — where the answer requires joining facts that never appear
+  in the same chunk. Microsoft's GraphRAG adds community detection plus per-community
+  summaries. Powerful, and much heavier to build and maintain.
+- **Multi-vector / late interaction (ColBERT).** One vector per token instead of per
+  chunk, matched at query time. More precise, considerably more storage.
+
+### Change who's in control
+
+- **Agentic RAG.** Everything above retrieves exactly once, before answering. Instead,
+  give the model retrieval as a *tool*: let it decide whether to search at all, what to
+  search for, read the results, and search again with a better query. Multi-hop
+  questions and "I don't know enough yet" both fall out naturally. This is the closest
+  thing here to what you already know how to build — it's tool-calling with
+  `store.retrieve` as the tool.
+- **Corrective / self-reflective RAG.** Grade the retrieved chunks *before* answering.
+  If they're weak, re-query, fall back to web search, or refuse. Cheap version, using
+  numbers this tutorial already computes: if top similarity < 0.5, don't answer.
+- **Routing.** Several indexes, and a small classifier or model picks which to search.
+
+### Measure it
+
+None of the above means anything without this, and it's the gap that matters most:
+
+- **Retrieval metrics** — build a small golden set of question → correct-chunk pairs
+  (50 hand-written pairs is enough to be useful), then track **recall@k** (was the
+  right chunk in the top k?) and **MRR** (how high was it?). This is the number that
+  moves when you add re-ranking, and without it you're guessing.
+- **Answer metrics** — **faithfulness** (is every claim supported by the retrieved
+  context?) and **relevance** (did it answer the question?). Usually scored by an
+  LLM judge; RAGAS is the common off-the-shelf option.
+- **The cheap version** — 20 questions in a list, run them after every change, read
+  the answers yourself. Unglamorous, and it catches most regressions.
+
+### Know when not to reach for RAG
+
+- **Small corpus?** If everything fits in context, just paste it in. RAG exists
+  because your data doesn't fit — under that threshold it's pure added complexity and
+  a new failure mode.
+- **Structured data?** "How many tutorials use GPUs?" is a SQL query, not a similarity
+  search. Vectors are for fuzzy meaning, not counting and filtering.
+- **Want a different style or format?** That's fine-tuning. RAG changes what the model
+  *knows*, not how it *writes*.
+
+---
+
+## Concrete next steps for this code
+
+- **Threshold on similarity.** Every question currently gets an answer. Refuse below
   ~0.5 and the "capital of France" case fails honestly instead of being answered from
-  four irrelevant chunks.
+  four irrelevant chunks. Two lines, and it's the smallest real improvement here.
+- **Add a cross-encoder re-ranker.** Retrieve 20 in `store.retrieve()`, re-score with
+  `sentence-transformers`' `CrossEncoder`, keep 4. Biggest quality-per-line win.
 - **Multi-user memory.** Add an `entity_id` to each memory's metadata and filter on it
   at query and write time. One store, many users.
 - **Memory decay.** A scheduled Flyte task that nightly drops memories nothing has
-  retrieved in N days. Memory that only grows eventually stops being useful.
+  retrieved in N days. Memory that only grows stops being useful.
 - **Durable app memory.** Step 5's memory lives on pod-local disk and dies with the
   pod. Wire it to step 4's `flyte.io.Dir`, or run Chroma as its own always-on app.
 - **Swap the store.** `embed_and_index` is the only task that knows what Chroma is.
