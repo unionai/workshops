@@ -7,17 +7,20 @@ That is the entire trick. RAG is not an architecture, it is a prompt with
 freshly-retrieved text in it. Everything hard about RAG is upstream: what you
 chunked, how you embedded it, and whether the nearest neighbours were any good.
 
-The flag worth playing with is `--use_retrieval false`, which asks the same
-question with no context at all:
+The flag worth playing with is `--no-use_retrieval`, which asks the same question
+with no context at all. (Flyte turns a `bool` parameter into a click flag pair,
+so it is `--no-use_retrieval`, not `--use_retrieval false`.)
 
     flyte run --local step2_rag_answer.py answer \
         --question "What does the code-mode tutorial teach?"
     flyte run --local step2_rag_answer.py answer \
-        --question "What does the code-mode tutorial teach?" --use_retrieval false
+        --question "What does the code-mode tutorial teach?" --no-use_retrieval
 
-The second one is the point of the exercise. The model does not say "I don't
-know" — it produces something confident and plausible about a tutorial it has
-never seen. Retrieval is what makes the difference checkable.
+The second one is the point of the exercise. You get one of two things, and
+which one you get is luck: a confident answer about the wrong "code mode"
+entirely, or a hedge listing several things it might be. Neither is checkable,
+and neither tells you which parts came from anywhere real. Retrieval is what
+replaces both with an answer whose every claim points at a file.
 """
 
 from __future__ import annotations
@@ -89,9 +92,15 @@ async def answer(
         prompt = question
         system = UNGROUNDED_SYSTEM
 
-    log.info(f"Asking {llm.describe()} (retrieval {'on' if use_retrieval else 'off'})")
+    log.info(f'\nQuestion: "{question}"')
+    if use_retrieval:
+        log.info(f"Context:  {len(hits)} chunks, top similarity {hits[0].similarity:.3f}" if hits else "Context:  none")
+    else:
+        log.info("Context:  none — retrieval is off")
+    log.info(f"Asking {llm.describe()}…")
+
     reply = llm.answer(system, prompt)
-    log.info(reply)
+    log.info(f"\nAnswer: {reply}")
 
     top = hits[0].similarity if hits else 0.0
     if use_retrieval:

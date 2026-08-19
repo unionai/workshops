@@ -8,8 +8,39 @@ argument the tutorial is making.
 
 from __future__ import annotations
 
+import logging
+import os
+import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+
+def new_work_dir(prefix: str) -> Path:
+    """A fresh directory for a task output that will become a `flyte.io.Dir`.
+
+    Deliberately *not* `tempfile.mkdtemp()` with the system default. Under
+    `--local`, Flyte's cache stores the path to a task's output directory, and
+    macOS purges /var/folders periodically and on reboot — so a step 0 you ran
+    on Monday hands step 3 a path that no longer exists on Wednesday, and the
+    cached run dies with FileNotFoundError instead of rebuilding.
+
+    Keeping the outputs under the project makes the local cache survive a
+    reboot. On a cluster this is irrelevant: `Dir.from_local` uploads to blob
+    storage and the local path stops mattering the moment it does.
+
+    Override the location with RAG_WORK_DIR.
+    """
+    root = Path(os.environ.get("RAG_WORK_DIR", Path.cwd() / ".rag_work"))
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+    except OSError:
+        # Read-only working directory (some pods) — the system temp is fine
+        # there, because the output is uploaded rather than re-read from disk.
+        return Path(tempfile.mkdtemp(prefix=prefix))
 
 # Same model at index time and query time. If these ever disagree your
 # retrieval quietly turns to noise, so the collection records which model built
@@ -66,20 +97,39 @@ def split_text(text: str, chunk_size: int = 1200, overlap: int = 150) -> list[st
 
 @lru_cache(maxsize=2)
 def load_encoder(model_name: str = DEFAULT_EMBEDDING_MODEL):
-    """Load the sentence-transformer once per process.
+    """Load the sentence-transformer once per process, from cache when possible.
 
     bge-small is ~130MB and runs fine on a CPU, which is why steps 0, 1 and 3
     need no API key and no GPU — they work in a free Colab runtime.
+
+    We try `local_files_only=True` first. By default sentence-transformers
+    revalidates the model against the Hub on *every* load — around fifteen HEAD
+    requests over two TCP connections — even when the weights are already on
+    disk and nothing gets downloaded. That makes every run need working network,
+    which is a bad bet on conference wifi and pure latency everywhere else.
+
+    Falling back to the network on failure keeps the first run (and any new
+    model) working exactly as before.
     """
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(model_name)
+    try:
+        return SentenceTransformer(model_name, local_files_only=True)
+    except Exception:
+        # Not cached yet — fetch it. This is the only path that needs network.
+        log.info(f"Downloading {model_name} (one time, ~130MB)…")
+        return SentenceTransformer(model_name)
 
 
 def embed(encoder, texts: list[str]) -> list[list[float]]:
     """Encode to L2-normalized vectors, which is what cosine distance expects."""
     return encoder.encode(
-        texts, normalize_embeddings=True, convert_to_numpy=True
+        texts,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        # A tqdm bar per batch is unreadable once Flyte captures the output, and
+        # step 0 already logs its own indexed-N-of-M progress.
+        show_progress_bar=False,
     ).tolist()
 
 

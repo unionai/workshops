@@ -28,7 +28,7 @@ import flyte.io
 import flyte.report
 
 from config import index_env
-from store import DEFAULT_EMBEDDING_MODEL, embed, load_encoder, open_collection, split_text
+from store import DEFAULT_EMBEDDING_MODEL, embed, load_encoder, new_work_dir, open_collection, split_text
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ async def fetch_docs(
     Cached on the arguments, so re-running step 0 with the same corpus skips
     straight to chunking.
     """
-    out_dir = Path(tempfile.mkdtemp(prefix="rag_docs_"))
+    out_dir = new_work_dir("rag_docs_")
     docs_path = out_dir / "docs.jsonl"
     written = 0
 
@@ -221,7 +221,7 @@ async def chunk_documents(
     """
     in_path = Path(await docs_dir.download()) / "docs.jsonl"
 
-    out_dir = Path(tempfile.mkdtemp(prefix="rag_chunks_"))
+    out_dir = new_work_dir("rag_chunks_")
     chunks_path = out_dir / "chunks.jsonl"
     n_docs = n_chunks = 0
 
@@ -268,7 +268,7 @@ async def embed_and_index(
     log.info(f"Embedding {len(rows)} chunks with {embedding_model}")
 
     encoder = load_encoder(embedding_model)
-    persist_dir = Path(tempfile.mkdtemp(prefix="chroma_"))
+    persist_dir = new_work_dir("chroma_")
     collection = open_collection(str(persist_dir), collection_name, embedding_model)
 
     for start in range(0, len(rows), batch_size):

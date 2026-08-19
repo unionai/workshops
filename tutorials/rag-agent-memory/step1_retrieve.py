@@ -54,6 +54,9 @@ async def search(
     collection = open_collection(
         str(Path(await chroma_dir.download())), collection_name, embedding_model,
     )
+    log.info(f'\nQuestion: "{question}"')
+    log.info(f"Searching {collection.count()} chunks for the top {top_k}…")
+
     hits = retrieve(collection, question, k=top_k, embedding_model=embedding_model)
 
     for hit in hits:

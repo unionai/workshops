@@ -30,7 +30,6 @@ from __future__ import annotations
 import html
 import json
 import logging
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +40,7 @@ import flyte.report
 import llm
 import render
 from config import llm_env
-from store import DEFAULT_EMBEDDING_MODEL, embed, load_encoder, open_collection, retrieve
+from store import DEFAULT_EMBEDDING_MODEL, embed, load_encoder, new_work_dir, open_collection, retrieve
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -160,7 +159,7 @@ async def converse(
     script = messages or DEMO_SCRIPT
 
     # Start from prior memory if we were handed some, otherwise a fresh store.
-    persist_dir = Path(tempfile.mkdtemp(prefix="memory_"))
+    persist_dir = new_work_dir("memory_")
     if memory_dir is not None:
         downloaded = Path(await memory_dir.download())
         for item in downloaded.iterdir():
@@ -179,6 +178,11 @@ async def converse(
     total_written = 0
 
     for n, message in enumerate(script, start=1):
+        # Logged before the model call, so the transcript reads in the order it
+        # actually happened rather than as answers with no questions.
+        log.info(f"\nTurn {n}")
+        log.info(f"  you:    {message}")
+
         recalled = retrieve(collection, message, k=top_k, embedding_model=embedding_model)
         memory_block = (
             "\n".join(f"- {h.text}" for h in recalled) if recalled else "(nothing yet)"
@@ -197,8 +201,11 @@ async def converse(
         written, skipped = _remember(collection, encoder, extracted.get("facts", []), n)
         total_written += len(written)
 
-        log.info(f"Turn {n}: recalled {len(recalled)}, wrote {len(written)}")
-        log.info(f"  {reply}")
+        log.info(f"  agent:  {reply}")
+        log.info(
+            f"  memory: recalled {len(recalled)}, wrote {len(written)}"
+            + (f", skipped {len(skipped)} duplicate(s)" if skipped else "")
+        )
         sections.append(_turn_html(n, message, reply, recalled, written, skipped))
 
     await flyte.report.replace.aio(render.page(

@@ -8,8 +8,8 @@ result is a map of the corpus where distance means "similar" — and the cluster
 you see are topics nobody labelled.
 
 Then the question gets embedded and pushed through the *same* fitted projection,
-so it lands as a gold star in the same space. The top-k chunks light up in rank
-colors matching the cards below.
+so it lands as an orange star in the same space. The retrieved chunks light up as
+numbered blue dots — darker means a better match — matching the cards below.
 
     flyte run --local step3_visualize.py visualize --question "How do I use GRPO?"
     flyte run --local step3_visualize.py visualize --question "brain tumor segmentation"
@@ -20,6 +20,10 @@ each time. On the third one the projection still has to place it somewhere, so
 look at what lights up around it instead: four unrelated chunks scoring ~0.47,
 which is what "the corpus does not cover this" actually looks like.
 
+The terminal prints only a one-line summary — the chart lives in the HTML report.
+From a shell, `python open_report.py` opens the newest one; in the notebook,
+`show_latest()` renders it inline.
+
 No API key needed. This step never calls a model.
 """
 
@@ -27,7 +31,6 @@ from __future__ import annotations
 
 import json
 import logging
-import tempfile
 from pathlib import Path
 
 import flyte
@@ -37,7 +40,7 @@ import flyte.report
 import render
 from config import index_env
 from step0_index import index
-from store import DEFAULT_EMBEDDING_MODEL, embed, load_encoder, open_collection, retrieve
+from store import DEFAULT_EMBEDDING_MODEL, embed, load_encoder, new_work_dir, open_collection, retrieve
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -90,7 +93,7 @@ async def fit_projection(
     )
     coords = reducer.fit_transform(vectors)
 
-    out_dir = Path(tempfile.mkdtemp(prefix="umap_"))
+    out_dir = new_work_dir("umap_")
     np.save(out_dir / "coords.npy", coords)
     joblib.dump(reducer, out_dir / "reducer.joblib")
     (out_dir / "meta.json").write_text(json.dumps({
@@ -106,8 +109,14 @@ async def fit_projection(
 # Draw it
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _figure(coords, sources, hit_indices, hits, query_xy):
-    """Corpus in gray, retrieved chunks in rank colors, query as a gold star."""
+def _figure(coords, sources, hit_indices, hits, query_xy, question: str = ""):
+    """Corpus in gray, retrieved chunks on a rank ramp, the question as a star.
+
+    Rank is an ordered magnitude, so it gets a sequential single-hue ramp with
+    the darkest step as rank 1. Adjacent steps of a ramp are necessarily close,
+    so the rank number is drawn *inside* each marker — color never carries the
+    rank on its own.
+    """
     import plotly.graph_objects as go
 
     highlighted = set(hit_indices)
@@ -119,39 +128,64 @@ def _figure(coords, sources, hit_indices, hits, query_xy):
         y=[float(coords[i][1]) for i in background],
         mode="markers",
         name=f"corpus ({len(background)} chunks)",
-        marker=dict(size=6, color=render.MUTED_COLOR, opacity=0.75),
+        marker=dict(size=5, color=render.MUTED_COLOR, opacity=0.55),
         text=[sources[i] for i in background],
         hovertemplate="%{text}<extra></extra>",
     ))
 
     for hit, idx in zip(hits, hit_indices):
-        color = render.RANK_COLORS[(hit.rank - 1) % len(render.RANK_COLORS)]
         preview = hit.text[:160].replace("\n", " ")
         fig.add_trace(go.Scatter(
             x=[float(coords[idx][0])],
             y=[float(coords[idx][1])],
-            mode="markers",
-            name=f"#{hit.rank}  {hit.similarity:.3f}",
-            marker=dict(size=15, color=color,
-                        line=dict(width=1.5, color="rgba(0,0,0,.45)")),
-            text=[f"#{hit.rank} · {hit.source}<br>{preview}…"],
-            hovertemplate="%{text}<extra></extra>",
+            # The number is the point of markers+text: two adjacent chunks from
+            # one document have near-identical embeddings and land on top of
+            # each other, so without labels you count three dots and never learn
+            # the fourth was underneath.
+            mode="markers+text",
+            name=f"#{hit.rank}  ·  {hit.similarity:.3f}  ·  {hit.source.split('/')[-2] if '/' in hit.source else hit.source}",
+            marker=dict(
+                size=19, color=render.rank_color(hit.rank), opacity=0.92,
+                line=dict(width=1.5, color="#fcfcfb"),  # surface ring
+            ),
+            text=[str(hit.rank)],
+            textposition="middle center",
+            textfont=dict(color=render.rank_text_color(hit.rank), size=11),
+            hovertext=[f"#{hit.rank} · {hit.source}<br>similarity {hit.similarity:.3f}<br>{preview}…"],
+            hovertemplate="%{hovertext}<extra></extra>",
         ))
 
     fig.add_trace(go.Scatter(
         x=[float(query_xy[0])], y=[float(query_xy[1])],
-        mode="markers", name="your question",
-        marker=dict(size=22, color=render.QUERY_COLOR, symbol="star",
-                    line=dict(width=1.5, color="rgba(0,0,0,.55)")),
-        hovertemplate="your question<extra></extra>",
+        mode="markers",
+        name="◆ your question",
+        marker=dict(size=24, color=render.QUERY_COLOR, symbol="star",
+                    line=dict(width=1.5, color="#fcfcfb")),
+        hovertext=[question or "your question"],
+        hovertemplate="<b>your question</b><br>%{hovertext}<extra></extra>",
     ))
+
+    # Label the star on the plot itself, so the chart stands on its own if
+    # someone screenshots it out of the report.
+    if question:
+        fig.add_annotation(
+            x=float(query_xy[0]), y=float(query_xy[1]),
+            text=f"<b>“{question[:60]}{'…' if len(question) > 60 else ''}”</b>",
+            showarrow=True, arrowhead=0, arrowwidth=1.2,
+            arrowcolor=render.QUERY_COLOR, ax=0, ay=-38,
+            font=dict(size=12, color="#0b0b0b"),
+            bgcolor="rgba(252,252,251,.92)", bordercolor=render.QUERY_COLOR,
+            borderwidth=1, borderpad=4,
+        )
 
     fig.update_layout(
         height=560,
         margin=dict(l=10, r=10, t=10, b=10),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="v", x=1.01, y=1, font=dict(size=11)),
+        paper_bgcolor="#fcfcfb",
+        plot_bgcolor="#fcfcfb",
+        font=dict(color="#0b0b0b"),
+        legend=dict(orientation="v", x=1.01, y=1, font=dict(size=11),
+                    title=dict(text="<b>retrieved</b>", font=dict(size=11))),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
     )
@@ -188,7 +222,11 @@ async def visualize(
     collection = open_collection(
         str(Path(await chroma_dir.download())), collection_name, embedding_model,
     )
+    log.info(f'\nQuestion: "{question}"')
+
     hits = retrieve(collection, question, k=top_k, embedding_model=embedding_model)
+    for hit in hits:
+        log.info(f"  #{hit.rank}  {hit.similarity:.3f}  {hit.source}")
     hit_indices = [id_to_index[h.id] for h in hits if h.id in id_to_index]
     hits = [h for h in hits if h.id in id_to_index]
 
@@ -198,7 +236,7 @@ async def visualize(
     query_vector = np.asarray(embed(encoder, [question]), dtype="float32")
     query_xy = reducer.transform(query_vector)[0]
 
-    fig = _figure(coords, meta["sources"], hit_indices, hits, query_xy)
+    fig = _figure(coords, meta["sources"], hit_indices, hits, query_xy, question)
     chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
 
     top = hits[0].similarity if hits else 0.0
@@ -213,10 +251,14 @@ async def visualize(
         )
         + chart_html
         + render.note(
-            "Gray dots are every chunk in the index. Colored dots are the ones "
-            "retrieved for this question, numbered to match the cards below. The "
-            "gold star is the question itself, pushed through the same fitted "
-            "projection.<br><br>"
+            "Gray dots are every chunk in the index. The <b>numbered blue dots</b> "
+            "are the ones retrieved for this question — <b>darker means a better "
+            "match</b>, and the number on each dot is its rank, matching the cards "
+            "below. The orange star is the question itself, pushed through the same "
+            "fitted projection.<br><br>"
+            "Two dots sitting on top of each other is not a glitch: consecutive "
+            "chunks from one document have nearly identical embeddings, so they "
+            "land in nearly the same place. That is chunk size made visible.<br><br>"
             "<b>Read the neighbourhood, not the distance.</b> UMAP has to put an "
             "out-of-corpus question <i>somewhere</i>, and it will happily drop it "
             "next to whatever is least unlike it — so a lonely-looking star is not "
@@ -230,6 +272,9 @@ async def visualize(
     ))
     await flyte.report.flush.aio()
 
+    log.info(
+        f"Plotted {len(coords)} chunks. Open the chart with: python open_report.py"
+    )
     return f"plotted {len(coords)} chunks, top similarity {top:.3f}"
 
 

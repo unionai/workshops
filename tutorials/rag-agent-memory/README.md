@@ -10,6 +10,89 @@ Everything runs three ways: in Colab with no cluster, on your laptop with
 
 ---
 
+## What is RAG?
+
+**The problem.** A language model only knows what was in its training data. It has
+never seen your company's docs, your notes, or anything written after its cutoff.
+Fine-tuning it on your documents is expensive and has to be redone every time they
+change, and pasting *all* your documents into the prompt doesn't fit — and would cost
+a fortune if it did.
+
+**The trick.** Don't give the model everything. Before it answers, go find the three
+or four most relevant paragraphs and paste *those* into the prompt. That's
+retrieval-augmented generation: **retrieval** finds the paragraphs, **generation** is
+the model answering with them in front of it.
+
+It's less clever than it sounds, and that's the point — you can build the whole thing
+out of parts you can inspect.
+
+### The two phases
+
+RAG happens at two different times, and confusing them is the usual source of
+confusion.
+
+**Ahead of time — build the index** (step 0, once):
+
+```
+documents  →  chunks  →  embeddings  →  vector store
+   48         398 pieces   398 vectors     Chroma
+  READMEs    ~1200 chars   384 numbers      on disk
+             each          each
+```
+
+**At question time — retrieve and answer** (steps 1 and 2, every question):
+
+```
+"How do I use GRPO?"
+        ↓ embed the question the same way
+   384 numbers
+        ↓ find the nearest vectors in the store
+   top 4 chunks  ──────────────────┐
+        ↓                          │
+   paste into the prompt           │  ← this is the whole "augmented" part
+        ↓                          │
+   model answers, citing them  ←───┘
+```
+
+### The three words you need
+
+**Embedding** — a list of numbers representing a piece of text, produced by a small
+model, arranged so that *similar text lands near similar text*. This tutorial uses
+`bge-small`, which turns any text into 384 numbers. It runs on a CPU in milliseconds
+and needs no API key. "Nearby" is measured as **cosine similarity**, roughly 0 to 1;
+in practice a good match here scores ~0.75+ and an unrelated one ~0.45.
+
+**Chunk** — documents are too big to embed usefully, so they're split into pieces of
+about 1200 characters. One vector has to stand for one chunk, so a chunk covering four
+topics averages them into mush. Chunk size is the most consequential knob in the whole
+pipeline.
+
+**Vector store** — the database that holds the vectors and answers "which of these
+are nearest to this one?" Here it's Chroma, a sqlite file on disk. That's genuinely
+all it does.
+
+### What actually reaches the model
+
+No framework magic — step 2 builds a string that looks like this and sends it:
+
+```
+CONTEXT:
+[#1] (source: tutorials/code-mode-analysis/README.md)
+A code-mode agent does something different. Given the same tools, it writes...
+
+[#2] (source: tutorials/code-mode-analysis/README.md)
+Flyte runs the generated program in Monty, a Rust-based Python interpreter...
+
+QUESTION: What does the code-mode tutorial teach?
+```
+
+Plus a system prompt saying *answer only from the context, cite chunks as [#N], and
+say so if the answer isn't there.* That is RAG, in full. Everything else in this
+tutorial is about making the retrieval half good, because the generation half is just
+this.
+
+---
+
 ## The idea
 
 A vector store does exactly one thing: it holds a pile of vectors and finds the ones
@@ -29,6 +112,19 @@ different plumbing around it:
 The bottom row is identical. That's the whole point of this tutorial, and it's why
 these two things live in one place instead of two: steps 0–3 build a read-only index,
 step 4 changes *who holds the pen*, and nothing else changes at all.
+
+**So what is agentic memory, concretely?** An assistant that "remembers you" usually
+isn't doing anything exotic. After each exchange it asks a model *"did the user reveal
+anything durable about themselves?"*, gets back something like `["The user's name is
+Sage.", "Sage prefers demos under 20 minutes."]`, embeds those sentences, and stores
+them. Next turn, before answering, it embeds your new message and retrieves the
+nearest stored facts — the same top-k lookup step 1 does — and pastes them into the
+system prompt.
+
+That's why the agent in step 4 can answer "what do you know about me?" on turn 3
+without any special handling for that question. It isn't recalling the conversation;
+it's retrieving sentences that turns 1 and 2 happened to write, because your question
+landed near them in the same vector space.
 
 ### Why this is worth your time
 
@@ -57,7 +153,7 @@ subtasks — those are cached, so only the first run pays for the index.
 |---|---|---|
 | **0** | `step0_index.py` | Fetch → chunk → embed → a Chroma directory as a `flyte.io.Dir`. *No API key needed.* |
 | **1** | `step1_retrieve.py` | Retrieval alone. Top-k with similarity scores, **no model anywhere**. *No API key needed.* |
-| **2** | `step2_rag_answer.py` | Add Claude. Grounded answers with `[#N]` citations, and `--use_retrieval false` to see what ungrounded looks like. |
+| **2** | `step2_rag_answer.py` | Add Claude. Grounded answers with `[#N]` citations, and `--no-use_retrieval` to see what ungrounded looks like. |
 | **3** | `step3_visualize.py` | Project 384 dimensions onto a screen. Watch the query star move between clusters. *No API key needed.* |
 | **4** | `step4_memory.py` | The same store, written by the agent. Retrieve → answer → extract facts → write back. |
 | **5** | `step5_chat_app.py` | All of it in one Gradio UI — chat, live projection, memory panel. Runs locally or deploys to a cluster. |
@@ -109,6 +205,27 @@ flyte create secret ANTHROPIC_API_KEY -p flytesnacks -d development
 
 Then drop the `--local` from any command below. The first remote run builds the
 image; the rest start warm.
+
+### Seeing the output
+
+This matters from a terminal. `flyte run --local` prints a one-line summary — the
+*actual* output of steps 1–4 (retrieved chunks with their scores, the answer and its
+citations, the UMAP chart, the memories) goes into an HTML report on disk.
+
+```bash
+python open_report.py          # open the newest report in your browser
+python open_report.py 2        # the one before it
+python open_report.py --path   # just print the path
+```
+
+Or add `--tui` to any run for Flyte's live task UI.
+
+In the notebook you don't need this — `show_latest()` renders the report inline
+after each cell.
+
+> A step that calls step 0 as a subtask writes several reports in one run, one per
+> task. The newest is the step you actually invoked, which is what `open_report.py`
+> shows by default.
 
 ### Using a different model
 
@@ -214,12 +331,22 @@ Now run it again with retrieval switched off:
 
 ```bash
 flyte run --local step2_rag_answer.py answer \
-    --question "What does the code-mode tutorial teach?" --use_retrieval false
+    --question "What does the code-mode tutorial teach?" --no-use_retrieval
 ```
 
-The interesting failure is not a refusal. The model produces something fluent and
-confident about a tutorial it has never seen. Retrieval is what makes the difference
-*checkable* — every `[#N]` points at a file you can open.
+> **CLI note:** Flyte turns a `bool` task parameter into a click flag pair, so it's
+> `--no-use_retrieval`. `--use_retrieval false` fails with
+> `Got unexpected extra argument (false)`.
+
+You'll get one of two things, and which one is luck. Sometimes a confident answer
+about a completely different "code mode" — the agentic-coding-tool persona, or the
+Cloudflare MCP pattern. Sometimes a hedge that lists several things it might be and
+asks you to narrow it down.
+
+The hedge looks like the model behaving well, and in a sense it is. But notice what
+you *still* can't do with either answer: check it. There's nothing to open, no claim
+tied to anything. The grounded run's `[#3]` points at a file on disk. That's the
+difference retrieval buys — not confidence, *verifiability*.
 
 > **Note:** read the citations in the HTML report, not in the terminal. Flyte's
 > console renders with Rich, which treats `[#1]` as markup and swallows it. The
@@ -237,9 +364,33 @@ Every chunk is a 384-dimensional vector. UMAP squashes that to two so it fits on
 screen, keeping neighbours near neighbours. The corpus becomes a map with clusters
 nobody labelled — the fine-tuning tutorials in one region, the biotech ones in
 another. Your question is embedded, pushed through the *same fitted* projection, and
-lands as a gold star.
+lands as an orange star, labelled with the question itself.
 
-Run those three in a row and the star jumps between neighbourhoods.
+**Reading the chart:**
+
+| Mark | Meaning |
+|---|---|
+| Small gray dots | every chunk in the index |
+| **Numbered blue dots** | the retrieved chunks — **darker = better match**, number = rank |
+| Orange star | your question, projected into the same space |
+
+Rank is an ordered quantity, so it gets a single-hue ramp rather than a rainbow.
+(An earlier version of this used red→orange→yellow→green, which was a mistake: red
+reads as "bad" and green as "good", so it said the exact opposite of what it meant —
+red was the *best* match.) Because adjacent steps of a ramp are necessarily similar,
+the rank number is drawn inside each dot, so color never carries the rank alone.
+
+**Two dots on top of each other is not a glitch.** Consecutive chunks from the same
+document have nearly identical embeddings, so they project to nearly the same point —
+you'll often see three dots when four were retrieved. That's chunk size made visible,
+and the legend always lists all of them.
+
+Run those three in a row and the star jumps between neighbourhoods. The terminal only
+prints `plotted 398 chunks, top similarity 0.721` — **the chart is in the report**:
+
+```bash
+python open_report.py
+```
 
 **One honest caveat, which the report also states:** UMAP has to place an
 out-of-corpus question *somewhere*, and it will happily drop it next to whatever is
@@ -359,6 +510,11 @@ next to `config.py`. On a cluster: `flyte create secret ANTHROPIC_API_KEY -p <pr
 -d <domain>`, in the *same* project and domain you're running in. A secret created
 without those flags lives at a different scope and the pod won't see it.
 
+**`Got unexpected extra argument (false)`** — Flyte renders a `bool` task parameter
+as a click flag pair, so boolean arguments take no value. Use `--no-use_retrieval`
+(or `--use_retrieval` to force it on), not `--use_retrieval false`. Run any step with
+`--help` to see the exact flags it generated.
+
 **Citations missing from the terminal output** — they're in the HTML report. Rich
 eats `[#1]` as console markup.
 
@@ -369,8 +525,48 @@ with.
 **UMAP's first fit takes ~20 seconds** — that's numba compiling. It's cached
 afterwards, and subsequent questions are instant.
 
+**`FileNotFoundError: .../umap_xxxx/coords.npy` on a cached run** — you shouldn't hit
+this any more, but here's the cause. Under `--local`, Flyte's cache stores the *path*
+to a task's output directory. If those directories go to the system temp, macOS
+purges them periodically and on reboot, so a step 0 you ran on Monday hands step 3 a
+path that no longer exists on Wednesday. Task outputs now go to `.rag_work/` in this
+directory instead (override with `RAG_WORK_DIR`), which survives a reboot. Delete
+`.rag_work/` and `/tmp/flyte/metadata` together if you ever want a genuinely clean
+slate.
+
 **Everything is slow on the first run** — you're downloading bge-small (~130MB) and
 building the index. Every run after that hits the cache.
+
+**`HTTP Request: HEAD https://huggingface.co/...` on every run** — you shouldn't see
+this, but here's what it was. By default sentence-transformers revalidates the model
+against the Hub every time you load it: ~15 `HEAD` requests over 2 TCP connections,
+asking "is my cached copy still current?" Nothing is re-downloaded — but it means
+every run needs working network, which is a bad bet on conference wifi.
+
+`store.load_encoder()` fixes this properly by trying `local_files_only=True` first
+and only falling back to the network if the model genuinely isn't cached. Measured at
+the socket layer:
+
+| | TCP connections to huggingface.co |
+|---|---|
+| Before | 2, every run |
+| After, model cached | **0** |
+| After, empty cache (first run) | 2, downloads 138MB, then 0 forever |
+
+If you want to be certain nothing is reaching out, count it yourself:
+
+```bash
+python - <<'EOF'
+import socket, sys; sys.path.insert(0, ".")
+calls = []; orig = socket.create_connection
+socket.create_connection = lambda a, *x, **k: (calls.append(a), orig(a, *x, **k))[1]
+from store import load_encoder; load_encoder()
+print("connections:", len(calls), calls)
+EOF
+```
+
+`export HF_HUB_OFFLINE=1` is a belt-and-braces option that makes any Hub call a hard
+error rather than a silent fallback — useful if you want the failure to be loud.
 
 **Gradio errors about `Chatbot`** — this pins `gradio>=6.0`. Version 6 removed the
 `type` argument that version 5 required, so a venv with 5.x installed will fail.

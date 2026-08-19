@@ -211,7 +211,9 @@ def build_ui():
             query_xy = state["reducer"].transform(query_vector)[0]
             indices = [state["id_to_index"][h.id] for h in hits if h.id in state["id_to_index"]]
             shown = [h for h in hits if h.id in state["id_to_index"]]
-            figure = _figure(state["coords"], state["sources"], indices, shown, query_xy)
+            figure = _figure(
+                state["coords"], state["sources"], indices, shown, query_xy, message,
+            )
         else:
             figure = empty_figure()
 
@@ -225,7 +227,7 @@ def build_ui():
         gr.Markdown(
             "## RAG and agent memory on Flyte\n"
             "Every message retrieves from the document index, answers from those "
-            "chunks, moves the gold star on the projection, and writes what it "
+            "chunks, moves the star on the projection, and writes what it "
             "learns about you into a second, writable store."
         )
         with gr.Row():
