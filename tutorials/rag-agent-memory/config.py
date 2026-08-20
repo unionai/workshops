@@ -28,6 +28,7 @@ load_dotenv()  # ANTHROPIC_API_KEY for `flyte run --local`; ignored on the clust
 image = flyte.Image.from_debian_base(name="rag-agent-memory").with_pip_packages(
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
+    "qdrant-client>=1.9",  # --store qdrant, embedded mode
     "anthropic>=0.40.0",
     "python-dotenv",
     "datasets>=3.0.0",  # step 0's --source hf

@@ -13,7 +13,7 @@ numbered blue dots — darker means a better match — matching the cards below.
 
     flyte run --local step3_visualize.py visualize --question "How do I use GRPO?"
     flyte run --local step3_visualize.py visualize --question "brain tumor segmentation"
-    flyte run --local step3_visualize.py visualize --question "What is the capital of France?"
+    flyte run --local step3_visualize.py visualize --question "Who won the 2022 FIFA World Cup?"
 
 Ask those three in a row and watch the star move to a different neighbourhood
 each time. On the third one the projection still has to place it somewhere, so
@@ -57,6 +57,7 @@ async def fit_projection(
     chroma_dir: flyte.io.Dir,
     collection_name: str = "docs",
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    store_backend: str = "chroma",
     n_neighbors: int = 15,
     min_dist: float = 0.1,
     random_state: int = 42,
@@ -76,9 +77,10 @@ async def fit_projection(
 
     collection = open_collection(
         str(Path(await chroma_dir.download())), collection_name, embedding_model,
+        store_backend,
     )
-    data = collection.get(include=["embeddings", "metadatas"])
-    vectors = np.asarray(data["embeddings"], dtype="float32")
+    records = collection.all_records(with_vectors=True)
+    vectors = np.asarray([r.vector for r in records], dtype="float32")
     log.info(f"Fitting UMAP on {vectors.shape[0]} vectors of {vectors.shape[1]} dims")
 
     reducer = umap.UMAP(
@@ -97,8 +99,8 @@ async def fit_projection(
     np.save(out_dir / "coords.npy", coords)
     joblib.dump(reducer, out_dir / "reducer.joblib")
     (out_dir / "meta.json").write_text(json.dumps({
-        "ids": data["ids"],
-        "sources": [(m or {}).get("source", "unknown") for m in data["metadatas"]],
+        "ids": [r.id for r in records],
+        "sources": [r.source for r in records],
     }))
 
     log.info(f"Projection fitted and cached at {out_dir}")
@@ -200,17 +202,20 @@ async def visualize(
     max_docs: int = 0,
     collection_name: str = "docs",
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    store_backend: str = "chroma",
 ) -> str:
     """Project the corpus, place the question in it, and report the picture."""
     import joblib
     import numpy as np
 
-    chroma_dir = await index(
+    store_dir = await index(
         source=source, max_docs=max_docs,
         collection_name=collection_name, embedding_model=embedding_model,
+        store_backend=store_backend,
     )
     projection_dir = await fit_projection(
-        chroma_dir, collection_name=collection_name, embedding_model=embedding_model,
+        store_dir, collection_name=collection_name, embedding_model=embedding_model,
+        store_backend=store_backend,
     )
 
     proj_path = Path(await projection_dir.download())
@@ -220,7 +225,8 @@ async def visualize(
     id_to_index = {chunk_id: i for i, chunk_id in enumerate(meta["ids"])}
 
     collection = open_collection(
-        str(Path(await chroma_dir.download())), collection_name, embedding_model,
+        str(Path(await store_dir.download())), collection_name, embedding_model,
+        store_backend,
     )
     log.info(f'\nQuestion: "{question}"')
 

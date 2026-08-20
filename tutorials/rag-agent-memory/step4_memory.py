@@ -102,18 +102,17 @@ def _remember(collection, encoder, facts: list[str], turn: int) -> tuple[list[st
             continue
 
         vector = embed(encoder, [fact])[0]
-        if collection.count() > 0:
-            existing = collection.query(
-                query_embeddings=[vector], n_results=1, include=["distances"],
-            )
-            if existing["distances"][0] and (1.0 - existing["distances"][0][0]) >= DEDUPE_THRESHOLD:
-                skipped.append(fact)
-                continue
+        # Backend-agnostic: `nearest` already normalizes to cosine similarity,
+        # so this threshold means the same thing on Chroma and on Qdrant.
+        nearest = collection.nearest(vector, 1)
+        if nearest and nearest[0].similarity >= DEDUPE_THRESHOLD:
+            skipped.append(fact)
+            continue
 
         collection.add(
             ids=[f"mem-{collection.count()}-{abs(hash(fact)) % 10**8}"],
-            documents=[fact],
-            embeddings=[vector],
+            texts=[fact],
+            vectors=[vector],
             metadatas=[{"source": f"turn {turn}", "title": "memory"}],
         )
         written.append(fact)
@@ -150,6 +149,7 @@ async def converse(
     memory_dir: Optional[flyte.io.Dir] = None,
     top_k: int = 5,
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    store_backend: str = "chroma",
 ) -> flyte.io.Dir:
     """Run a short conversation, reading and writing memory each turn.
 
@@ -159,7 +159,7 @@ async def converse(
     script = messages or DEMO_SCRIPT
 
     # Start from prior memory if we were handed some, otherwise a fresh store.
-    persist_dir = new_work_dir("memory_")
+    persist_dir = new_work_dir(f"memory_{store_backend}_")
     if memory_dir is not None:
         downloaded = Path(await memory_dir.download())
         for item in downloaded.iterdir():
@@ -169,7 +169,7 @@ async def converse(
             else:
                 __import__("shutil").copy2(item, target)
 
-    collection = open_collection(str(persist_dir), MEMORY_COLLECTION, embedding_model)
+    collection = open_collection(str(persist_dir), MEMORY_COLLECTION, embedding_model, store_backend)
     encoder = load_encoder(embedding_model)
     started_with = collection.count()
     log.info(f"Memory opened with {started_with} facts")

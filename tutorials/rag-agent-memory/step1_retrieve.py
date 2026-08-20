@@ -11,7 +11,7 @@ chunks back — just with low scores. Retrieval never returns nothing, and a RAG
 system that ignores those scores will happily hand the model garbage.
 
     flyte run --local step1_retrieve.py search --question "How do I use GRPO?"
-    flyte run --local step1_retrieve.py search --question "What is the capital of France?"
+    flyte run --local step1_retrieve.py search --question "Who won the 2022 FIFA World Cup?"
 
 This step calls step 0 as a subtask. Step 0's tasks are cached, so the index is
 built once and every run after that starts instantly.
@@ -44,15 +44,18 @@ async def search(
     max_docs: int = 0,
     collection_name: str = "docs",
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    store_backend: str = "chroma",
 ) -> str:
     """Retrieve the top-k chunks for a question and report them."""
-    chroma_dir = await index(
+    store_dir = await index(
         source=source, max_docs=max_docs,
         collection_name=collection_name, embedding_model=embedding_model,
+        store_backend=store_backend,
     )
 
     collection = open_collection(
-        str(Path(await chroma_dir.download())), collection_name, embedding_model,
+        str(Path(await store_dir.download())), collection_name, embedding_model,
+        store_backend,
     )
     log.info(f'\nQuestion: "{question}"')
     log.info(f"Searching {collection.count()} chunks for the top {top_k}…")
