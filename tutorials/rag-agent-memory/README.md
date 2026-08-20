@@ -190,21 +190,61 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 `config.py` calls `load_dotenv()`, so every step picks it up automatically.
 
-### On a cluster
+### Flyte config — three paths, pick one
+
+Everything here works with **no config at all**; `flyte run --local` needs nothing. But
+there are two upgrades worth knowing about.
+
+**1. Nothing.** Clone, install, run. This is what Colab does.
+
+**2. Local persistence** — still no cluster, but past runs get recorded to SQLite so you
+can browse them instead of scrolling back through terminal output:
 
 ```bash
-flyte create config \
-    --endpoint <your-endpoint> \
-    --project flytesnacks \
-    --domain development \
-    --builder remote
-
-# Same project and domain as the runs, or the pod won't see it:
-flyte create secret ANTHROPIC_API_KEY -p flytesnacks -d development
+flyte create config --local-persistence
+flyte start tui          # browse past runs
 ```
 
-Then drop the `--local` from any command below. The first remote run builds the
-image; the rest start warm.
+That writes a three-line `.flyte/config.yaml` next to the tutorial:
+
+```yaml
+image:
+  builder: local
+local:
+  persistence: true
+```
+
+One side effect worth knowing: once a project `.flyte/` exists, **the run cache moves
+from `~/.flyte/local-cache/` to `./.flyte/local-cache/`** — project-scoped rather than
+global. Good behaviour, but it changes which directory you clear (see Troubleshooting).
+
+**3. A cluster** — a local devbox, or a hosted endpoint. This is what buys you real
+containers, the run graph, retries, and deployed apps (step 5).
+
+```bash
+# Local devbox — needs Docker, so not Colab.
+flyte start devbox                    # --gpu to pass host GPUs through
+flyte create config \
+    --endpoint localhost:30080 \
+    --project flytesnacks --domain development \
+    --builder local --insecure --local-persistence
+
+# Or a hosted endpoint (demo access: https://union.ai/)
+flyte create config \
+    --endpoint <your-endpoint> \
+    --project flytesnacks --domain development \
+    --builder remote
+```
+
+Either way, create the secret in the **same** project and domain, then drop `--local`
+from any command below:
+
+```bash
+flyte create secret ANTHROPIC_API_KEY -p flytesnacks -d development
+flyte run step0_index.py index --store_backend qdrant
+```
+
+The first remote run builds the image; the rest start warm.
 
 ### Seeing the output
 
@@ -659,10 +699,17 @@ directory instead (override with `RAG_WORK_DIR`), which survives a reboot.
 of them is the cache:
 
 ```bash
-rm -rf ~/.flyte/local-cache    # the actual cache — what makes tasks skip
+rm -rf ~/.flyte/local-cache    # the cache, when there is NO project .flyte/
+rm -rf .flyte/local-cache      # the cache, once a project .flyte/ exists
 rm -rf .rag_work               # the task outputs those cache entries point at
 rm -rf /tmp/flyte/metadata     # run metadata and HTML reports only
 ```
+
+**The cache moves.** With no project config it lives in `~/.flyte/local-cache/`; the
+moment you run `flyte create config` in this directory, it becomes
+`./.flyte/local-cache/`. Clearing the global one while a project config exists looks
+like it worked and changes nothing — the symptom is a step that "runs" instantly and
+prints no task logs.
 
 `/tmp/flyte/metadata` is *not* the cache — deleting it alone changes nothing, and
 deleting `.rag_work` without clearing the cache is worse than useless: the cache still
