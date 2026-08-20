@@ -35,7 +35,7 @@ confusion.
 
 ```
 documents  →  chunks  →  embeddings  →  vector store
-   48         398 pieces   398 vectors     Chroma
+   46         398 pieces   398 vectors     Chroma
   READMEs    ~1200 chars   384 numbers      on disk
              each          each
 ```
@@ -260,7 +260,7 @@ flyte run --local step0_index.py index
 Three cached tasks — `fetch_docs` → `chunk_documents` → `embed_and_index` — and a
 Chroma persist directory comes out the far end as a `flyte.io.Dir`.
 
-The default corpus is **this repository's own tutorial write-ups**: 48 READMEs,
+The default corpus is **this repository's own tutorial write-ups**: 46 documents,
 about 400 chunks, a few seconds to embed. It's a good corpus for a workshop because
 you can check every answer by opening the file it cites, and because the tutorials
 cover genuinely different domains, so step 3's projection has real clusters in it.
@@ -442,15 +442,80 @@ flyte run --local step4_memory.py converse \
 Memory opened with 5 facts
 ```
 
-Two details in here are load-bearing:
+### How it decides what to store
 
-- **Extraction is schema-constrained, not parsed out of prose.** `llm.extract()` uses
-  the model's structured-output mode, so there is no regex fishing a `{...}` block out
-  of a paragraph. If extraction returned malformed JSON, memory would silently stop
-  being written and the agent would just seem forgetful.
+**There is no entity recognition, no NER, and no knowledge graph.** It is one extra
+model call per turn, with a prompt and a schema. That's the whole mechanism, and it's
+worth knowing because "the agent remembers me" sounds like it must be more.
+
+The prompt (`EXTRACTION_SYSTEM` in `step4_memory.py`):
+
+> You extract durable facts about the user from one exchange. Return each fact as a
+> short, self-contained sentence that will still make sense months from now, read on
+> its own with no surrounding conversation.
+>
+> **Include:** stable preferences, constraints, decisions, roles, projects, identity.
+> **Exclude:** questions the user asked, small talk, anything about the assistant, and
+> anything true only right now. If the user asked a question and revealed nothing new
+> about themselves, return an empty list — that is the common case and it is fine.
+
+Three things make it hold together:
+
+- **The output is schema-constrained**, not parsed out of prose. `llm.extract()` forces
+  `{"facts": ["...", "..."]}` through the model's structured-output mode, so there's no
+  regex fishing a `{...}` block out of a paragraph. If extraction returned malformed
+  JSON, memory would silently stop being written and the agent would just seem
+  forgetful.
+- **"Self-contained sentence" is doing real work.** A memory is retrieved months later
+  with none of its conversation around it, so `"yes, that one"` is useless. The prompt
+  pushes for `"Sage prefers demos under 20 minutes"` instead.
 - **Near-duplicates are dropped.** Anything within 0.95 cosine similarity of an
   existing memory is skipped, because five phrasings of "the user likes short demos"
   crowd out the top-k and teach the agent nothing.
+
+### Where this approach breaks
+
+Worth seeing, because it's the honest limit of the naive design. Contradict yourself:
+
+```bash
+flyte run --local step4_memory.py converse --messages '[
+  "I am Sage and I always run my demos in Python.",
+  "Actually, I switched everything over to Rust last month.",
+  "What language do I use?"]'
+```
+
+Everything ends up in the store — nothing is updated, nothing is deleted:
+
+```
+[turn 1] The user's name is Sage.
+[turn 1] Sage always runs demos in Python.
+[turn 2] Switched their projects/demos over to Rust as of about a month ago
+[turn 3] The user's primary programming language is Rust, having switched about a month ago
+[turn 3] The user previously used Python for their projects and demos before moving them to Rust
+```
+
+The agent *does* answer correctly ("You've been on Rust for about a month now — you
+moved your projects and demos over from Python"), but notice **why**: retrieval handed
+the model both the old and new facts, and the model reasoned its way to the right
+answer at read time. The memory itself is still contradictory. Ask a subtler question,
+or let the store grow until the stale fact ranks above the fresh one, and that stops
+working.
+
+Three specific gaps, all fixable, none fixed here:
+
+- **No entity resolution.** "Sage", "the user" and "their" become unrelated sentences.
+  Nothing links them, so there is no notion of *who* a fact is about — which is also
+  why this is single-user.
+- **No conflict resolution.** Dedupe only catches near-*duplicates*. Two facts that
+  *contradict* are not similar in vector space at all — they're about the same topic
+  with opposite content — so 0.95 cosine sails right past them.
+- **No usable timestamps.** Metadata records `turn 1`, `turn 2`, and the counter
+  restarts at 1 on every run — so a fact from today and one from last month are
+  indistinguishable, and you can't prefer the recent one.
+
+Real systems handle this with an update/delete path (retrieve related memories first,
+then ask the model whether the new fact supersedes one), entity IDs, and wall-clock
+timestamps. That's the natural next thing to build here.
 
 ## 5. Put it together
 
@@ -633,7 +698,7 @@ A map, roughly in order of value-for-effort. Almost everything here changes only
 - **Hierarchical / tree (RAPTOR).** Recursively cluster chunks and summarize each
   cluster, building a tree from raw text up to whole-corpus summaries, then retrieve
   at whichever level fits. Flat top-k structurally *cannot* answer "what are the main
-  themes across all 48 tutorials?" — no single chunk contains the answer. A tree can.
+  themes across all 46 documents?" — no single chunk contains the answer. A tree can.
 - **Graph RAG.** Extract entities and relationships into a knowledge graph, then
   traverse it. Built for multi-hop questions — "which tutorials use the same base
   model as the GRPO one?" — where the answer requires joining facts that never appear

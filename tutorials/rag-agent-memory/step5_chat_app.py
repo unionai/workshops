@@ -7,10 +7,19 @@ what it learns about you back into memory (step 4).
 
 Two ways to run it.
 
-Locally, no cluster needed — builds the index if you have not already, then
-opens Gradio on http://localhost:7860:
+Locally, no cluster needed — opens Gradio on http://localhost:7860:
 
     python step5_chat_app.py --local
+    python step5_chat_app.py --local --share          # reachable from Colab
+
+This reuses step 0's index rather than rebuilding it. `index` and its tasks are
+cached on their arguments, so once you have run step 0 the app resolves the same
+Chroma directory in under a second and embeds nothing. It only builds an index
+if none exists yet.
+
+One thing to watch: the cache key includes the arguments, so if you ran step 0
+with `--source flyte-docs`, pass the same `--source` here or you will build a
+second index from the default corpus.
 
 On a cluster, as a deployed app with the index mounted from a step 0 run:
 
@@ -267,16 +276,35 @@ def app_server(chroma_dir: str, collection_name: str, embedding_model: str):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def _run_locally(chroma_dir: str | None, share: bool = False) -> None:
-    """Launch the same UI on your laptop, building the index first if needed."""
+def _run_locally(chroma_dir: str | None, share: bool = False, source: str = "workshops") -> None:
+    """Launch the same UI on your laptop, reusing step 0's index if it exists.
+
+    This does not rebuild anything you have already built. `index` and its three
+    tasks are cached on their arguments, so if you ran step 0 earlier — which the
+    notebook does, several cells up — this resolves to the same Chroma directory
+    in well under a second and no embedding happens.
+
+    The catch is that the cache key includes the arguments. Run step 0 with
+    `--source flyte-docs` and then start the app with defaults, and you get a
+    *second* index built from the default corpus rather than the one you were
+    just looking at. Hence `--source` here, so the two can be kept in step.
+    """
+    import time
+
     if not chroma_dir:
-        print("No --chroma-dir given; building the index locally (cached after the first run)…")
         from step0_index import index
 
+        print(f"Looking for an existing '{source}' index from step 0…")
+        started = time.time()
         flyte.init()
-        run = flyte.run(index)
+        run = flyte.run(index, source=source)
         chroma_dir = run.outputs().o0.path
-        print(f"Index at {chroma_dir}")
+        took = time.time() - started
+
+        if took < 5:
+            print(f"Reused step 0's index ({took:.1f}s, nothing re-embedded): {chroma_dir}")
+        else:
+            print(f"Built a new index in {took:.0f}s: {chroma_dir}")
 
     state.update(build_state(chroma_dir, COLLECTION_NAME, DEFAULT_EMBEDDING_MODEL))
     build_ui().launch(
@@ -294,13 +322,17 @@ if __name__ == "__main__":
     parser.add_argument("--local", action="store_true", help="run on this machine, no cluster")
     parser.add_argument("--chroma-dir", default=None, help="reuse a step 0 output directory")
     parser.add_argument(
+        "--source", default="workshops",
+        help="corpus to reuse or build — must match what you ran step 0 with",
+    )
+    parser.add_argument(
         "--share", action="store_true",
         help="expose a public Gradio link — needed to reach the UI from Colab",
     )
     args = parser.parse_args()
 
     if args.local:
-        _run_locally(args.chroma_dir, share=args.share)
+        _run_locally(args.chroma_dir, share=args.share, source=args.source)
     else:
         flyte.init_from_config()
         app = flyte.serve(env)

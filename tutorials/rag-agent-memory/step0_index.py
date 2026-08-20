@@ -39,7 +39,7 @@ env = index_env
 # cloned, so the image needs no `git` and the task behaves the same locally and
 # in a pod. `subdirs` are matched against the path *inside* the archive.
 GITHUB_SOURCES = {
-    # The default: this very repository's tutorial write-ups. ~900KB, 48 files,
+    # The default: this very repository's tutorial write-ups. ~900KB, 46 documents after the length filter,
     # and you can open any answer's citation to check it. Also gives step 3's
     # projection real topical clusters — fine-tuning, biotech, agents, RL.
     "workshops": {
