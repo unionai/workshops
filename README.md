@@ -5,10 +5,39 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 
 ---
 
+## 👉 Tonight's workshop: RAG and Agentic Memory
+
+### **[tutorials/rag-agent-memory/](tutorials/rag-agent-memory/)**
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/rag-agent-memory/rag-agent-memory-tutorial.ipynb)
+
+Build a document index, search it with no model at all, answer from it with citations,
+*see* the embedding space in 2D, then point the same vector store the other way so an
+agent writes its own memories into it.
+
+**Runs entirely in Colab.** No cluster, no vector database to host, and no API key needed
+until step 2 (step 3's chart doesn't need one either). Or run it locally with
+`flyte run --local`, or on a Flyte cluster where every step becomes a container.
+
+Along the way: what tokenization actually does to your text, why chunking is a
+hyperparameter rather than plumbing, where dense retrieval quietly fails, and how to
+swap Chroma for Qdrant without touching a single step.
+
+```bash
+git clone https://github.com/unionai/workshops
+cd workshops/tutorials/rag-agent-memory
+uv venv .venv --python 3.11 && source .venv/bin/activate
+uv pip install -r requirements.txt
+flyte run --local step0_index.py index
+```
+
+---
+
 ## Featured
 
 | Example | Description |
 |---------|-------------|
+| [RAG and Agentic Memory](tutorials/rag-agent-memory/) | One vector store, pointed two directions — build a RAG index, watch retrieval work with no model involved, visualize the embedding space, then let an agent write its own memories back into it |
 | [Code Mode — NYC Taxi analyst](tutorials/code-mode-analysis/) | Claude writes one program, the Monty sandbox runs it, and its loops fan out into durable parallel tasks over real NYC taxi data |
 | [LangGraph Research Pipeline](tutorials/langgraph_agent_research/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks |
 | [LangGraph ReAct Agent](tutorials/starter-examples/langgraph-react-agent/) | Build a ReAct agent with LangGraph + OpenAI on Flyte |
@@ -38,6 +67,7 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 | Tutorial | Description |
 |----------|-------------|
 | [Code Mode — NYC Taxi analyst](tutorials/code-mode-analysis/) | The agent writes a *program* instead of calling tools one at a time. It runs in the Monty sandbox, and a loop in the generated code becomes a fan-out of durable, parallel query tasks over 3M+ real taxi trips |
+| [RAG and Agentic Memory](tutorials/rag-agent-memory/) | One Chroma store, pointed two directions — build a document index, search it with no model, answer from it with citations, see the embedding space in 2D, then let an agent write its own memories back into it |
 | [LangGraph Research Pipeline](tutorials/langgraph_agent_research/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks via Tavily web search |
 | [LangGraph ReAct Agent](tutorials/starter-examples/langgraph-react-agent/) | Single-file ReAct agent with LangGraph |
 | [Planner Multi-Agent System](tutorials/multi-agent-workflows/tutorial_planner_agent.ipynb) | Scalable planner multi-agent system |
