@@ -210,6 +210,7 @@ async def visualize(
     collection_name: str = "docs",
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     store_backend: str = "chroma",
+    chunking: str = "structural",
     with_answer: bool = True,
 ) -> str:
     """Project the corpus, place the question in it, answer it, and report all three.
@@ -224,7 +225,7 @@ async def visualize(
     store_dir = await index(
         source=source, max_docs=max_docs,
         collection_name=collection_name, embedding_model=embedding_model,
-        store_backend=store_backend,
+        store_backend=store_backend, chunking=chunking,
     )
     projection_dir = await fit_projection(
         store_dir, collection_name=collection_name, embedding_model=embedding_model,
@@ -304,6 +305,14 @@ async def visualize(
             "match</b>, and the number on each dot is its rank, matching the cards "
             "below. The orange star is the question itself, pushed through the same "
             "fitted projection.<br><br>"
+            "<b>This is 2D. The space is 384D.</b> Retrieval happened in the full "
+            "384 dimensions — these coordinates were computed afterwards, purely so "
+            "there would be something to look at, and had no influence on which "
+            "chunks came back. UMAP preserves local neighbourhoods and discards most "
+            "of the rest (on this corpus, distance on the chart tracks true "
+            "dissimilarity at a Spearman of only ~0.4), so two dots touching here can "
+            "be genuinely unrelated. Trust the similarity numbers; use the picture "
+            "for orientation.<br><br>"
             "Two dots sitting on top of each other is not a glitch: consecutive "
             "chunks from one document have nearly identical embeddings, so they "
             "land in nearly the same place. That is chunk size made visible.<br><br>"

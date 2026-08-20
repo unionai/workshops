@@ -54,6 +54,172 @@ documents  →  chunks  →  embeddings  →  vector store
    model answers, citing them  ←───┘
 ```
 
+### How text becomes a vector
+
+Three transformations happen between a document and something a database can
+search. Each one throws information away, and knowing *what* each one discards is
+most of knowing why RAG fails.
+
+**1. Tokenization** — the model can't read characters, it reads *tokens*: sub-word
+pieces from a fixed vocabulary. Run this tutorial's own encoder over some text and
+you can see exactly what it sees:
+
+```
+"Fine-tuning with GRPO"
+  → ['fine', '-', 'tuning', 'with', 'gr', '##po']        21 chars → 6 tokens
+
+"flyte run --local step0_index.py"
+  → ['fly','##te','run','-','-','local','step','##0','_','index','.','p','##y']
+                                                          32 chars → 13 tokens
+```
+
+`##` means "glued to the previous piece". Notice **GRPO isn't a word to this model** —
+it's `gr` + `##po`, because it wasn't in the vocabulary. Same for `flyte`. Domain jargon
+and identifiers get shredded into fragments, which is a large part of why dense
+retrieval is bad at exact terms and why hybrid search with keyword matching helps.
+
+It also sets a hard ceiling: `bge-small` accepts **512 tokens**. Anything past that is
+silently truncated — not an error, just a vector that quietly doesn't represent the end
+of your chunk. That's the real reason `chunk_size` defaults to 1200 *characters*: it
+leaves comfortable headroom under that limit.
+
+**2. Embedding** — those tokens go through the model and come out as one list of 384
+floats, L2-normalized (length exactly 1.0):
+
+```
+"GRPO fine-tuning" → [-0.028, -0.001, 0.008, -0.067, 0.037, -0.009, ...]  (384 of them)
+```
+
+No one assigned meaning to those numbers, and no individual number means anything. The
+only property that matters is *relative*: text about similar things lands in similar
+directions. Because every vector has length 1, "similar direction" is just the dot
+product — which is what cosine similarity is, and why the whole search is one matrix
+multiply.
+
+The crucial consequence: **the vector represents only the text you handed it.** A
+paragraph about reward functions that never says "GRPO" produces a vector that a GRPO
+question can't find. The model doesn't know what document the paragraph came from
+unless you say so — which is exactly what the structural chunker below does.
+
+**3. Nearest-neighbour lookup** — the store keeps the vectors and answers "which of
+these point most nearly the same way as this one?" That's the whole database.
+
+```
+         query ●
+              ╱ ╲            cosine similarity ≈ how aligned two arrows are
+      0.83  ╱     ╲  0.47      1.0 = identical direction
+          ●         ●          0.0 = unrelated
+     GRPO docs   football
+```
+
+### Dense retrieval alone is not the whole story
+
+Everything above is **dense** retrieval: embed, compare vectors, take the nearest. It's
+very good at *meaning* — "how do I make a task not re-run" finds a page about caching
+without sharing a word with it. It is surprisingly bad at *exact strings*, and the
+tokenizer section explains why: `flyte_map` isn't a word to this model, it's a handful
+of sub-word fragments, and fragments blur together.
+
+Here's that failure on this corpus. Search for `flyte_map`, an identifier appearing in
+**7 chunks**:
+
+```
+dense search for "flyte_map" returned:
+  #1  0.779  tutorials/starter-examples/flyte-basics/README.md
+  #2  0.759  tutorials/starter-examples/flyte-basics/README.md
+  #3  0.753  tutorials/rag-agent-memory/README.md
+  #4  0.744  tutorials/geospatial-burn-scar-segmentation/README.md
+
+chunks that actually contain flyte_map:
+  tutorials/code-mode-analysis/README.md   (×7)
+```
+
+**Not one hit contains the term** — and it looks confident doing it, top score 0.779. It
+matched on the general flavour of "flyte" plus "map" and landed in the basics tutorial.
+A `grep` would have nailed this in milliseconds.
+
+That's why production systems usually run **hybrid search**: dense retrieval *plus*
+old-fashioned keyword search (BM25 is the standard), with the two result lists merged —
+Reciprocal Rank Fusion is the usual method. The two techniques fail in almost opposite
+directions:
+
+| | good at | bad at |
+|---|---|---|
+| **Dense** (embeddings) | paraphrase, synonyms, "what I meant" | exact identifiers, error codes, rare terms, names |
+| **Keyword** (BM25) | exact tokens, code, flags, IDs | synonyms, rephrasing, "what I meant" |
+
+Because those weaknesses barely overlap, hybrid usually beats either alone — and it's
+often the cheapest real improvement available, since keyword search needs no model and
+no GPU.
+
+This tutorial deliberately ships **dense only**, so the mechanism stays visible and the
+failure above is something you can reproduce rather than read about. Adding BM25 is one
+of the highest-value exercises in
+[The rest of the RAG landscape](#the-rest-of-the-rag-landscape).
+
+### Chunking is a hyperparameter
+
+This is the decision that most determines whether your RAG works, and the one most
+tutorials treat as plumbing. **One vector has to stand for one chunk**, so where you cut
+decides what each vector *means*.
+
+Cut too big and a chunk spans four topics; its embedding is the average of all four, and
+averages match nothing well. Cut too small and you retrieve a sentence stripped of the
+context that made it meaningful. There's no universally right answer — it depends on
+your documents, which is what makes it a hyperparameter rather than a setting.
+
+This tutorial ships two strategies so you can see the difference rather than take my
+word for it:
+
+```bash
+flyte run --local step0_index.py index --chunking structural   # default
+flyte run --local step0_index.py index --chunking character    # the naive baseline
+```
+
+**`character`** splits every ~1200 characters, preferring paragraph breaks. It's the
+standard naive approach, and on this corpus it produces:
+
+```
+23% of chunks contain an unclosed code fence     ← split mid-command
+69% of chunks begin mid-sentence
+```
+
+One chunk literally starts `w.py pipeline \` — the tail of a shell command whose
+beginning lives in a different vector. It can be retrieved, and it can't answer
+anything.
+
+**`structural`** splits on markdown headings, keeps fenced code blocks whole, and stamps
+each chunk with the heading path it came from:
+
+```
+[Code Mode — NYC Taxi analyst > Design notes > The sandbox]
+
+Flyte runs the generated program in Monty, a Rust-based Python interpreter...
+```
+
+Same corpus, same settings: **0% unclosed fences, 4% mid-sentence.** That bracketed
+breadcrumb is doing real work — it puts the document's context *inside the text that
+gets embedded*, so a paragraph inherits the topic of the section it lives in. It's a
+cheap stand-in for "contextual retrieval," which does the same thing with an LLM-written
+sentence per chunk.
+
+And it changes answers, not just statistics. Ask *"How do I fine-tune a model with
+GRPO?"*:
+
+| | top hit | score |
+|---|---|---|
+| `character` | `rag-agent-memory/README.md` ← **wrong doc** | 0.811 |
+| `structural` | `llm-fine-tuning-grpo-math/README.md` ← correct | 0.828 |
+
+Character chunking surfaced *this tutorial* above the actual GRPO tutorial, because this
+README mentions GRPO in passing and its chunks were diced small enough to look focused.
+Structural chunking fixed it. That's a correctness change from a preprocessing decision,
+with no model involved anywhere.
+
+**Worth trying yourself:** `--chunk_size 300` and `--chunk_size 3000`, then re-run step 1
+on the same question. The retrieved text changes character completely, and step 3's
+projection visibly reorganizes.
+
 ### The three words you need
 
 **Embedding** — a list of numbers representing a piece of text, produced by a small
@@ -468,9 +634,13 @@ flyte run --local step0_index.py index --source local --local_path ~/notes
 Both GitHub sources are pulled as tarballs rather than cloned, so the image needs no
 `git` and the task behaves identically on your laptop and in a pod.
 
-**Knobs worth turning:** `--chunk_size` (default 1200 characters) and
-`--chunk_overlap` (150). Try 400 and 3000 and re-run step 1 — the retrieved text
-changes character completely.
+**Knobs worth turning:** `--chunking` (`structural` by default, `character` for the
+naive baseline — see [Chunking is a hyperparameter](#chunking-is-a-hyperparameter)),
+`--chunk_size` (1200 characters) and `--chunk_overlap` (150). Try 300 and 3000 and
+re-run step 1 on the same question; the retrieved text changes character completely.
+
+Each of these is part of the Flyte cache key, so switching one rebuilds that index
+rather than handing you the other one.
 
 ## 1. Search it, with no model at all
 
@@ -580,6 +750,43 @@ prints `plotted 543 chunks, top similarity 0.721` — **the chart is in the repo
 ```bash
 python open_report.py
 ```
+
+### The picture is 2D. The space is not.
+
+Worth saying plainly, because the chart is persuasive and it is not the truth.
+
+The vectors live in **384 dimensions**. UMAP squashes them to 2 so they fit on a screen,
+and that projection is lossy in a specific way: it tries to preserve *local
+neighbourhoods*, and gives up almost everything else. Distances between far-apart
+points, the size of gaps, the area of clusters — none of that survives.
+
+Measured on this corpus, over ~4,000 random chunk pairs:
+
+```
+Spearman(distance on the chart, true dissimilarity in 384-d) = 0.40
+```
+
+0.40 is a loose relationship, not a faithful one. Concretely: among the 300 pairs that
+sit **closest together on the chart**, one pair has a true cosine similarity of just
+**0.490** — `claude_agent_research` and `oom-self-healing`, two tutorials with nothing
+in common, rendered as neighbours.
+
+The thing to internalize:
+
+> **Retrieval never happens in the picture.** The top-k is computed in the full 384
+> dimensions. The 2D coordinates had *zero* influence on which chunks came back — they
+> were computed afterwards, purely so you could look at something.
+
+So the chart is an orientation device, not evidence. Use it to see *that* the corpus has
+topical structure, and *which* neighbourhood a question landed in. Use the **similarity
+numbers** to decide whether to trust a retrieval, because those come from the real
+space.
+
+This is also why high-dimensional intuition is a trap in general: in 384 dimensions
+nearly everything is far from nearly everything else, there's vastly more room than a
+plane can suggest, and "clusters" that look tight on a screen may be nothing of the
+kind. Any 2D embedding plot you ever see — here or anywhere — is a human convenience
+with a lot thrown away.
 
 **One honest caveat, which the report also states:** UMAP has to place an
 out-of-corpus question *somewhere*, and it will happily drop it next to whatever is
@@ -856,9 +1063,10 @@ Worth saying plainly, so nobody walks away thinking they've seen production RAG:
 - **Retrieval is a single dense lookup.** One embedding model, one top-k, no
   re-ranking, no keyword matching, no query rewriting. This is the simplest thing
   that works, not the best thing.
-- **Chunking is naive.** Fixed-size character splitting with overlap. It ignores
-  document structure entirely — headings, code blocks and tables all get chopped
-  mid-thought.
+- **Chunking is structure-aware but still simple.** `--chunking structural` respects
+  headings and code fences, but it doesn't do semantic chunking, sentence-window or
+  parent-document retrieval. `--chunking character` is the naive baseline, kept so you
+  can measure the difference.
 - **Memory is single-user and never forgets.** No `entity_id`, no decay, no conflict
   resolution when you contradict yourself.
 
@@ -879,10 +1087,14 @@ A map, roughly in order of value-for-effort. Almost everything here changes only
   **cross-encoder** that reads query and chunk *together* rather than embedding them
   separately. Slower per candidate, far more accurate, and you only run it on 20.
   Usually the single biggest quality win available. *(Change: `store.retrieve()`.)*
-- **Hybrid search.** Dense embeddings are bad at exact tokens — error codes, flag
-  names, `--no-use_retrieval`. Keyword search (BM25) is great at those and bad at
-  paraphrase. Run both, merge with Reciprocal Rank Fusion. The two failure modes
-  barely overlap, which is why hybrid beats either alone.
+- **Hybrid search.** Introduced up front in
+  [Dense retrieval alone is not the whole story](#dense-retrieval-alone-is-not-the-whole-story)
+  — dense misses exact tokens (the `flyte_map` case), BM25 nails them and misses
+  paraphrase, so run both and merge with Reciprocal Rank Fusion. Concretely here: build a
+  BM25 index over the same chunks in `step0_index.py`, add a `keyword()` method beside
+  `nearest()` on `VectorStore`, and fuse the two rank lists in `store.retrieve()`. No
+  model, no GPU, and you can measure it against the `flyte_map` query that currently
+  returns nothing useful.
 - **Contextual retrieval.** Before embedding each chunk, prepend a sentence or two of
   LLM-generated context situating it in its document ("This is from the GRPO
   tutorial's section on reward functions"). Fixes the chunk-lost-its-context problem

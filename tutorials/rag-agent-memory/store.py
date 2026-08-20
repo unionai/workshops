@@ -71,51 +71,6 @@ def new_work_dir(prefix: str) -> Path:
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 
-# ── Chunking ──────────────────────────────────────────────────────────────────
-
-def split_text(text: str, chunk_size: int = 1200, overlap: int = 150) -> list[str]:
-    """Recursive character splitter: paragraphs → lines → sentences → words → chars.
-
-    Character-based, not token-based, so we don't drag in a tokenizer just to
-    split. bge-small takes 512 tokens (~2000 English characters), so the default
-    1200 leaves headroom and nothing gets silently truncated at encode time.
-    """
-    text = text.strip()
-    if not text:
-        return []
-    if len(text) <= chunk_size:
-        return [text]
-
-    for sep in ("\n\n", "\n", ". ", " ", ""):
-        if sep == "":
-            step = max(1, chunk_size - overlap)
-            return [text[i:i + chunk_size] for i in range(0, len(text), step)]
-        parts = text.split(sep)
-        if len(parts) == 1:
-            continue
-
-        out: list[str] = []
-        buf = ""
-        for part in parts:
-            piece = part + sep
-            if len(piece) > chunk_size:
-                if buf.strip():
-                    out.append(buf.strip())
-                    buf = ""
-                out.extend(split_text(part, chunk_size, overlap))
-                continue
-            if len(buf) + len(piece) <= chunk_size:
-                buf += piece
-            else:
-                if buf.strip():
-                    out.append(buf.strip())
-                buf = (buf[-overlap:] if overlap and buf else "") + piece
-        if buf.strip():
-            out.append(buf.strip())
-        return [c for c in out if c.strip()]
-    return [text]
-
-
 # ── Embeddings ────────────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=2)
