@@ -154,13 +154,14 @@ subtasks — those are cached, so only the first run pays for the index.
 | **0** | `step0_index.py` | Fetch → chunk → embed → a Chroma directory as a `flyte.io.Dir`. *No API key needed.* |
 | **1** | `step1_retrieve.py` | Retrieval alone. Top-k with similarity scores, **no model anywhere**. *No API key needed.* |
 | **2** | `step2_rag_answer.py` | Add Claude. Grounded answers with `[#N]` citations, and `--no-use_retrieval` to see what ungrounded looks like. |
-| **3** | `step3_visualize.py` | Project 384 dimensions onto a screen. Watch the query star move between clusters. *No API key needed.* |
+| **3** | `step3_visualize.py` | Project 384 dimensions onto a screen, and answer from the chunks it lit up. Watch the query star move between clusters. *Chart works with no API key.* |
 | **4** | `step4_memory.py` | The same store, written by the agent. Retrieve → answer → extract facts → write back. |
 | **5** | `step5_chat_app.py` | All of it in one Gradio UI — chat, live projection, memory panel. Runs locally or deploys to a cluster. |
 
-Steps 0, 1 and 3 never call a model. You can get all the way to a working retrieval
-demo, with a picture, before finding your API key — which matters when you're running
-a room full of people through this.
+Steps 0 and 1 never call a model, and step 3 draws its chart without one. You can get
+all the way to working retrieval, with a picture, before finding your API key — which
+matters when you're running a room full of people through this. Step 3 adds a grounded
+answer to its report when a key *is* available, and quietly skips it when not.
 
 ---
 
@@ -245,6 +246,96 @@ flyte run step0_index.py index --store_backend qdrant
 ```
 
 The first remote run builds the image; the rest start warm.
+
+### The devbox path, in full
+
+A devbox is a whole Flyte cluster in one Docker container on your machine. It's the
+cheapest way to see the parts `--local` can't show you: each task in its own container,
+the run graph in a UI, retries and caching across runs, and step 5 deployed as a real
+app instead of a local Gradio process.
+
+**Prerequisite: Docker.** That's why this can't be done from Colab.
+
+```bash
+# 1. Start the cluster. First run pulls cr.flyte.org/flyteorg/flyte-devbox:latest,
+#    so expect a wait; after that it starts quickly.
+flyte start devbox
+flyte start devbox --gpu          # pass host GPUs through (NVIDIA hosts)
+
+# 2. Point this directory at it. --insecure because it's local plaintext;
+#    --builder local builds images with your Docker rather than remotely.
+flyte create config \
+    --endpoint localhost:30080 \
+    --project flytesnacks \
+    --domain development \
+    --builder local \
+    --insecure \
+    --local-persistence
+
+# 3. The secret the tasks read. The -p/-d matter: a secret created without them
+#    lives at a different scope and the pod will not see it.
+flyte create secret ANTHROPIC_API_KEY -p flytesnacks -d development
+```
+
+**About the image registry.** The devbox runs its own registry on `localhost:30000` and
+prints it on startup. You usually don't have to say so: the SDK resolves where to *push*
+built images in this order (`_get_push_registry` in `flyte/_image.py`) —
+
+1. `image.registry` from the config file, or `flyte.init(image_registry=...)`
+2. the ambient `image.registry` entry or the `FLYTE_IMAGE_REGISTRY` env var
+3. **`localhost:30000`, if the configured endpoint contains `localhost`**
+4. nothing — and deliberately never `ghcr.io/flyteorg`, which is pullable but not
+   pushable, so you fail fast rather than dying later in `ImagePullBackOff`
+
+Rule 3 is what makes the devbox work with no registry flag at all. But rules 1 and 2 beat
+it, so if you have `FLYTE_IMAGE_REGISTRY` exported for another project, images will be
+pushed somewhere the devbox can't pull from. If they aren't landing, be explicit:
+
+```bash
+flyte create config \
+    --endpoint localhost:30080 \
+    --project flytesnacks --domain development \
+    --builder local --insecure --local-persistence \
+    --registry localhost:30000
+```
+
+Note that `config.py` deliberately does **not** pin a registry on the image. That's what
+lets one `config.py` build for a devbox *and* for a hosted cluster with no code change —
+the registry is a property of where you're running, not of the tutorial. (The
+`ai-build-and-learn` originals hardcoded `registry="localhost:30000"` and
+`platform=("linux/arm64",)`; both had to go for this to be portable.)
+
+Then run any step **without** `--local` and it becomes containers:
+
+```bash
+flyte run step0_index.py index --store_backend qdrant
+flyte run step1_retrieve.py search --store_backend qdrant --question "..."
+```
+
+The first remote run builds the image from `config.py` — that's the slow one. Everything
+after starts warm, and the run URL printed at the end opens the graph and the HTML
+reports in the UI, which is a nicer way to read step 3's chart than `open_report.py`.
+
+Step 5 becomes a deployed app rather than a local process:
+
+```bash
+python step5_chat_app.py          # no --local
+```
+
+It mounts the index through `flyte.app.RunOutput`, so the app pod downloads the artifact
+step 0 already produced instead of rebuilding it. Pin a specific run with
+`INDEX_RUN=<run-name>`.
+
+When you're done:
+
+```bash
+flyte stop devbox                 # pauses it, keeps the state
+```
+
+> **Untested.** Everything in this tutorial has been run locally on both backends, but
+> the devbox and cluster paths have not — no cluster was available while writing it. The
+> commands come from the CLI's own help and the SDK's app examples. If something here is
+> wrong, this is the section where it'll be.
 
 ### Seeing the output
 
@@ -643,7 +734,7 @@ with `INDEX_RUN=<run-name>`, or leave it unset for the latest successful one.
 ## Design notes
 
 **Why the two-environment split.** `config.py` defines `index_env` (no secret) and
-`llm_env` (secret). Steps 0, 1 and 3 use the first. That isn't tidiness — it means a
+`llm_env` (secret). Steps 0 and 1 use the first. That isn't tidiness — it means a
 workshop attendee who hasn't sorted out an API key can still get to a working
 retrieval demo with a picture, which is most of the lesson.
 

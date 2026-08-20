@@ -122,7 +122,7 @@ def split_text(text: str, chunk_size: int = 1200, overlap: int = 150) -> list[st
 def load_encoder(model_name: str = DEFAULT_EMBEDDING_MODEL):
     """Load the sentence-transformer once per process, from cache when possible.
 
-    bge-small is ~130MB and runs fine on a CPU, which is why steps 0, 1 and 3
+    bge-small is ~130MB and runs fine on a CPU, which is why steps 0 and 1
     need no API key and no GPU — they work in a free Colab runtime.
 
     We try `local_files_only=True` first. By default sentence-transformers
@@ -426,6 +426,22 @@ def _check_meta(persist_dir: str, embedding_model: str, backend: str) -> None:
     else:
         Path(persist_dir).mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"embedding_model": embedding_model, "backend": backend}))
+
+
+def detect_backend(persist_dir: str, default: str = "chroma") -> str:
+    """Read which engine wrote a store directory, from its own metadata.
+
+    Lets a consumer adapt to whatever index it is handed rather than being told
+    out of band — which is what step 5 does with a mounted `RunOutput`, where
+    the app has no idea whether step 0 ran with chroma or qdrant.
+    """
+    meta = Path(persist_dir) / _META_FILE
+    if meta.exists():
+        try:
+            return json.loads(meta.read_text()).get("backend", default)
+        except (ValueError, OSError):
+            pass
+    return default
 
 
 def open_collection(
