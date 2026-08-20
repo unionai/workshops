@@ -52,7 +52,9 @@ DEFAULT_TOP_K = 4
 
 # Task that produced the index, as "<environment name>.<task name>".
 INDEX_TASK = "rag-index.index"
-LOCAL_MEMORY_DIR = "/tmp/agent_memory_chroma"
+# Per-backend, because the store directory records which engine built it — a
+# single shared path would make switching --store fail the backend guard.
+LOCAL_MEMORY_ROOT = "/tmp/agent_memory"
 
 
 # ── App environment ───────────────────────────────────────────────────────────
@@ -88,7 +90,8 @@ state: dict = {}
 
 # ── Startup: load the index, fit the projection once ──────────────────────────
 
-def build_state(chroma_dir: str, collection_name: str, embedding_model: str) -> dict:
+def build_state(chroma_dir: str, collection_name: str, embedding_model: str,
+                store_backend: str = "chroma") -> dict:
     """Everything expensive happens here, once, before the first message."""
     import numpy as np
     import umap
@@ -99,9 +102,9 @@ def build_state(chroma_dir: str, collection_name: str, embedding_model: str) -> 
     encoder = load_encoder(embedding_model)
 
     print(f"[startup] opening index at {chroma_dir}", flush=True)
-    docs = open_collection(chroma_dir, collection_name, embedding_model)
-    data = docs.get(include=["embeddings", "metadatas"])
-    vectors = np.asarray(data["embeddings"], dtype="float32")
+    docs = open_collection(chroma_dir, collection_name, embedding_model, store_backend)
+    records = docs.all_records(with_vectors=True)
+    vectors = np.asarray([r.vector for r in records], dtype="float32")
 
     print(f"[startup] fitting UMAP on {len(vectors)} vectors", flush=True)
     reducer = umap.UMAP(
@@ -114,8 +117,9 @@ def build_state(chroma_dir: str, collection_name: str, embedding_model: str) -> 
     coords = reducer.fit_transform(vectors)
 
     # The agent's own store, separate from the doc index — read AND write.
-    os.makedirs(LOCAL_MEMORY_DIR, exist_ok=True)
-    memory = open_collection(LOCAL_MEMORY_DIR, MEMORY_COLLECTION, embedding_model)
+    memory_dir = f"{LOCAL_MEMORY_ROOT}_{store_backend}"
+    os.makedirs(memory_dir, exist_ok=True)
+    memory = open_collection(memory_dir, MEMORY_COLLECTION, embedding_model, store_backend)
 
     print(f"[startup] ready — {docs.count()} chunks, {memory.count()} memories", flush=True)
     return {
@@ -124,8 +128,8 @@ def build_state(chroma_dir: str, collection_name: str, embedding_model: str) -> 
         "memory": memory,
         "reducer": reducer,
         "coords": coords,
-        "sources": [(m or {}).get("source", "unknown") for m in data["metadatas"]],
-        "id_to_index": {cid: i for i, cid in enumerate(data["ids"])},
+        "sources": [r.source for r in records],
+        "id_to_index": {r.id: i for i, r in enumerate(records)},
         "embedding_model": embedding_model,
     }
 
@@ -167,10 +171,9 @@ def build_ui():
         memory = state["memory"]
         if memory.count() == 0:
             return "_Nothing remembered yet. Tell it something about yourself._"
-        stored = memory.get(include=["documents", "metadatas"])
         lines = [
-            f"- {doc}  \n  <sub>{(meta or {}).get('source', '')}</sub>"
-            for doc, meta in zip(stored["documents"], stored["metadatas"])
+            f"- {r.text}  \n  <sub>{r.source}</sub>"
+            for r in memory.all_records()
         ]
         return f"**{memory.count()} memories**\n\n" + "\n".join(lines)
 
@@ -276,7 +279,8 @@ def app_server(chroma_dir: str, collection_name: str, embedding_model: str):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def _run_locally(chroma_dir: str | None, share: bool = False, source: str = "workshops") -> None:
+def _run_locally(chroma_dir: str | None, share: bool = False, source: str = "workshops",
+                 store_backend: str = "chroma") -> None:
     """Launch the same UI on your laptop, reusing step 0's index if it exists.
 
     This does not rebuild anything you have already built. `index` and its three
@@ -297,7 +301,7 @@ def _run_locally(chroma_dir: str | None, share: bool = False, source: str = "wor
         print(f"Looking for an existing '{source}' index from step 0…")
         started = time.time()
         flyte.init()
-        run = flyte.run(index, source=source)
+        run = flyte.run(index, source=source, store_backend=store_backend)
         chroma_dir = run.outputs().o0.path
         took = time.time() - started
 
@@ -306,7 +310,7 @@ def _run_locally(chroma_dir: str | None, share: bool = False, source: str = "wor
         else:
             print(f"Built a new index in {took:.0f}s: {chroma_dir}")
 
-    state.update(build_state(chroma_dir, COLLECTION_NAME, DEFAULT_EMBEDDING_MODEL))
+    state.update(build_state(chroma_dir, COLLECTION_NAME, DEFAULT_EMBEDDING_MODEL, store_backend))
     build_ui().launch(
         # Colab has no localhost you can reach, so --share is the way in there.
         server_name="0.0.0.0" if share else "127.0.0.1",
@@ -326,13 +330,18 @@ if __name__ == "__main__":
         help="corpus to reuse or build — must match what you ran step 0 with",
     )
     parser.add_argument(
+        "--store", default="chroma", choices=["chroma", "qdrant"],
+        help="vector store backend — must match what you ran step 0 with",
+    )
+    parser.add_argument(
         "--share", action="store_true",
         help="expose a public Gradio link — needed to reach the UI from Colab",
     )
     args = parser.parse_args()
 
     if args.local:
-        _run_locally(args.chroma_dir, share=args.share, source=args.source)
+        _run_locally(args.chroma_dir, share=args.share, source=args.source,
+                     store_backend=args.store)
     else:
         flyte.init_from_config()
         app = flyte.serve(env)

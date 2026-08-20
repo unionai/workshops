@@ -70,18 +70,21 @@ async def answer(
     max_docs: int = 0,
     collection_name: str = "docs",
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    store_backend: str = "chroma",
 ) -> str:
     """Answer a question, with or without retrieved context."""
     hits = []
     chunks_in_index = 0
 
     if use_retrieval:
-        chroma_dir = await index(
+        store_dir = await index(
             source=source, max_docs=max_docs,
             collection_name=collection_name, embedding_model=embedding_model,
+            store_backend=store_backend,
         )
         collection = open_collection(
-            str(Path(await chroma_dir.download())), collection_name, embedding_model,
+            str(Path(await store_dir.download())), collection_name, embedding_model,
+            store_backend,
         )
         chunks_in_index = collection.count()
         hits = retrieve(collection, question, k=top_k, embedding_model=embedding_model)

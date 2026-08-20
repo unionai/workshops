@@ -35,8 +35,8 @@ confusion.
 
 ```
 documents  →  chunks  →  embeddings  →  vector store
-   46         398 pieces   398 vectors     Chroma
-  READMEs    ~1200 chars   384 numbers      on disk
+  ~50 docs     ~550 pieces   ~550 vectors    Chroma
+  READMEs     ~1200 chars   384 numbers     on disk
              each          each
 ```
 
@@ -135,8 +135,8 @@ The framework hides the two decisions that actually determine whether it works:
   topics, so it averages them into mush. Chunk too small and you retrieve a sentence
   that made sense only in a paragraph you threw away.
 - **Whether the neighbours were any good.** Retrieval *always* returns something.
-  Ask a corpus about French geography when it only knows about ML tutorials and you
-  still get your top 4 — just at similarity 0.47 instead of 0.79. A system that
+  Ask a corpus of ML tutorials who won the 2022 World Cup and you still get your
+  top 4 — just at similarity 0.47 instead of 0.82. A system that
   doesn't look at that number will hand the model garbage with total confidence.
 
 Step 1 makes you stare at both of those before any LLM shows up, and step 3 draws
@@ -227,6 +227,60 @@ after each cell.
 > task. The newest is the step you actually invoked, which is what `open_report.py`
 > shows by default.
 
+### Using a different vector store
+
+Every step takes `--store_backend`, and both backends run with no server and no API
+key, so this works in Colab exactly as it does locally:
+
+```bash
+flyte run --local step0_index.py index                          # chroma (default)
+flyte run --local step0_index.py index --store_backend qdrant   # qdrant, embedded
+flyte run --local step1_retrieve.py search --store_backend qdrant --question "..."
+python step5_chat_app.py --local --store qdrant
+```
+
+The two produce **identical rankings and identical scores** — same encoder, same
+cosine similarity, so they should, and it's a useful check that the seam is honest:
+
+| | #1 | #2 | #3 | #4 |
+|---|---|---|---|---|
+| chroma | 0.785 | 0.784 | 0.767 | 0.763 |
+| qdrant | 0.785 | 0.784 | 0.767 | 0.763 |
+
+`store_backend` is part of the cache key, so switching builds a separate index rather
+than handing you the other one, and each store directory records which engine wrote it
+— point the wrong backend at one and you get a clear error rather than zero results.
+
+**Why embedded Qdrant and not Qdrant Cloud.** `QdrantClient(path=...)` runs the engine
+in-process against a local directory, which is what keeps the `flyte.io.Dir` artifact
+model intact — step 0 still returns a directory the later steps consume, caching still
+works, and no credential enters the workshop. A hosted Qdrant would break all three:
+a task writing to a remote database has no artifact to hand the next step, and Flyte's
+cache would start lying (a cache hit skips re-indexing even if the database was wiped).
+That's a different tutorial, not a flag.
+
+### What it takes to add a third store
+
+`store.py` defines a `VectorStore` with five operations — `count`, `add`, `nearest`,
+`all_records`, plus opening one. That is genuinely everything a RAG pipeline asks of a
+vector database, and seeing how small it is tends to demystify the category. To add
+pgvector or LanceDB, write one class; no step file changes.
+
+Two things bit us implementing Qdrant, and they're the two that will bite you:
+
+- **Score direction.** Chroma returns cosine *distance* (0 = identical); Qdrant returns
+  a *score* (1.0 = identical). Each backend normalizes to "similarity, higher is
+  better" in `nearest()`. Get it backwards and retrieval silently returns the **worst**
+  matches — no error, no exception, just quietly inverted results.
+- **ID types.** Chroma takes arbitrary strings like `tutorials/x.md::3`; Qdrant needs
+  ints or UUIDs. `QdrantStore` hashes the chunk id into a stable UUID and keeps the
+  original in the payload, so re-indexing overwrites instead of duplicating.
+
+One implementation detail worth knowing if you extend it: embedded Qdrant takes an
+exclusive lock on its directory, and a second `QdrantClient` on the same path raises.
+Local Flyte runs several tasks in one process and steps 3 and 5 legitimately open the
+same store twice, so `store.py` caches one client per directory.
+
 ### Using a different model
 
 Everything goes through `llm.py`, so the provider is an environment variable rather
@@ -260,7 +314,7 @@ flyte run --local step0_index.py index
 Three cached tasks — `fetch_docs` → `chunk_documents` → `embed_and_index` — and a
 Chroma persist directory comes out the far end as a `flyte.io.Dir`.
 
-The default corpus is **this repository's own tutorial write-ups**: 46 documents,
+The default corpus is **this repository's own tutorial write-ups**: around 50 documents,
 about 400 chunks, a few seconds to embed. It's a good corpus for a workshop because
 you can check every answer by opening the file it cites, and because the tutorials
 cover genuinely different domains, so step 3's projection has real clusters in it.
@@ -294,20 +348,24 @@ flyte run --local step1_retrieve.py search --question "How do I fine-tune a mode
 ```
 
 ```
-#1  0.785  tutorials/llm-fine-tuning-grpo-math/README.md
-#2  0.784  tutorials/llm-fine-tuning-grpo-countdown/README.md
-#3  0.767  tutorials/llm-fine-tuning-grpo-math/README.md
-#4  0.763  tutorials/llm-fine-tuning-lora-qlora/README.md
+#1  0.815  tutorials/rag-agent-memory/README.md
+#2  0.785  tutorials/llm-fine-tuning-grpo-math/README.md
+#3  0.784  tutorials/llm-fine-tuning-grpo-countdown/README.md
+#4  0.767  tutorials/llm-fine-tuning-grpo-math/README.md
 ```
+
+(This tutorial's own README is in the corpus, and it mentions GRPO in its examples —
+so it outranks the actual GRPO tutorials. A small, honest illustration of why
+retrieval quality is hard: the *most similar* text is not always the *most useful*.)
 
 Now ask it something the corpus has never heard of:
 
 ```bash
-flyte run --local step1_retrieve.py search --question "What is the capital of France?"
+flyte run --local step1_retrieve.py search --question "Who won the 2022 FIFA World Cup?"
 ```
 
 ```
-top similarity 0.471
+top similarity 0.469
 ```
 
 **You still get four chunks.** That is the single most important thing to understand
@@ -357,7 +415,7 @@ difference retrieval buys — not confidence, *verifiability*.
 ```bash
 flyte run --local step3_visualize.py visualize --question "How do I use GRPO?"
 flyte run --local step3_visualize.py visualize --question "brain tumor segmentation"
-flyte run --local step3_visualize.py visualize --question "What is the capital of France?"
+flyte run --local step3_visualize.py visualize --question "Who won the 2022 FIFA World Cup?"
 ```
 
 Every chunk is a 384-dimensional vector. UMAP squashes that to two so it fits on a
@@ -386,7 +444,7 @@ you'll often see three dots when four were retrieved. That's chunk size made vis
 and the legend always lists all of them.
 
 Run those three in a row and the star jumps between neighbourhoods. The terminal only
-prints `plotted 398 chunks, top similarity 0.721` — **the chart is in the report**:
+prints `plotted 543 chunks, top similarity 0.721` — **the chart is in the report**:
 
 ```bash
 python open_report.py
@@ -595,9 +653,21 @@ this any more, but here's the cause. Under `--local`, Flyte's cache stores the *
 to a task's output directory. If those directories go to the system temp, macOS
 purges them periodically and on reboot, so a step 0 you ran on Monday hands step 3 a
 path that no longer exists on Wednesday. Task outputs now go to `.rag_work/` in this
-directory instead (override with `RAG_WORK_DIR`), which survives a reboot. Delete
-`.rag_work/` and `/tmp/flyte/metadata` together if you ever want a genuinely clean
-slate.
+directory instead (override with `RAG_WORK_DIR`), which survives a reboot.
+
+**Forcing a genuinely clean run.** Two different directories are involved and only one
+of them is the cache:
+
+```bash
+rm -rf ~/.flyte/local-cache    # the actual cache — what makes tasks skip
+rm -rf .rag_work               # the task outputs those cache entries point at
+rm -rf /tmp/flyte/metadata     # run metadata and HTML reports only
+```
+
+`/tmp/flyte/metadata` is *not* the cache — deleting it alone changes nothing, and
+deleting `.rag_work` without clearing the cache is worse than useless: the cache still
+returns a hit pointing at a directory you just removed. Clear `~/.flyte/local-cache`
+first.
 
 **Everything is slow on the first run** — you're downloading bge-small (~130MB) and
 building the index. Every run after that hits the cache.
@@ -749,7 +819,7 @@ None of the above means anything without this, and it's the gap that matters mos
 ## Concrete next steps for this code
 
 - **Threshold on similarity.** Every question currently gets an answer. Refuse below
-  ~0.5 and the "capital of France" case fails honestly instead of being answered from
+  ~0.5 and the World Cup case fails honestly instead of being answered from
   four irrelevant chunks. Two lines, and it's the smallest real improvement here.
 - **Add a cross-encoder re-ranker.** Retrieve 20 in `store.retrieve()`, re-score with
   `sentence-transformers`' `CrossEncoder`, keep 4. Biggest quality-per-line win.

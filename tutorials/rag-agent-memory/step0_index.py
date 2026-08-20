@@ -39,7 +39,7 @@ env = index_env
 # cloned, so the image needs no `git` and the task behaves the same locally and
 # in a pod. `subdirs` are matched against the path *inside* the archive.
 GITHUB_SOURCES = {
-    # The default: this very repository's tutorial write-ups. ~900KB, 46 documents after the length filter,
+    # The default: this very repository's tutorial write-ups. ~900KB and roughly 50 documents after the length filter,
     # and you can open any answer's citation to check it. Also gives step 3's
     # projection real topical clusters — fine-tuning, biotech, agents, RL.
     "workshops": {
@@ -261,32 +261,38 @@ async def embed_and_index(
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     collection_name: str = "docs",
     batch_size: int = 64,
+    store_backend: str = "chroma",
 ) -> flyte.io.Dir:
-    """Turn every chunk into a vector and write the Chroma persist directory."""
+    """Turn every chunk into a vector and write the store's persist directory.
+
+    `store_backend` is part of the cache key, so switching between chroma and
+    qdrant builds a separate index rather than handing you the other one.
+    """
     chunks_path = Path(await chunks_dir.download()) / "chunks.jsonl"
     rows = [json.loads(line) for line in chunks_path.open()]
-    log.info(f"Embedding {len(rows)} chunks with {embedding_model}")
+    log.info(f"Embedding {len(rows)} chunks with {embedding_model} into {store_backend}")
 
     encoder = load_encoder(embedding_model)
-    persist_dir = new_work_dir("chroma_")
-    collection = open_collection(str(persist_dir), collection_name, embedding_model)
+    persist_dir = new_work_dir(f"{store_backend}_")
+    store = open_collection(str(persist_dir), collection_name, embedding_model, store_backend)
 
     for start in range(0, len(rows), batch_size):
         batch = rows[start:start + batch_size]
-        collection.add(
+        store.add(
             ids=[r["chunk_id"] for r in batch],
-            documents=[r["text"] for r in batch],
-            embeddings=embed(encoder, [r["text"] for r in batch]),
+            texts=[r["text"] for r in batch],
+            vectors=embed(encoder, [r["text"] for r in batch]),
             metadatas=[{"source": r["source"], "title": r["title"]} for r in batch],
         )
         log.info(f"  indexed {min(start + batch_size, len(rows))}/{len(rows)}")
 
-    log.info(f"Collection '{collection_name}' holds {collection.count()} chunks")
+    log.info(f"Collection '{collection_name}' holds {store.count()} chunks in {store_backend}")
     await flyte.report.replace.aio(
         f"<h2>Embedded and indexed</h2>"
+        f"<p><b>Backend:</b> {store_backend}</p>"
         f"<p><b>Embedding model:</b> {embedding_model}</p>"
         f"<p><b>Collection:</b> {collection_name}</p>"
-        f"<p><b>Chunks indexed:</b> {collection.count()}</p>"
+        f"<p><b>Chunks indexed:</b> {store.count()}</p>"
     )
     await flyte.report.flush.aio()
     return await flyte.io.Dir.from_local(str(persist_dir))
@@ -309,25 +315,27 @@ async def index(
     chunk_overlap: int = 150,
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     collection_name: str = "docs",
+    store_backend: str = "chroma",
 ) -> flyte.io.Dir:
-    """Fetch, chunk, embed. Returns the Chroma directory the other steps read."""
+    """Fetch, chunk, embed. Returns the store directory the other steps read."""
     docs = await fetch_docs(
         source, dataset_repo, dataset_config, dataset_split,
         text_column, local_path, max_docs,
     )
     chunks = await chunk_documents(docs, chunk_size, chunk_overlap)
-    chroma_dir = await embed_and_index(chunks, embedding_model, collection_name)
+    store_dir = await embed_and_index(
+        chunks, embedding_model, collection_name, store_backend=store_backend,
+    )
 
     await flyte.report.replace.aio(
         "<h2>Index ready</h2>"
         f"<p>Corpus <code>{source}</code> is embedded into collection "
-        f"<code>{collection_name}</code>.</p>"
-        "<p>Pass this run to the next step:<br>"
-        "<code>flyte run --local step1_retrieve.py search "
-        "--chroma_dir &lt;path-or-uri&gt; --question &quot;...&quot;</code></p>"
+        f"<code>{collection_name}</code> on <code>{store_backend}</code>.</p>"
+        "<p>Every later step rebuilds this by calling <code>index()</code>, and "
+        "the tasks are cached — so nothing here runs twice.</p>"
     )
     await flyte.report.flush.aio()
-    return chroma_dir
+    return store_dir
 
 
 if __name__ == "__main__":

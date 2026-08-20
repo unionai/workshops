@@ -5,6 +5,10 @@ flyte[tui]>=2.0
 chromadb>=0.5.0
 sentence-transformers>=3.0.0
 
+# The second backend: --store qdrant. Embedded mode writes to a local
+# directory, so it needs no server and no API key (see store.py).
+qdrant-client>=1.9
+
 # The LLM. See llm.py; Claude is the default.
 anthropic>=0.40.0
 python-dotenv
