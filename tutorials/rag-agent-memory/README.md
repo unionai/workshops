@@ -360,7 +360,24 @@ there are two upgrades worth having.
 **1. Nothing.** Clone, install, run. This is what Colab does.
 
 **2. Local persistence.** Still no cluster, but past runs get recorded to SQLite so you
-can browse them instead of scrolling back through terminal output:
+can browse them instead of scrolling back through terminal output.
+
+> **Known bug on flyte 2.6.3, and it will bite you in Colab.** Turning this on can make
+> every cached task fail with `RuntimeError: LocalDB not properly initialized (async)`.
+> In `flyte/_persistence/_db.py`, one `_initialized` flag guards two separate database
+> connections. Whichever path initializes first sets the flag, so if the sync path wins,
+> the async connection stays `None` and every later `get_async()` raises. Every cached
+> task here goes through that async path, so step 0 dies immediately. Reproduce it in
+> three lines:
+>
+> ```python
+> from flyte._persistence._db import LocalDB
+> LocalDB.initialize_sync()          # _initialized = True, but _conn is still None
+> await LocalDB.get_async()          # RuntimeError
+> ```
+>
+> The notebook therefore does **not** enable persistence. Use it on a laptop where you
+> can see the failure and turn it back off, not in a workshop.
 
 ```bash
 flyte create config --local-persistence
