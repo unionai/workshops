@@ -23,6 +23,7 @@ category.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -373,11 +374,30 @@ _CLIENTS: dict[tuple[str, str], object] = {}
 
 
 def _cached_client(key, build):
-    """One client per (backend, directory), for the whole process."""
+    """One client per (backend, directory), for the whole process.
+
+    Closed via `atexit` rather than left to garbage collection: embedded
+    Qdrant's `__del__` runs during interpreter teardown, by which point
+    `sys.meta_path` is gone and it cannot import what it needs to close
+    cleanly. The result is a harmless but alarming `Exception ignored in
+    QdrantClient.__del__` traceback after an otherwise successful script.
+    `atexit` runs early enough that close() just works.
+    """
     resolved = (key[0], str(Path(key[1]).resolve()))
     if resolved not in _CLIENTS:
-        _CLIENTS[resolved] = build()
+        client = build()
+        _CLIENTS[resolved] = client
+        closer = getattr(client, "close", None)
+        if callable(closer):
+            atexit.register(lambda: _quietly_close(closer))
     return _CLIENTS[resolved]
+
+
+def _quietly_close(closer) -> None:
+    try:
+        closer()
+    except Exception:  # nothing useful to do while the process is ending
+        pass
 
 
 def _check_meta(persist_dir: str, embedding_model: str, backend: str) -> None:
