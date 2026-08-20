@@ -45,12 +45,13 @@ async def search(
     collection_name: str = "docs",
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     store_backend: str = "chroma",
+    chunking: str = "structural",
 ) -> str:
     """Retrieve the top-k chunks for a question and report them."""
     store_dir = await index(
         source=source, max_docs=max_docs,
         collection_name=collection_name, embedding_model=embedding_model,
-        store_backend=store_backend,
+        store_backend=store_backend, chunking=chunking,
     )
 
     collection = open_collection(

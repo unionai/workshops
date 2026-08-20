@@ -49,6 +49,16 @@ def describe() -> str:
     return f"openai-compatible/{model_id()} @ {base}"
 
 
+def available() -> bool:
+    """True if a key is configured, without raising.
+
+    Lets a step offer an optional model call — answer if we can, carry on
+    quietly if not — instead of forcing every caller to have credentials.
+    """
+    var = "ANTHROPIC_API_KEY" if provider() == "anthropic" else "OPENAI_API_KEY"
+    return bool(os.environ.get(var))
+
+
 def _require_key() -> None:
     """Fail with an instruction rather than a stack trace 40 lines deep."""
     var = "ANTHROPIC_API_KEY" if provider() == "anthropic" else "OPENAI_API_KEY"

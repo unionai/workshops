@@ -28,7 +28,8 @@ import flyte.io
 import flyte.report
 
 from config import index_env
-from store import DEFAULT_EMBEDDING_MODEL, embed, load_encoder, new_work_dir, open_collection, split_text
+from chunking import split_document
+from store import DEFAULT_EMBEDDING_MODEL, embed, load_encoder, new_work_dir, open_collection
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -212,6 +213,7 @@ async def chunk_documents(
     docs_dir: flyte.io.Dir,
     chunk_size: int = 1200,
     chunk_overlap: int = 150,
+    chunking: str = "structural",
 ) -> flyte.io.Dir:
     """Split each document into overlapping chunks.
 
@@ -229,7 +231,9 @@ async def chunk_documents(
         for line in fin:
             doc = json.loads(line)
             n_docs += 1
-            for j, chunk in enumerate(split_text(doc["text"], chunk_size, chunk_overlap)):
+            for j, chunk in enumerate(
+                split_document(doc["text"], chunk_size, chunk_overlap, chunking)
+            ):
                 fout.write(json.dumps({
                     "chunk_id": f"{doc['id']}::{j}",
                     "text": chunk,
@@ -239,11 +243,12 @@ async def chunk_documents(
                 n_chunks += 1
 
     per_doc = n_chunks / max(n_docs, 1)
-    log.info(f"Chunked {n_docs} docs into {n_chunks} chunks ({per_doc:.1f} per doc)")
+    log.info(f"Chunked {n_docs} docs into {n_chunks} chunks ({per_doc:.1f} per doc, {chunking})")
     await flyte.report.replace.aio(
         f"<h2>Chunked documents</h2>"
         f"<p><b>Documents:</b> {n_docs}</p>"
         f"<p><b>Chunks:</b> {n_chunks} ({per_doc:.1f} per document)</p>"
+        f"<p><b>Strategy:</b> {chunking}</p>"
         f"<p><b>chunk_size:</b> {chunk_size} characters &middot; "
         f"<b>overlap:</b> {chunk_overlap}</p>"
     )
@@ -316,13 +321,14 @@ async def index(
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     collection_name: str = "docs",
     store_backend: str = "chroma",
+    chunking: str = "structural",
 ) -> flyte.io.Dir:
     """Fetch, chunk, embed. Returns the store directory the other steps read."""
     docs = await fetch_docs(
         source, dataset_repo, dataset_config, dataset_split,
         text_column, local_path, max_docs,
     )
-    chunks = await chunk_documents(docs, chunk_size, chunk_overlap)
+    chunks = await chunk_documents(docs, chunk_size, chunk_overlap, chunking)
     store_dir = await embed_and_index(
         chunks, embedding_model, collection_name, store_backend=store_backend,
     )
@@ -330,7 +336,8 @@ async def index(
     await flyte.report.replace.aio(
         "<h2>Index ready</h2>"
         f"<p>Corpus <code>{source}</code> is embedded into collection "
-        f"<code>{collection_name}</code> on <code>{store_backend}</code>.</p>"
+        f"<code>{collection_name}</code> on <code>{store_backend}</code>, "
+        f"chunked <code>{chunking}</code>.</p>"
         "<p>Every later step rebuilds this by calling <code>index()</code>, and "
         "the tasks are cached — so nothing here runs twice.</p>"
     )

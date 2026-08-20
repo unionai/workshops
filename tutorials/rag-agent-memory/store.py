@@ -71,58 +71,13 @@ def new_work_dir(prefix: str) -> Path:
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 
-# ── Chunking ──────────────────────────────────────────────────────────────────
-
-def split_text(text: str, chunk_size: int = 1200, overlap: int = 150) -> list[str]:
-    """Recursive character splitter: paragraphs → lines → sentences → words → chars.
-
-    Character-based, not token-based, so we don't drag in a tokenizer just to
-    split. bge-small takes 512 tokens (~2000 English characters), so the default
-    1200 leaves headroom and nothing gets silently truncated at encode time.
-    """
-    text = text.strip()
-    if not text:
-        return []
-    if len(text) <= chunk_size:
-        return [text]
-
-    for sep in ("\n\n", "\n", ". ", " ", ""):
-        if sep == "":
-            step = max(1, chunk_size - overlap)
-            return [text[i:i + chunk_size] for i in range(0, len(text), step)]
-        parts = text.split(sep)
-        if len(parts) == 1:
-            continue
-
-        out: list[str] = []
-        buf = ""
-        for part in parts:
-            piece = part + sep
-            if len(piece) > chunk_size:
-                if buf.strip():
-                    out.append(buf.strip())
-                    buf = ""
-                out.extend(split_text(part, chunk_size, overlap))
-                continue
-            if len(buf) + len(piece) <= chunk_size:
-                buf += piece
-            else:
-                if buf.strip():
-                    out.append(buf.strip())
-                buf = (buf[-overlap:] if overlap and buf else "") + piece
-        if buf.strip():
-            out.append(buf.strip())
-        return [c for c in out if c.strip()]
-    return [text]
-
-
 # ── Embeddings ────────────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=2)
 def load_encoder(model_name: str = DEFAULT_EMBEDDING_MODEL):
     """Load the sentence-transformer once per process, from cache when possible.
 
-    bge-small is ~130MB and runs fine on a CPU, which is why steps 0, 1 and 3
+    bge-small is ~130MB and runs fine on a CPU, which is why steps 0 and 1
     need no API key and no GPU — they work in a free Colab runtime.
 
     We try `local_files_only=True` first. By default sentence-transformers
@@ -426,6 +381,22 @@ def _check_meta(persist_dir: str, embedding_model: str, backend: str) -> None:
     else:
         Path(persist_dir).mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"embedding_model": embedding_model, "backend": backend}))
+
+
+def detect_backend(persist_dir: str, default: str = "chroma") -> str:
+    """Read which engine wrote a store directory, from its own metadata.
+
+    Lets a consumer adapt to whatever index it is handed rather than being told
+    out of band — which is what step 5 does with a mounted `RunOutput`, where
+    the app has no idea whether step 0 ran with chroma or qdrant.
+    """
+    meta = Path(persist_dir) / _META_FILE
+    if meta.exists():
+        try:
+            return json.loads(meta.read_text()).get("backend", default)
+        except (ValueError, OSError):
+            pass
+    return default
 
 
 def open_collection(

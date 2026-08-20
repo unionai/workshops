@@ -39,7 +39,7 @@ image = flyte.Image.from_debian_base(name="rag-agent-memory").with_pip_packages(
     "openai>=1.50.0",  # llm.py's OpenAI-compatible path
 )
 
-# Steps 0, 1, 3 — build the index, search it, draw it. No secret.
+# Steps 0 and 1 — build the index and search it. No model, no secret.
 index_env = flyte.TaskEnvironment(
     name="rag-index",
     image=image,
@@ -56,4 +56,11 @@ llm_env = flyte.TaskEnvironment(
     image=image,
     resources=flyte.Resources(cpu=2, memory="4Gi"),
     secrets=[flyte.Secret(key="ANTHROPIC_API_KEY", as_env_var="ANTHROPIC_API_KEY")],
+    # Step 2 lives here but calls `index()`, which lives in `index_env`. Locally
+    # that just works — one process, both environments imported. On a cluster it
+    # does not: only environments reachable from the one you launched get
+    # deployed, so the call fails at runtime with
+    #     Environment 'rag-index' not found in image cache.
+    # Declaring the dependency makes `rag-index` deploy alongside this one.
+    depends_on=[index_env],
 )

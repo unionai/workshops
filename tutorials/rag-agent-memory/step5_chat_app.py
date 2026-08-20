@@ -43,8 +43,13 @@ import os
 import flyte
 import flyte.app
 
+import llm
+import render
 from config import image
-from store import DEFAULT_EMBEDDING_MODEL
+from step2_rag_answer import GROUNDED_SYSTEM, _context_block
+from step3_visualize import _figure
+from step4_memory import CHAT_SYSTEM, EXTRACTION_SYSTEM, FACTS_SCHEMA, _remember
+from store import DEFAULT_EMBEDDING_MODEL, detect_backend, embed, load_encoder, open_collection, retrieve
 
 COLLECTION_NAME = "docs"
 MEMORY_COLLECTION = "agent_memory"
@@ -81,6 +86,13 @@ env = flyte.app.AppEnvironment(
         ),
         flyte.app.Parameter(name="collection_name", value=COLLECTION_NAME),
         flyte.app.Parameter(name="embedding_model", value=DEFAULT_EMBEDDING_MODEL),
+        # Must match the backend the mounted index was built with, or the store's
+        # backend guard rejects it on startup. Set STORE_BACKEND before deploying.
+        flyte.app.Parameter(
+            name="store_backend",
+            value=os.environ.get("STORE_BACKEND", "auto"),
+            env_var="STORE_BACKEND",
+        ),
     ],
     scaling=flyte.app.Scaling(replicas=(0, 1), scaledown_after=300),
 )
@@ -96,12 +108,14 @@ def build_state(chroma_dir: str, collection_name: str, embedding_model: str,
     import numpy as np
     import umap
 
-    from store import load_encoder, open_collection
-
     print(f"[startup] loading encoder {embedding_model}", flush=True)
     encoder = load_encoder(embedding_model)
 
-    print(f"[startup] opening index at {chroma_dir}", flush=True)
+    # "auto" means: ask the index which engine built it. The mounted RunOutput
+    # could have come from a chroma or a qdrant step 0 and the app cannot know.
+    if store_backend == "auto":
+        store_backend = detect_backend(chroma_dir)
+    print(f"[startup] opening index at {chroma_dir} (backend: {store_backend})", flush=True)
     docs = open_collection(chroma_dir, collection_name, embedding_model, store_backend)
     records = docs.all_records(with_vectors=True)
     vectors = np.asarray([r.vector for r in records], dtype="float32")
@@ -135,22 +149,33 @@ def build_state(chroma_dir: str, collection_name: str, embedding_model: str,
 
 
 @env.on_startup
-async def app_startup(chroma_dir: str, collection_name: str, embedding_model: str) -> None:
-    state.update(build_state(chroma_dir, collection_name, embedding_model))
+async def app_startup(
+    chroma_dir, collection_name: str, embedding_model: str, store_backend: str = "chroma",
+) -> None:
+    """Materialize the mounted index, then build the app's state.
+
+    `chroma_dir` is deliberately untyped: locally it arrives as a `str` path, but
+    on a cluster the `RunOutput` parameter materializes as a `flyte.io.Dir`
+    object. Handing that straight to `Path()` fails with
+    `TypeError: expected str, bytes or os.PathLike object, not Dir`, so both
+    shapes get normalized to a local path here.
+    """
+    if not isinstance(chroma_dir, (str, os.PathLike)):
+        chroma_dir = await chroma_dir.download()
+    state.update(build_state(str(chroma_dir), collection_name, embedding_model, store_backend))
 
 
 # ── The UI ────────────────────────────────────────────────────────────────────
 
 def build_ui():
+    # Only third-party imports are deferred here. Everything from this tutorial
+    # is imported at module scope on purpose: Flyte's code bundler traces
+    # *module-level* imports to decide which local files ship to the pod, so an
+    # import hidden inside a function is missing at runtime —
+    #     ModuleNotFoundError: No module named 'llm'
+    # which only ever shows up on a cluster, never with --local.
     import gradio as gr
     import numpy as np
-
-    import llm
-    import render
-    from step3_visualize import _figure
-    from step4_memory import CHAT_SYSTEM, EXTRACTION_SYSTEM, FACTS_SCHEMA, _remember
-    from step2_rag_answer import GROUNDED_SYSTEM, _context_block
-    from store import embed, retrieve
 
     def empty_figure():
         return _figure(state["coords"], state["sources"], [], [], (np.nan, np.nan))
@@ -273,7 +298,8 @@ def build_ui():
 
 
 @env.server
-def app_server(chroma_dir: str, collection_name: str, embedding_model: str):
+def app_server(chroma_dir, collection_name: str, embedding_model: str,
+               store_backend: str = "chroma"):
     build_ui().launch(server_name="0.0.0.0", server_port=7860, share=False)
 
 

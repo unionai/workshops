@@ -24,7 +24,9 @@ The terminal prints only a one-line summary — the chart lives in the HTML repo
 From a shell, `python open_report.py` opens the newest one; in the notebook,
 `show_latest()` renders it inline.
 
-No API key needed. This step never calls a model.
+The projection itself never calls a model, so the chart works with no API key.
+If one *is* configured, the report also answers the question from the very chunks
+lit up on the chart. `--no-with_answer` skips that.
 """
 
 from __future__ import annotations
@@ -37,9 +39,11 @@ import flyte
 import flyte.io
 import flyte.report
 
+import llm
 import render
-from config import index_env
+from config import index_env, llm_env
 from step0_index import index
+from step2_rag_answer import GROUNDED_SYSTEM, _context_block
 from store import DEFAULT_EMBEDDING_MODEL, embed, load_encoder, new_work_dir, open_collection, retrieve
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
@@ -194,7 +198,10 @@ def _figure(coords, sources, hit_indices, hits, query_xy, question: str = ""):
     return fig
 
 
-@env.task(report=True)
+# On llm_env rather than index_env: this task may call a model, and llm_env is
+# where the secret lives. It already declares depends_on=[index_env], which is
+# what lets it call `index` and `fit_projection` on a cluster.
+@llm_env.task(report=True)
 async def visualize(
     question: str = "How do I fine-tune a model with GRPO?",
     top_k: int = 4,
@@ -203,15 +210,22 @@ async def visualize(
     collection_name: str = "docs",
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     store_backend: str = "chroma",
+    chunking: str = "structural",
+    with_answer: bool = True,
 ) -> str:
-    """Project the corpus, place the question in it, and report the picture."""
+    """Project the corpus, place the question in it, answer it, and report all three.
+
+    The answer is optional and skipped when no API key is configured, so the
+    chart still works with no credentials at all — `--no-with_answer` forces
+    that path even when a key is present.
+    """
     import joblib
     import numpy as np
 
     store_dir = await index(
         source=source, max_docs=max_docs,
         collection_name=collection_name, embedding_model=embedding_model,
-        store_backend=store_backend,
+        store_backend=store_backend, chunking=chunking,
     )
     projection_dir = await fit_projection(
         store_dir, collection_name=collection_name, embedding_model=embedding_model,
@@ -242,6 +256,33 @@ async def visualize(
     query_vector = np.asarray(embed(encoder, [question]), dtype="float32")
     query_xy = reducer.transform(query_vector)[0]
 
+    # Optional: answer the question from the very chunks lit up on the chart.
+    answer_html = ""
+    if with_answer and hits:
+        if llm.available():
+            log.info(f"Asking {llm.describe()}…")
+            reply = llm.answer(
+                GROUNDED_SYSTEM,
+                f"CONTEXT:\n{_context_block(hits)}\n\nQUESTION: {question}",
+            )
+            log.info(f"\nAnswer: {reply}")
+            answer_html = (
+                "<h2>The answer those chunks produced</h2>"
+                + render.note(
+                    "Built from the numbered chunks below — and nothing else. Each "
+                    "[#N] points at a dot on the chart above, so you can trace a "
+                    "claim in the answer to a neighbourhood in the vector space."
+                )
+                + f"<div class='answer'>{reply}</div>"
+            )
+        else:
+            log.info("No API key configured — drawing the chart without an answer.")
+            answer_html = render.note(
+                "<b>No answer generated.</b> No API key is configured, so this run "
+                "drew the projection only. Set ANTHROPIC_API_KEY and re-run to see "
+                "the answer these chunks produce."
+            )
+
     fig = _figure(coords, meta["sources"], hit_indices, hits, query_xy, question)
     chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
 
@@ -255,6 +296,8 @@ async def visualize(
             top_similarity=f"{top:.3f}",
             projection="UMAP 384d → 2d",
         )
+        + answer_html
+        + "<h2>Where it looked</h2>"
         + chart_html
         + render.note(
             "Gray dots are every chunk in the index. The <b>numbered blue dots</b> "
@@ -262,6 +305,14 @@ async def visualize(
             "match</b>, and the number on each dot is its rank, matching the cards "
             "below. The orange star is the question itself, pushed through the same "
             "fitted projection.<br><br>"
+            "<b>This is 2D. The space is 384D.</b> Retrieval happened in the full "
+            "384 dimensions — these coordinates were computed afterwards, purely so "
+            "there would be something to look at, and had no influence on which "
+            "chunks came back. UMAP preserves local neighbourhoods and discards most "
+            "of the rest (on this corpus, distance on the chart tracks true "
+            "dissimilarity at a Spearman of only ~0.4), so two dots touching here can "
+            "be genuinely unrelated. Trust the similarity numbers; use the picture "
+            "for orientation.<br><br>"
             "Two dots sitting on top of each other is not a glitch: consecutive "
             "chunks from one document have nearly identical embeddings, so they "
             "land in nearly the same place. That is chunk size made visible.<br><br>"
