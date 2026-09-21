@@ -133,7 +133,7 @@ VLLM_SECRET = PROVIDER_SECRETS["vllm"]
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "anthropic:claude-opus-5")
 MODEL_SECRET = PROVIDER_SECRETS[AGENT_MODEL.split(":", 1)[0]]
 
-# Providers the bake-off in step 4 may use. Add vllm once serve_model.py is deployed.
+# Providers the bake-off in step 6 may use. Add vllm once serve_model.py is deployed.
 FACTORY_PROVIDERS = [p.strip() for p in os.environ.get("FACTORY_PROVIDERS", "anthropic").split(",") if p.strip()]
 FACTORY_SECRETS = [PROVIDER_SECRETS[p] for p in FACTORY_PROVIDERS]
 

@@ -14,18 +14,25 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
+
+# The tutorial folder. The code bundle a run uploads is rooted here, so the pod imports
+# `llm`, `tools` and friends by their bare names. Left to the SDK, the root is guessed from
+# the environment, and in Colab that guess is wrong: the modules land in the bundle under a
+# nested path and the first import fails with "No module named 'llm'".
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def run(task, *, local: bool = False, **kwargs):
     import flyte
 
     if local:
-        flyte.init()
+        flyte.init(root_dir=ROOT)
         return _first(flyte.with_runcontext(mode="local").run(task, **kwargs).outputs())
 
     from flyte.remote import ActionDetails, Run
 
-    flyte.init_from_config()
+    flyte.init_from_config(_config_path(), root_dir=ROOT)
     r = flyte.run(task, **kwargs)
     print(f"run {r.name}: {r.url}")
     for _ in range(60):
@@ -43,6 +50,18 @@ def run(task, *, local: bool = False, **kwargs):
         print(str(ActionDetails.get(run_name=r.name, name="a0").pb2.error_info)[:1500])
         return None
     return _first(r.outputs())
+
+
+def _config_path():
+    """The cluster config, looked up from the tutorial folder rather than the current directory.
+
+    `flyte create config` writes `config.yaml` where it is run; the notebook runs it here. With
+    no file here the SDK's own search (FLYTECTL_CONFIG, ~/.flyte, ...) applies.
+    """
+    for candidate in (ROOT / "config.yaml", ROOT / ".flyte" / "config.yaml"):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _first(outputs):

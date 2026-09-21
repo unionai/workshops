@@ -200,6 +200,11 @@ flyte create config --endpoint <your-endpoint> --project flytesnacks --domain de
 flyte create secret ANTHROPIC_API_KEY --value sk-ant-...
 ```
 
+The first call opens your browser to sign in. Anywhere without a browser to hand off to
+(Colab, a remote shell) add `--auth-type headless`: the first call then prints a login URL
+and a code to paste back. Without it the browser flow fails silently and the first upload
+dies with an empty `ConnectError`; the notebook already passes the flag.
+
 On a shared cluster, set `FACTORY_TAG=<your handle>` in `.env`. It namespaces what has
 to be yours: the serving app (`ticket-router-<tag>`), the production artifacts, and the
 environments that carry triggers. The GPU eval and training tasks stay shared, so the eval
@@ -453,20 +458,43 @@ your own graph on these nodes, do the same.
 
 ```bash
 flyte run --local step6_bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5"]'
-flyte run step6_bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5", "openai:gpt-4.1"]' --trials 2
+flyte run step6_bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5", "vllm:qwen3-8b"]' --trials 2
 ```
 
 **What you'll see.** One child action per (model, trial), in parallel. The report scores
 each: met the constraints, stayed in budget, runs spent, tokens, wall clock. In Grafana
 each agent model is its own agent version, so the conversations sit side by side and you
-can read how each one argued for the fine-tuned 0.5B over the 1.5B.
+can read how each one argued for the encoder over the 1.5B.
 
 **What just happened.** Same request, same tools, different `model` string. Because the
 evals and fine-tunes are cached, after the first agent the rest mostly hit cache, so the
 bake-off measures the agents rather than the GPUs. Promotion publishes artifacts but does
-not deploy here (`FACTORY_DEPLOY=0`). With a warm matrix, GPT-4.1 met the request in 7
-runs, 23k tokens and 49 seconds; GPT-4.1-mini also met it, but took 11 runs, 29k tokens and
-100 seconds to get there. Same tools, same cache, different amount of flailing.
+not deploy here (`FACTORY_DEPLOY=0`). With a warm matrix, Claude Opus 5 met the
+request in 10 runs, 63k tokens and 99 seconds; Claude Haiku 4.5 met it in 10 runs, 53k
+tokens and 56 seconds; GPT-4.1 in 7 runs, 23k tokens and 49 seconds; GPT-4.1-mini in 11
+runs, 29k tokens and 100 seconds. Same tools, same cache, different amount of flailing.
+
+**The engineer on an open model.** `vllm:qwen3-8b` is the same agent driven by Qwen3-8B,
+served by vLLM on a Union app with one L40s. Deploy it once (it prefetches the weights
+into object storage, then streams them to the GPU on every cold start, and scales to zero
+when idle):
+
+```bash
+flyte create secret VLLM_API_KEY --value <any string>     # vLLM's own --api-key
+python serve_model.py                                    # prints the endpoint
+```
+
+Then put `VLLM_BASE_URL=https://<app>/v1` in `.env` and add `vllm` to `FACTORY_PROVIDERS`.
+On a shared cluster, attendees point at the instructor's app and its key by name
+(`VLLM_API_KEY_SECRET_NAME=<prefix>_VLLM_API_KEY`); nobody needs their own L40s. The app
+scales to zero after fifteen idle minutes and takes two or three minutes to stream the
+weights back, so hit `/v1/models` once before a room does. If the
+open model clears the bar, the ML engineer is off the API too, and it is a reasonable
+place to start the whole workshop from. On our
+cluster Qwen3-8B met the request too: it fine-tuned three candidates, promoted the 1.5B at
+100% and 84 ms, and passed the deployment test, in 12 runs, 33k tokens and 173 seconds. It
+spent the whole budget and picked a model ten times the size of the encoder that also
+passed, which is exactly the kind of judgment the report lets you compare.
 
 Models are strings from `llm.py`: `anthropic:<model>`, `openai:<model>`, or
 `vllm:<model>@<url>/v1` for anything OpenAI-compatible you serve yourself.
@@ -674,6 +702,11 @@ build 6 minutes once, one LoRA epoch on the 0.5B 42 seconds.
   the file, not inside the startup hook.
 - `flyteplugins-agento11y` is installed from the flyte-sdk repository; it is not on PyPI
   yet. The image adds `git` for that reason.
+- The code bundle a run uploads is rooted wherever `flyte.init` guesses the project root
+  is: the current directory, or an editable install if it thinks it is inside one. In Colab
+  that guess put the modules under a nested path and the pod failed with `No module named
+  'llm'`. `utils/workshop.py` passes `root_dir` explicitly; do the same in any script that
+  calls `flyte.init_from_config()` itself.
 - In a room of attendees on one project, every promotion republishes `ticket-router` and
   redeploys the same app: last promotion wins. Fine for a demo; key the app name on the
   run name in `router_app.py` if everyone should get their own.
