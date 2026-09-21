@@ -257,9 +257,17 @@ and cost per 1,000 tickets, plus where the tickets landed and every draft. With 
 configured, the batch is a conversation in Agent Observability with one generation per
 ticket per step.
 
-On GPT-4.1 the router is accurate and slow and priced per ticket: 93% routing
-accuracy, about 600 ms per route, and about $0.64 per thousand tickets for
-routing and replies together. That is the "before."
+The router is accurate, slow, and priced per ticket. We ran the same thirty tickets
+through three API models; the cost column is routing and replies together, at list price:
+
+| Support agent model | Routing accuracy | Route p50 | Per 1,000 tickets |
+|---|---|---|---|
+| Claude Opus 5 (the default) | 96.7% | 2.28 s | $10.28 |
+| Claude Haiku 4.5 | 96.7% | 596 ms | $1.18 |
+| GPT-4.1 | 93.3% | 594 ms | $0.64 |
+
+Opus thinks before it routes, which is why it is four times slower than the others at
+the same accuracy. That is the "before." Pick the model with `--model`, or `AGENT_MODEL`.
 
 **What just happened.** `support_agent.py` is a two-node LangGraph graph, `route → draft`.
 Both nodes are durable steps, so a batch that dies halfway replays what it already did.
@@ -393,11 +401,17 @@ flyte run support_agent.py handle_tickets --router oss
 ```
 
 **What you'll see.** The same thirty tickets, the same draft replies, but routing is now
-an HTTP call to the app the engineer deployed. On our cluster: routing accuracy 96.7%
-(GPT-4.1 had 93.3% on the same batch), route p50 200 ms including the HTTP round trip to
-a CPU pod (GPT-4.1: 594 ms), and $0.34 per thousand tickets, which is now only the reply
-drafts (before: $0.64). Put this report next to step 0's. In Grafana it is a second
-conversation from the same agent, with the routing generations gone.
+an HTTP call to the app the engineer deployed. The route p50 includes the HTTP round trip
+to a CPU pod; what is left of the cost is the reply drafts:
+
+| Support agent model | Routing accuracy | Route p50 | Per 1,000 tickets |
+|---|---|---|---|
+| Claude Opus 5 | 96.7% → 100% | 2.28 s → 128 ms | $10.28 → $6.47 |
+| Claude Haiku 4.5 | 96.7% → 100% | 596 ms → 170 ms | $1.18 → $0.30 |
+| GPT-4.1 | 93.3% → 96.7% | 594 ms → 200 ms | $0.64 → $0.34 |
+
+Put this report next to step 0's. In Grafana it is a second conversation from the same
+agent, with the routing generations gone.
 
 **What just happened.** Nothing in the support agent changed except a flag. The router
 app is a FastAPI service that mounts the promoted artifact; `--router oss` posts the
@@ -702,11 +716,13 @@ build 6 minutes once, one LoRA epoch on the 0.5B 42 seconds.
   the file, not inside the startup hook.
 - `flyteplugins-agento11y` is installed from the flyte-sdk repository; it is not on PyPI
   yet. The image adds `git` for that reason.
-- The code bundle a run uploads is rooted wherever `flyte.init` guesses the project root
-  is: the current directory, or an editable install if it thinks it is inside one. In Colab
-  that guess put the modules under a nested path and the pod failed with `No module named
-  'llm'`. `utils/workshop.py` passes `root_dir` explicitly; do the same in any script that
-  calls `flyte.init_from_config()` itself.
+- From a notebook, `flyte.run` detects IPython and switches to "interactive mode": it
+  pickles the task instead of bundling the source files. The pickle carries the task's own
+  module by value but only references the modules it imports, so the pod dies on the first
+  one with `No module named 'llm'`. `utils/workshop.py` runs with
+  `flyte.with_runcontext(interactive_mode=False)` so the source is shipped, and pins
+  `root_dir` to the tutorial folder so the bundle does not depend on the kernel's working
+  directory. Do the same in any notebook code that calls `flyte.run` itself.
 - In a room of attendees on one project, every promotion republishes `ticket-router` and
   redeploys the same app: last promotion wins. Fine for a demo; key the app name on the
   run name in `router_app.py` if everyone should get their own.
