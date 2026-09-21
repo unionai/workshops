@@ -248,7 +248,7 @@ def build_graph(model, tools=TOOLS, max_tool_rounds: int = MAX_TOOL_ROUNDS):
             for m in tool_msgs
         ]
         thoughts = [
-            str(m.content) for m in state["messages"] if isinstance(m, AIMessage) and m.content and not m.tool_calls
+            m.text for m in state["messages"] if isinstance(m, AIMessage) and m.text and not m.tool_calls
         ]
         turns = {
             "model_turns": sum(1 for m in state["messages"] if isinstance(m, AIMessage)) + 1,

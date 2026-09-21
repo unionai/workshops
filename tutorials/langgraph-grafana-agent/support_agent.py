@@ -126,13 +126,15 @@ def build_support_graph(model, router: str, endpoint: str | None):
         ]
 
         async def _call() -> str:
-            return (await model.ainvoke(msgs)).content
+            # `.text` joins the text blocks. Claude with thinking on returns a list of blocks
+            # (thinking, then text) as `.content`, and a durable step records a string.
+            return (await model.ainvoke(msgs)).text
 
         key = fingerprint(
             {"node": "draft", "model": short_name(None), "ticket": state["ticket_id"], "queue": state["queue"]}
         )
         reply = await durable_step(key, _call, name="draft:model")
-        return {"reply": reply if isinstance(reply, str) else str(reply)}
+        return {"reply": reply}
 
     builder = StateGraph(TicketState)
     builder.add_node("route", route)
