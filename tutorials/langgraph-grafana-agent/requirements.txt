@@ -1,0 +1,14 @@
+# Keep in sync with the image in config.py.
+flyte[tui]>=2.8
+flyteplugins-agents-langgraph>=2.8.1
+flyteplugins-otel>=2.8.1
+# Grafana Agent Observability. Not on PyPI yet; installed from the flyte-sdk repo.
+flyteplugins-agento11y[langgraph] @ git+https://github.com/flyteorg/flyte-sdk.git#subdirectory=plugins/agento11y
+langgraph>=1.0
+langchain-anthropic>=1.0
+langchain-openai>=1.0
+python-dotenv
+# The notebook's source viewer.
+pygments
+# serve_model.py only (deploys the vLLM app; the agent itself does not need it).
+flyteplugins-vllm>=2.8.1
