@@ -33,7 +33,10 @@ def run(task, *, local: bool = False, **kwargs):
     from flyte.remote import ActionDetails, Run
 
     flyte.init_from_config(_config_path(), root_dir=ROOT)
-    r = flyte.run(task, **kwargs)
+    # In a notebook the SDK would pickle the task instead of bundling the source files. The
+    # pickle carries the task's module by value but only *references* the modules it imports,
+    # so the pod dies on the first one: "No module named 'llm'". Ship the source instead.
+    r = flyte.with_runcontext(interactive_mode=False).run(task, **kwargs)
     print(f"run {r.name}: {r.url}")
     for _ in range(60):
         try:
