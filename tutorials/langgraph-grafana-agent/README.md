@@ -134,6 +134,21 @@ the agent has to read a result and decide how much training to ask for. And the 
 that is not a chat model at all, the encoder, turns out to be the best router by every
 measure once it is trained. The agent has to get there from numbers it produces itself.
 
+For scale, the models the support agent could route with today, zero-shot on the same
+120 tickets (p50 here is a network call from the cluster, not a T4):
+
+| router | zero-shot | p50 | where it runs |
+|---|---|---|---|
+| Claude Opus 5 | 98.3% | 1.7 s | API |
+| GPT-4.1 | 97.5% | 634 ms | API |
+| Claude Haiku 4.5 | 95.8% | 606 ms | API |
+| Qwen3-8B (vLLM) | 94.2% | 386 ms | one L40s, ours |
+| modernbert-base, fine-tuned | 99.2% | 14 ms on a T4, 232 ms on the app's CPU pod | 149M params, ours |
+
+The big API models clear the bar without training and the trained encoder beats all of
+them at a hundredth of the latency. Qwen3-8B, an open model with 50× the encoder's
+parameters, does not clear it zero-shot.
+
 ### What a run looks like
 
 This is the shape of a cold run, with the tool calls the agent actually made:
@@ -270,7 +285,9 @@ Opus thinks before it routes, which is why it is four times slower than the othe
 the same accuracy. That is the "before." Pick the model with `--model`, or `AGENT_MODEL`.
 
 **What just happened.** `support_agent.py` is a two-node LangGraph graph, `route → draft`.
-Both nodes are durable steps, so a batch that dies halfway replays what it already did.
+Each model call is a `flyte.trace` step whose arguments are the ticket itself, so the run
+graph shows every ticket's text going in and the queue or reply coming out, and a batch
+that dies halfway replays what it already did.
 `--router llm` classifies with the API model; `--router oss` calls the `ticket-router`
 app instead, which does not exist yet. Building it is the request.
 
@@ -449,7 +466,9 @@ flyte run step5_crash_resume.py resilient_engineer
 
 **What you'll see.** The run fails once and succeeds on the retry. In the pod logs,
 attempt 0 prints three `live model call` lines and then the simulated crash; attempt 1
-prints four, for a seven-turn run. The missing three are the replay. In the Flyte UI,
+prints four, for a seven-turn run. The missing three are the replay. In the run graph
+exactly one `think:model` is red: the crash itself, with the message `simulated worker
+crash after 3 model calls`; everything after it belongs to attempt 1. In the Flyte UI,
 attempt 1's `run_eval` and `fine_tune` children are cache hits: no T4 started twice, no
 model was trained twice. In Tempo, both attempts are one trace, and the replayed steps
 are marked `flyte.replayed`. A stock OpenTelemetry setup would show two unrelated traces
@@ -677,7 +696,7 @@ T4 latency bar is not applied to them.
 |---|---|---|
 | the request | `--min_accuracy --max_latency_ms --candidates_to_screen --max_fine_tunes --budget` | 0.95, 150, 5, 3, 12 |
 | the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-opus-5` |
-| bake-off providers | `FACTORY_PROVIDERS` in `.env` (which secrets step 6 asks for) | `anthropic` |
+| providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 6, or any step) | the agent's provider |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 6 sets `0`) |
 | human approval before deploy | `FACTORY_APPROVAL` | `0` |
 | your namespace on a shared cluster | `FACTORY_TAG` | none (app and artifacts are then `ticket-router`) |

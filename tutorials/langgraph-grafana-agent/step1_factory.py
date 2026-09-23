@@ -20,16 +20,28 @@ No API key. No Grafana.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import re
 
 import flyte
 import flyte.report
+from flyteplugins.agents.core import coerce_tool_args
 
 from config import tools_env
-from graph import Request
+from graph import Request, action_label
 from report import dataset_html, evals_html
 from tickets import load_split
 from tools import fine_tune, list_candidates, run_eval, run_eval_cpu
+
+
+async def _call(tool, **args) -> str:
+    """Run a tool's Flyte task with the action named after what it does: `run_eval · qwen2.5-0.5b`.
+
+    The same naming the engineer's graph uses, so the run graph reads the same in both steps.
+    """
+    task = tool.flyte_task
+    named = dataclasses.replace(task, short_name=action_label(tool.name, args))
+    return str(await named.aio(**coerce_tool_args(task, args)))
 
 
 def _parse(summary: str, model: str, n: int) -> dict:
@@ -69,21 +81,21 @@ async def model_factory(
     tab.log(dataset_html(train, test))
     await flyte.report.flush.aio()
 
-    transcript = [f"$ list_candidates()\n{await list_candidates.ainvoke({})}\n"]
+    transcript = [f"$ list_candidates()\n{await _call(list_candidates)}\n"]
     results = []
     # The evals are independent, so launch them together: on the cluster, one T4 each.
     evaluator = run_eval_cpu if device == "cpu" else run_eval
     with flyte.group("baseline-evals"):
-        outs = await asyncio.gather(*(evaluator.ainvoke({"model": m, "n": n, "dataset": dataset}) for m in models))
+        outs = await asyncio.gather(*(_call(evaluator, model=m, n=n, dataset=dataset) for m in models))
     for m, out in zip(models, outs, strict=True):
         transcript.append(f"$ run_eval(model={m!r}, n={n})\n{out}\n")
         results.append(_parse(out, m, n))
     if fine_tune_too:
         with flyte.group("fine-tune-and-recheck"):
-            out = await fine_tune.ainvoke({"model": tune_model, "epochs": epochs, "dataset": dataset})
+            out = await _call(fine_tune, model=tune_model, epochs=epochs, dataset=dataset)
             transcript.append(f"$ fine_tune(model={tune_model!r}, epochs={epochs})\n{out}\n")
             path = out.split("new model reference: ")[-1].strip()
-            out = await evaluator.ainvoke({"model": path, "n": n, "dataset": dataset})
+            out = await _call(evaluator, model=path, n=n, dataset=dataset)
             transcript.append(f"$ run_eval(model={path!r}, n={n})\n{out}\n")
             results.append(_parse(out, f"{tune_model} (fine-tuned, {epochs:g} ep)", n))
 
