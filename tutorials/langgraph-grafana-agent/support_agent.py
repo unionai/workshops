@@ -1,10 +1,10 @@
 """The support agent: the thing in production that the factory builds a router for.
 
-A deliberately small LangGraph agent. A ticket comes in, the agent routes it to a queue,
-then drafts a two-line reply for the queue's team to send. It is a stand-in for whatever
-customer-facing agent you actually run; the point is that its first step, routing, is a
-classification problem that today costs an API call per ticket and is the first thing to
-move to a self-hosted open-source model.
+A deliberately small LangGraph agent. A ticket comes in, the router picks a queue, and the
+queue's own drafting agent (the same model, prompted as that team) writes a two-line reply
+for the team to send. It is a stand-in for whatever customer-facing agent you actually run;
+the point is that its first step, routing, is a classification problem that today costs an
+API call per ticket and is the first thing to move to a self-hosted open-source model.
 
     route ──► draft ──► END
 
@@ -18,9 +18,9 @@ latency, tokens and cost per 1,000 tickets, and the distribution of queues, so "
 "after" sit next to each other. Run it over dataset v2 and the same report shows drift: the
 GDPR tickets pile up in `other`, at low confidence.
 
-    flyte run --local support_agent.py handle_tickets --n 10 --router llm
-    flyte run support_agent.py handle_tickets --router oss
-    flyte run support_agent.py handle_tickets --router oss --dataset v2      # drift, visible
+    flyte run --local support_agent.py agent_handle_tickets --n 10 --router llm
+    flyte run support_agent.py agent_handle_tickets --router oss
+    flyte run support_agent.py agent_handle_tickets --router oss --dataset v2      # drift, visible
 
 Every model and app call is a traced step, so a batch that dies halfway replays what it
 already did, and the run graph shows each ticket's text going in and the queue coming out.
@@ -156,7 +156,7 @@ async def _endpoint() -> str:
 
 
 @observed_env.task(report=True, retries=2, links=GRAFANA_LINKS)
-async def handle_tickets(
+async def agent_handle_tickets(
     n: int = 30,
     router: str = "llm",
     dataset: str = "v1",
@@ -246,5 +246,5 @@ async def handle_tickets(
 
 if __name__ == "__main__":
     flyte.init_from_config()
-    run = flyte.run(handle_tickets, n=30, router="llm")
+    run = flyte.run(agent_handle_tickets, n=30, router="llm")
     print(run.url)

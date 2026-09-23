@@ -155,6 +155,8 @@ _KNOBS = (
     "FACTORY_APPROVAL",
     "FACTORY_MAX_STEPS",
     "VLLM_BASE_URL",
+    "ROUTER_CPU",
+    "ROUTER_MEMORY",
 )
 PROPAGATED = {k: v for k, v in os.environ.items() if (k in _KNOBS or k.endswith("_SECRET_NAME")) and v}
 

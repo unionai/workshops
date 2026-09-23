@@ -11,9 +11,9 @@ Needs the key for AGENT_MODEL's provider (locally in .env; on the cluster as a s
 If Grafana is configured, this run is also a conversation in Agent Observability and the
 task carries the two Grafana links; step 4 is about looking at them.
 
-    flyte run --local step2_engineer.py engineer --candidates_to_screen 2 --max_fine_tunes 1
-    flyte run step2_engineer.py engineer
-    flyte run step2_engineer.py engineer --min_accuracy 0.9 --max_latency_ms 120 --budget 6
+    flyte run --local step2_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1
+    flyte run step2_engineer.py ml_engineer_agent
+    flyte run step2_engineer.py ml_engineer_agent --min_accuracy 0.9 --max_latency_ms 120 --budget 6
 
 The task report shows the agent's timeline (model turns and tool calls) on one tab and
 the decision, checked against the request, on another. On the cluster, `promote` also
@@ -34,7 +34,7 @@ from report import decision_html
 
 
 @observed_env.task(report=True, retries=2, links=GRAFANA_LINKS)
-async def engineer(
+async def ml_engineer_agent(
     min_accuracy: float = 0.95,
     max_latency_ms: float = 150.0,
     candidates_to_screen: int = 5,
@@ -57,5 +57,5 @@ async def engineer(
 
 if __name__ == "__main__":
     flyte.init_from_config()
-    run = flyte.run(engineer)
+    run = flyte.run(ml_engineer_agent)
     print(run.url)

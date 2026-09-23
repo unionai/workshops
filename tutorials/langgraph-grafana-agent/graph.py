@@ -186,9 +186,19 @@ def think_node(model, tools, *, name: str = "think"):
     timeline = ReportTimeline()
     pending: dict = {}
 
-    async def _turn(turn: int, reacting_to: str, transcript: str) -> str:
+    async def _turn(turn: int, reacting_to: str, transcript: str) -> dict:
         response = await bound.ainvoke(pending["messages"])
-        return json.dumps(message_to_dict(response))
+        record = message_to_dict(response)
+        # Keep what a replay needs (content, tool calls, id); drop token counts and metadata.
+        record["data"] = {
+            k: v for k, v in record["data"].items() if k in ("type", "id", "name", "content", "tool_calls")
+        }
+        calls = [
+            f"{tc['name']}({', '.join(f'{k}={v}' for k, v in (tc.get('args') or {}).items())})"
+            for tc in (getattr(response, "tool_calls", None) or [])
+        ]
+        # The readable part first, so the run graph shows what the model said and asked for.
+        return {"says": response.text, "calls": calls, "record": record}
 
     _turn.__name__ = _turn.__qualname__ = f"{name}:model"
     traced = flyte.trace(_turn)
@@ -200,8 +210,8 @@ def think_node(model, tools, *, name: str = "think"):
         last = messages[-1]
         prefix = f"{last.name}: " if isinstance(last, ToolMessage) else ""
         key = fingerprint({"node": name, "messages": messages_to_dict(messages)})
-        raw = await traced(turn, (prefix + last.text)[:400], key)  # plain text: abbrev() would wrap it in HTML
-        response = messages_from_dict([json.loads(raw)])[0]
+        out = await traced(turn, (prefix + last.text)[:400], key)  # plain text: abbrev() would wrap it in HTML
+        response = messages_from_dict([out["record"]])[0]
         tool_calls = getattr(response, "tool_calls", None) or []
         detail = "→ " + ", ".join(tc["name"] for tc in tool_calls) if tool_calls else abbrev(response.text, 200)
         timeline.row(icon="🤖", label=name, meta="assistant", detail=detail)

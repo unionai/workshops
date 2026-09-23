@@ -1,9 +1,9 @@
 """Notebook helpers for running the steps from Python instead of the shell.
 
     from utils.workshop import run, show
-    from step2_engineer import engineer
-    result = run(engineer)                 # on the cluster in your flyte config
-    result = run(engineer, local=True)     # in this process, no cluster
+    from step2_engineer import ml_engineer_agent
+    result = run(ml_engineer_agent)                 # on the cluster in your flyte config
+    result = run(ml_engineer_agent, local=True)     # in this process, no cluster
 
 `run` prints the run URL as soon as the run exists, waits for it (reconnecting if the
 watch stream drops), prints the phase, and returns the task's outputs. Open the URL for the

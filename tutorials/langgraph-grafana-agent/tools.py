@@ -386,7 +386,7 @@ async def promote(model: str, accuracy: float, latency_p50_ms: float, reason: st
     # 2. Ship it: deploy the app that mounts the latest ticket-router artifact.
     if not FACTORY_DEPLOY:
         return text + " Deployment skipped (FACTORY_DEPLOY=0)."
-    url = await _deploy(make_router_app(published), expect_base=_base_of(model))
+    url = await _deploy(make_router_app(published, base=_base_of(model)), expect_base=_base_of(model))
     return text + f" Deployed the {APP_NAME} app: {url}. Run test_deployment to check it before you finish."
 
 
@@ -486,7 +486,7 @@ async def test_deployment(n: int = 12, dataset: str = "v1") -> str:
     lat = sorted(latencies)[len(latencies) // 2]
     text = (
         f"live app {APP_NAME} at {endpoint}: {hits}/{len(tickets)} correct ({acc:.0%}) on dataset {dataset}, "
-        f"p50 {lat:.0f} ms per ticket on the app's CPU pod (not comparable to the T4 eval). "
+        f"p50 {lat:.0f} ms per ticket on the app's {info.get('device', 'cpu')} pod (a CPU pod is not comparable to the T4 eval). "
         f"The app is serving a model trained on dataset {info.get('dataset')} from {(info.get('factory') or {}).get('base', '?')}."
     )
     if misses:
@@ -527,7 +527,7 @@ async def rollback(version: str) -> str:
         f"Rollback to {ROUTER_ARTIFACT}@{version} (source {attrs.get('source_model', '?')}).",
         attrs.get("dataset", "v1"),
     )
-    url = await _deploy(make_router_app(published), expect_base=_base_of(source))
+    url = await _deploy(make_router_app(published, base=_base_of(source)), expect_base=_base_of(source))
     return (
         f"rolled back: republished {ROUTER_ARTIFACT}@{version} as {ROUTER_ARTIFACT}@{published}; "
         f"{APP_NAME} now serves it: {url}. Run test_deployment to confirm."

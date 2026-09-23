@@ -261,12 +261,13 @@ inside the token itself: the `glc_` payload is base64 JSON whose `n` field names
 ## Step 0: the support agent, as it is today
 
 ```bash
-flyte run --local support_agent.py handle_tickets --n 10 --router llm    # laptop
-flyte run support_agent.py handle_tickets --router llm                   # cluster, 30 tickets
+flyte run --local support_agent.py agent_handle_tickets --n 10 --router llm    # laptop
+flyte run support_agent.py agent_handle_tickets --router llm                   # cluster, 30 tickets
 ```
 
-**What you'll see.** Thirty held-out tickets go through the support agent: routed to a
-queue by the API model, then a two-line draft reply for that queue's team. The report has
+**What you'll see.** Thirty held-out tickets go through the support agent: the router picks
+a queue, then the queue's drafting agent (the same model, prompted as that team) writes a
+two-line reply for the team to send. The report has
 the numbers that matter for the request: routing accuracy, p50 routing latency, tokens,
 and cost per 1,000 tickets, plus where the tickets landed and every draft. With Grafana
 configured, the batch is a conversation in Agent Observability with one generation per
@@ -339,8 +340,8 @@ in a second, and so does everyone else in the project.
 ## Step 2: let the ML engineer build the router
 
 ```bash
-flyte run --local step2_engineer.py engineer --candidates_to_screen 2 --max_fine_tunes 1   # laptop: keep it small
-flyte run step2_engineer.py engineer                                                       # cluster
+flyte run --local step2_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1   # laptop: keep it small
+flyte run step2_engineer.py ml_engineer_agent                                                       # cluster
 ```
 
 **What you'll see.** The terminal prints the run URL and, at the end, the decision as
@@ -414,7 +415,7 @@ opposite, on purpose.
 ## Step 3: switch the support agent to the self-hosted router
 
 ```bash
-flyte run support_agent.py handle_tickets --router oss
+flyte run support_agent.py agent_handle_tickets --router oss
 ```
 
 **What you'll see.** The same thirty tickets, the same draft replies, but routing is now
@@ -535,9 +536,9 @@ Models are strings from `llm.py`: `anthropic:<model>`, `openai:<model>`, or
 ## Step 7: drift, by hand
 
 ```bash
-flyte run support_agent.py handle_tickets --router oss --dataset v2      # see it
+flyte run support_agent.py agent_handle_tickets --router oss --dataset v2      # see it
 flyte run step7_drift.py day_two                                          # fix it
-flyte run support_agent.py handle_tickets --router oss --dataset v2 --labels_from v2   # see it fixed
+flyte run support_agent.py agent_handle_tickets --router oss --dataset v2 --labels_from v2   # see it fixed
 ```
 
 The support team adds a ninth category, `data_request`, for privacy and data-subject
@@ -654,7 +655,7 @@ to load the encoder as a chat model).
 ## A human in the loop
 
 ```bash
-FACTORY_APPROVAL=1 flyte run step2_engineer.py engineer
+FACTORY_APPROVAL=1 flyte run step2_engineer.py ml_engineer_agent
 ```
 
 With `FACTORY_APPROVAL=1`, `promote` creates a `flyte.new_condition` before it publishes
@@ -698,6 +699,7 @@ T4 latency bar is not applied to them.
 | the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-opus-5` |
 | providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 6, or any step) | the agent's provider |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 6 sets `0`) |
+| the router app's pod | sized to the promoted model: the encoder 1 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
 | human approval before deploy | `FACTORY_APPROVAL` | `0` |
 | your namespace on a shared cluster | `FACTORY_TAG` | none (app and artifacts are then `ticket-router`) |
 | a note for the engineer | `--situation "..."` on step 2 | none (steps 7 and 8 set their own) |
@@ -742,6 +744,11 @@ build 6 minutes once, one LoRA epoch on the 0.5B 42 seconds.
   `flyte.with_runcontext(interactive_mode=False)` so the source is shipped, and pins
   `root_dir` to the tutorial folder so the bundle does not depend on the kernel's working
   directory. Do the same in any notebook code that calls `flyte.run` itself.
+- `promote` sizes the serving pod to the model it is deploying (`serving_resources` in
+  `router_app.py`): the encoder gets a small CPU pod, a chat model above 0.5B gets a T4, so
+  the latency the request was judged on is the latency production sees. On a cluster with
+  small CPU nodes, `ROUTER_MEMORY=2Gi` is the knob; "Insufficient memory" in the app's
+  revision log is the symptom.
 - In a room of attendees on one project, every promotion republishes `ticket-router` and
   redeploys the same app: last promotion wins. Fine for a demo; key the app name on the
   run name in `router_app.py` if everyone should get their own.
