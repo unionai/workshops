@@ -699,7 +699,7 @@ T4 latency bar is not applied to them.
 | the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-opus-5` |
 | providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 6, or any step) | the agent's provider |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 6 sets `0`) |
-| the router app's pod | sized to the promoted model: the encoder 1 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
+| the router app's pod | sized to the promoted model: the encoder 2 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
 | human approval before deploy | `FACTORY_APPROVAL` | `0` |
 | your namespace on a shared cluster | `FACTORY_TAG` | none (app and artifacts are then `ticket-router`) |
 | a note for the engineer | `--situation "..."` on step 2 | none (steps 7 and 8 set their own) |
@@ -746,9 +746,18 @@ build 6 minutes once, one LoRA epoch on the 0.5B 42 seconds.
   directory. Do the same in any notebook code that calls `flyte.run` itself.
 - `promote` sizes the serving pod to the model it is deploying (`serving_resources` in
   `router_app.py`): the encoder gets a small CPU pod, a chat model above 0.5B gets a T4, so
-  the latency the request was judged on is the latency production sees. On a cluster with
-  small CPU nodes, `ROUTER_MEMORY=2Gi` is the knob; "Insufficient memory" in the app's
-  revision log is the symptom.
+  the latency the request was judged on is the latency production sees (the fine-tuned
+  1.5B: 84 ms in the eval, 85 ms from the deployed app). On a cluster with small CPU
+  nodes, `ROUTER_MEMORY` and `ROUTER_CPU` are the knobs; "Insufficient memory" in the app's
+  revision log is the symptom. Keep the encoder's 2 CPUs if you can: on one core it answers
+  in about 600 ms instead of 200.
+- The app opens its port before the model is loaded and loads it in the background
+  (`/` reports `loaded`, `/classify` waits). A pod that is still reading a 6GB checkpoint
+  when the platform's readiness check gives up is restarted forever. On a GPU the weights
+  stream straight to the device (`device_map`); staging them in CPU memory first got the
+  12Gi pod OOM-killed. `promote` polls until the new pod reports the right model *and*
+  `loaded`, and fails loudly if it never does, rather than letting `test_deployment`
+  measure the previous revision.
 - In a room of attendees on one project, every promotion republishes `ticket-router` and
   redeploys the same app: last promotion wins. Fine for a demo; key the app name on the
   run name in `router_app.py` if everyone should get their own.
