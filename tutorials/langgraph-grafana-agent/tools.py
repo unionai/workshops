@@ -14,10 +14,13 @@ artifact and deploys the serving app that mounts it; `test_deployment` calls the
 `rollback` redeploys an earlier version. Lineage in the Union UI then runs from the
 training run, through the artifact, to the running app.
 
-Two tools are cached (`cache="auto"`): the same eval of the same model is the same
-answer, so a second call by anyone in the project returns in a second instead of a
-minute. In a room full of people running the same agent, the first person pays for each
-cell of the eval matrix and everyone else hits cache.
+Evals are not cached, on purpose: a cache hit returns the number but not the report, and
+in a workshop a run whose children all say "cached" looks like a run where nothing
+happened. An eval is a minute on a T4 and they run in parallel, so every run shows its
+work. Training is cached (`cache="auto"` on `train_model`): the same fine-tune of the same
+model is the same weights, and a room full of people should not each train the same
+three models. The cache key is the inputs plus a fingerprint of the training tickets, so
+editing the data retrains; editing an unrelated file does not.
 """
 
 from __future__ import annotations
@@ -175,14 +178,14 @@ async def _eval(model: str, n: int, dataset: str) -> str:
 
 
 @tool
-@gpu_env.task(cache="auto", retries=2, report=True)
+@gpu_env.task(retries=2, report=True)
 async def run_eval(model: str, n: int = 120, dataset: str = "v1") -> str:
     """Classify n held-out tickets with a model (a candidate id, or an artifact:<name>@<version> reference) on a dataset version, on a T4, and measure accuracy plus per-ticket latency. This is the latency the request is judged on."""
     return await _eval(model, n, dataset)
 
 
 @tool
-@cpu_env.task(cache="auto", retries=2, report=True)
+@cpu_env.task(retries=2, report=True)
 async def run_eval_cpu(model: str, n: int = 120, dataset: str = "v1") -> str:
     """Same as run_eval but on a small CPU node: no GPU needed, cheaper, slower per ticket. Sensible for models marked small enough for CPU. Latency here is CPU latency, not the T4 number the request asks for."""
     return await _eval(model, n, dataset)
@@ -253,9 +256,23 @@ async def _train(model: str, epochs: float, lora_r: int, dataset: str) -> tuple[
     return artifacts.new(weights, meta), summary
 
 
+def _data_fingerprint(dataset: str) -> str:
+    """A hash of the training tickets, so the cache key covers the data and not only its name."""
+    import hashlib
+
+    rows = sorted(f"{t.text}\t{t.label}" for t in load_split("train", dataset))
+    return hashlib.sha256("\n".join(rows).encode()).hexdigest()[:16]
+
+
 @gpu_env.task(cache="auto", retries=1, produces_artifacts=True, report=True)
-async def train_model(model: str, epochs: float = 1.0, lora_r: int = 16, dataset: str = "v1") -> tuple[Dir, str]:
-    """Train a candidate on a T4 and register the weights as a model artifact."""
+async def train_model(
+    model: str, epochs: float = 1.0, lora_r: int = 16, dataset: str = "v1", data: str = ""
+) -> tuple[Dir, str]:
+    """Train a candidate on a T4 and register the weights as a model artifact.
+
+    `data` is the fingerprint of the training tickets. It is not used here; it is an input
+    so that it is part of the cache key: edit the tickets and the fine-tune is retrained.
+    """
     return await _train(model, epochs, lora_r, dataset)
 
 
@@ -267,7 +284,7 @@ async def fine_tune(model: str, epochs: float = 1.0, lora_r: int = 16, dataset: 
     named = dataclasses.replace(
         train_model, short_name=f"train_model · {short} · {epochs:g}ep" + (f" · {dataset}" if dataset != "v1" else "")
     )
-    weights, summary = await named(model, epochs, lora_r, dataset)
+    weights, summary = await named(model, epochs, lora_r, dataset, _data_fingerprint(dataset))
     if _is_local():
         # No artifact registry off-cluster: the model is a local directory, pass its path.
         return summary.split("\nartifact:")[0] + f"\nnew model reference: {weights.path}"

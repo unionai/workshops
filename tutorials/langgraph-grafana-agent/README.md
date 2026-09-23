@@ -174,9 +174,9 @@ This is the shape of a cold run, with the tool calls the agent actually made:
  5:20  decision  typed Decision, checked against the request
 ```
 
-Eight model turns, thirteen tool calls, about 13k tokens. Warm, with the eval matrix and
-the fine-tunes cached, the same run is under a minute, which is what the second person in
-the room sees.
+Eight model turns, thirteen tool calls, about 13k tokens. The evals run every time (a
+minute each, in parallel), so every run shows its work; the fine-tunes are cached, so the
+second person in the room trains nothing.
 
 In the Flyte UI the run graph shows the fan-out, and every action is named after what
 it did: `run_eval · qwen2.5-0.5b` four across, then `fine_tune · modernbert-base · 3ep`
@@ -222,8 +222,8 @@ dies with an empty `ConnectError`; the notebook already passes the flag.
 
 On a shared cluster, set `FACTORY_TAG=<your handle>` in `.env`. It namespaces what has
 to be yours: the serving app (`ticket-router-<tag>`), the production artifacts, and the
-environments that carry triggers. The GPU eval and training tasks stay shared, so the eval
-matrix is cached once for the whole room. Prefix your secret names the same way
+environments that carry triggers. The GPU training task stays shared, so each fine-tune
+is trained once for the whole room. Prefix your secret names the same way
 (`FLYTE_SECRET_PREFIX=SAGE_` makes the code ask for `SAGE_ANTHROPIC_API_KEY`), or point at
 an existing secret by name (`OPENAI_API_KEY_SECRET_NAME=my-openai-key`).
 
@@ -332,8 +332,9 @@ last `run_eval` fetched that artifact by reference. Open the run in the Flyte UI
 can see the evals side by side.
 
 **Look at** the numbers before moving on. They are the ground the agent will stand on.
-And they are cached: when the engineer asks for the same eval in step 2, it gets the answer
-in a second, and so does everyone else in the project.
+The evals are not cached, so the engineer measures again in step 2 and you see it happen;
+the fine-tune is, so when the engineer asks for the same one it gets the weights back in
+seconds, and so does everyone else in the project.
 
 ---
 
@@ -573,13 +574,13 @@ each: met the constraints, stayed in budget, runs spent, tokens, wall clock. In 
 each agent model is its own agent version, so the conversations sit side by side and you
 can read how each one argued for the encoder over the 1.5B.
 
-**What just happened.** Same request, same tools, different `model` string. Because the
-evals and fine-tunes are cached, after the first agent the rest mostly hit cache, so the
-bake-off measures the agents rather than the GPUs. Promotion publishes artifacts but does
-not deploy here (`FACTORY_DEPLOY=0`). With a warm matrix, Claude Opus 5 met the
-request in 10 runs, 63k tokens and 99 seconds; Claude Haiku 4.5 met it in 10 runs, 53k
-tokens and 56 seconds; GPT-4.1 in 7 runs, 23k tokens and 49 seconds; GPT-4.1-mini in 11
-runs, 29k tokens and 100 seconds. Same tools, same cache, different amount of flailing.
+**What just happened.** Same request, same tools, different `model` string. The
+fine-tunes are cached, so after the first agent the others train nothing, and the score
+that matters is runs spent and tokens rather than wall clock. Promotion publishes
+artifacts but does not deploy here (`FACTORY_DEPLOY=0`). On our cluster Claude Opus 5 met
+the request in 10 runs and 63k tokens; Claude Haiku 4.5 in 10 runs and 53k tokens;
+GPT-4.1 in 7 runs and 23k tokens; GPT-4.1-mini in 11 runs and 29k tokens. Same tools,
+different amount of flailing.
 
 **The engineer on an open model.** `vllm:qwen3-8b` is the same agent driven by Qwen3-8B,
 served by vLLM on a Union app with one L40s. Deploy it once (it prefetches the weights
@@ -617,7 +618,7 @@ attempt 0 prints three `live model call` lines and then the simulated crash; att
 prints four, for a seven-turn run. The missing three are the replay. In the run graph
 exactly one `think:model` is red: the crash itself, with the message `simulated worker
 crash after 3 model calls`; everything after it belongs to attempt 1. In the Flyte UI,
-attempt 1's `run_eval` and `fine_tune` children are cache hits: no T4 started twice, no
+attempt 1's `run_eval` and `fine_tune` children are already done: no T4 started twice, no
 model was trained twice. In Tempo, both attempts are one trace, and the replayed steps
 are marked `flyte.replayed`. A stock OpenTelemetry setup would show two unrelated traces
 with holes where the replays are.
@@ -625,7 +626,7 @@ with holes where the replays are.
 **What just happened.** The task dies after its third live model call on the first
 attempt, which for this agent is right after the fine-tune results come back. Flyte
 retries it in a fresh container. The turns it already paid for replay from their durable
-records; the tool calls it already made are cache hits; the decision is produced once.
+records; the tool calls it already made are not redone; the decision is produced once.
 
 One detail that took a real run to find: a turn is looked up by a fingerprint of the
 whole transcript, message ids included, and LangGraph assigns a random id to any message
@@ -726,10 +727,13 @@ build 6 minutes once, one LoRA epoch on the 0.5B 42 seconds.
 - `fine_tune` is a CPU-side wrapper around `train_model`, the GPU task that produces the
   artifact. A tool has to return text for the model, and an artifact has to be a task's
   top-level output, so they are two tasks. `promote` and `publish_router` split the same way.
-- `cache="auto"` versions a task by its own source. Editing `tickets.py` does not
-  invalidate cached evals; edit `tools.py` (or bump `n`) if you need fresh numbers. And
-  never cache on an unversioned reference: `run_eval("artifact:ticket-router")` returns
-  whatever "latest" meant the first time it ran. Resolve the version first, as `adapt` does.
+- Only `train_model` is cached. Evals used to be, and a cache hit returns the number
+  without the report, which in a room reads as "nothing happened". `cache="auto"` keys on
+  the inputs and the task's own source, not on files the task reads, so `fine_tune` passes
+  a fingerprint of the training tickets as an input: edit the data and the fine-tune is
+  retrained, edit anything else and it is not. And never cache on an unversioned
+  reference: a task given `artifact:ticket-router` would return whatever "latest" meant
+  the first time it ran. Resolve the version first, as `adapt` does.
 - A child task's spec is serialized where it is launched. For the agent's tools that is
   inside the agent's pod, which has no `.env`, so every knob `config.py` reads from the
   environment is also passed to every environment as `env_vars` (`PROPAGATED`). Forget
