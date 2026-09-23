@@ -1,10 +1,10 @@
 """The support agent: the thing in production that the factory builds a router for.
 
-A deliberately small LangGraph agent. A ticket comes in, the agent routes it to a queue,
-then drafts a two-line reply for the queue's team to send. It is a stand-in for whatever
-customer-facing agent you actually run; the point is that its first step, routing, is a
-classification problem that today costs an API call per ticket and is the first thing to
-move to a self-hosted open-source model.
+A deliberately small LangGraph agent. A ticket comes in, the router picks a queue, and the
+queue's own drafting agent (the same model, prompted as that team) writes a two-line reply
+for the team to send. It is a stand-in for whatever customer-facing agent you actually run;
+the point is that its first step, routing, is a classification problem that today costs an
+API call per ticket and is the first thing to move to a self-hosted open-source model.
 
     route ──► draft ──► END
 
@@ -18,11 +18,12 @@ latency, tokens and cost per 1,000 tickets, and the distribution of queues, so "
 "after" sit next to each other. Run it over dataset v2 and the same report shows drift: the
 GDPR tickets pile up in `other`, at low confidence.
 
-    flyte run --local support_agent.py handle_tickets --n 10 --router llm
-    flyte run support_agent.py handle_tickets --router oss
-    flyte run support_agent.py handle_tickets --router oss --dataset v2      # drift, visible
+    flyte run --local support_agent.py agent_handle_tickets --n 10 --router llm
+    flyte run support_agent.py agent_handle_tickets --router oss
+    flyte run support_agent.py agent_handle_tickets --router oss --dataset v2      # drift, visible
 
-Every ticket is a durable step, so a batch that dies halfway replays what it already did.
+Every model and app call is a traced step, so a batch that dies halfway replays what it
+already did, and the run graph shows each ticket's text going in and the queue coming out.
 With Grafana configured, each batch is a conversation in Agent Observability.
 """
 
@@ -35,7 +36,7 @@ from typing import TypedDict
 
 import flyte
 import flyte.report
-from flyteplugins.agents.core import apply_instrumentation, durable_step, fingerprint
+from flyteplugins.agents.core import apply_instrumentation
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
@@ -74,66 +75,59 @@ class Route(BaseModel):
     queue: str = Field(description="Exactly one of the allowed queue names.")
 
 
-def build_support_graph(model, router: str, endpoint: str | None):
-    """The two-node graph. Routing is either a model call or an HTTP call to the app."""
+def build_support_graph(model, router: str, endpoint: str | None, model_name: str):
+    """The two-node graph. Routing is either a model call or an HTTP call to the app.
+
+    Each call is a `flyte.trace` step, so a batch that dies halfway replays what it already
+    did, and each step is a row in the run graph with the ticket text as its input and the
+    queue or reply as its output. The arguments are the memo key, which is why the model's
+    name is one of them.
+    """
     structured = model.with_structured_output(Route)
+
+    @flyte.trace
+    async def route_with_app(ticket_id: str, text: str) -> dict:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(endpoint + "/classify", json={"text": text})
+            r.raise_for_status()
+            return r.json()
+
+    @flyte.trace
+    async def route_with_model(ticket_id: str, text: str, labels: list[str], model_name: str) -> str:
+        msgs = [SystemMessage(content=system_prompt_for(labels)), HumanMessage(content=text)]
+        return (await structured.ainvoke(msgs)).queue
+
+    @flyte.trace
+    async def draft_reply(ticket_id: str, queue: str, text: str, model_name: str) -> str:
+        owner = QUEUE_OWNERS.get(queue, "General support")
+        msgs = [
+            SystemMessage(
+                content=f"You draft replies for the {owner}. Two sentences, plain, no promises you cannot keep, no sign-off."
+            ),
+            HumanMessage(content=f"Ticket routed to {queue}:\n\n{text}"),
+        ]
+        # `.text` joins the text blocks: Claude with thinking on returns a list of blocks.
+        return (await model.ainvoke(msgs)).text
 
     async def route(state: TicketState) -> dict:
         labels = state["labels"]
         t0 = time.perf_counter()
         if router == "oss":
-            import httpx
-
-            async def _call() -> dict:
-                async with httpx.AsyncClient(timeout=120) as client:
-                    r = await client.post(endpoint + "/classify", json={"text": state["text"]})
-                    r.raise_for_status()
-                    return r.json()
-
-            key = fingerprint({"node": "route", "router": "oss", "endpoint": endpoint, "ticket": state["ticket_id"]})
-            body = await durable_step(key, _call, name="route:app", dumps=json.dumps, loads=json.loads)
+            body = await route_with_app(state["ticket_id"], state["text"])
             queue = body["label"] if body["label"] in labels else "other"
             confidence = body.get("confidence")
             latency = body.get("latency_ms", (time.perf_counter() - t0) * 1000)
         else:
-            msgs = [SystemMessage(content=system_prompt_for(labels)), HumanMessage(content=state["text"])]
-
-            async def _call() -> str:
-                return (await structured.ainvoke(msgs)).queue
-
-            key = fingerprint(
-                {
-                    "node": "route",
-                    "router": "llm",
-                    "model": short_name(None),
-                    "ticket": state["ticket_id"],
-                    "labels": labels,
-                }
-            )
-            raw = await durable_step(key, _call, name="route:model")
+            raw = await route_with_model(state["ticket_id"], state["text"], labels, model_name)
             queue = parse_label(raw, labels)
             confidence = None
             latency = (time.perf_counter() - t0) * 1000
         return {"queue": queue, "confidence": confidence, "route_ms": latency}
 
     async def draft(state: TicketState) -> dict:
-        owner = QUEUE_OWNERS.get(state["queue"], "General support")
-        msgs = [
-            SystemMessage(
-                content=f"You draft replies for the {owner}. Two sentences, plain, no promises you cannot keep, no sign-off."
-            ),
-            HumanMessage(content=f"Ticket routed to {state['queue']}:\n\n{state['text']}"),
-        ]
-
-        async def _call() -> str:
-            # `.text` joins the text blocks. Claude with thinking on returns a list of blocks
-            # (thinking, then text) as `.content`, and a durable step records a string.
-            return (await model.ainvoke(msgs)).text
-
-        key = fingerprint(
-            {"node": "draft", "model": short_name(None), "ticket": state["ticket_id"], "queue": state["queue"]}
-        )
-        reply = await durable_step(key, _call, name="draft:model")
+        reply = await draft_reply(state["ticket_id"], state["queue"], state["text"], model_name)
         return {"reply": reply}
 
     builder = StateGraph(TicketState)
@@ -162,7 +156,7 @@ async def _endpoint() -> str:
 
 
 @observed_env.task(report=True, retries=2, links=GRAFANA_LINKS)
-async def handle_tickets(
+async def agent_handle_tickets(
     n: int = 30,
     router: str = "llm",
     dataset: str = "v1",
@@ -191,7 +185,7 @@ async def handle_tickets(
                 "--router oss needs the deployed ticket-router app; run this on the cluster (or promote something first)"
             )
         endpoint = await _endpoint()
-    graph = build_support_graph(chat, router, endpoint)
+    graph = build_support_graph(chat, router, endpoint, short_name(model))
     usage = UsageMetadataCallbackHandler()
     config = apply_instrumentation("langgraph", {"callbacks": [usage]}) or {"callbacks": [usage]}
 
@@ -252,5 +246,5 @@ async def handle_tickets(
 
 if __name__ == "__main__":
     flyte.init_from_config()
-    run = flyte.run(handle_tickets, n=30, router="llm")
+    run = flyte.run(agent_handle_tickets, n=30, router="llm")
     print(run.url)

@@ -134,6 +134,21 @@ the agent has to read a result and decide how much training to ask for. And the 
 that is not a chat model at all, the encoder, turns out to be the best router by every
 measure once it is trained. The agent has to get there from numbers it produces itself.
 
+For scale, the models the support agent could route with today, zero-shot on the same
+120 tickets (p50 here is a network call from the cluster, not a T4):
+
+| router | zero-shot | p50 | where it runs |
+|---|---|---|---|
+| Claude Opus 5 | 98.3% | 1.7 s | API |
+| GPT-4.1 | 97.5% | 634 ms | API |
+| Claude Haiku 4.5 | 95.8% | 606 ms | API |
+| Qwen3-8B (vLLM) | 94.2% | 386 ms | one L40s, ours |
+| modernbert-base, fine-tuned | 99.2% | 14 ms on a T4, 232 ms on the app's CPU pod | 149M params, ours |
+
+The big API models clear the bar without training and the trained encoder beats all of
+them at a hundredth of the latency. Qwen3-8B, an open model with 50× the encoder's
+parameters, does not clear it zero-shot.
+
 ### What a run looks like
 
 This is the shape of a cold run, with the tool calls the agent actually made:
@@ -246,12 +261,13 @@ inside the token itself: the `glc_` payload is base64 JSON whose `n` field names
 ## Step 0: the support agent, as it is today
 
 ```bash
-flyte run --local support_agent.py handle_tickets --n 10 --router llm    # laptop
-flyte run support_agent.py handle_tickets --router llm                   # cluster, 30 tickets
+flyte run --local support_agent.py agent_handle_tickets --n 10 --router llm    # laptop
+flyte run support_agent.py agent_handle_tickets --router llm                   # cluster, 30 tickets
 ```
 
-**What you'll see.** Thirty held-out tickets go through the support agent: routed to a
-queue by the API model, then a two-line draft reply for that queue's team. The report has
+**What you'll see.** Thirty held-out tickets go through the support agent: the router picks
+a queue, then the queue's drafting agent (the same model, prompted as that team) writes a
+two-line reply for the team to send. The report has
 the numbers that matter for the request: routing accuracy, p50 routing latency, tokens,
 and cost per 1,000 tickets, plus where the tickets landed and every draft. With Grafana
 configured, the batch is a conversation in Agent Observability with one generation per
@@ -270,7 +286,9 @@ Opus thinks before it routes, which is why it is four times slower than the othe
 the same accuracy. That is the "before." Pick the model with `--model`, or `AGENT_MODEL`.
 
 **What just happened.** `support_agent.py` is a two-node LangGraph graph, `route → draft`.
-Both nodes are durable steps, so a batch that dies halfway replays what it already did.
+Each model call is a `flyte.trace` step whose arguments are the ticket itself, so the run
+graph shows every ticket's text going in and the queue or reply coming out, and a batch
+that dies halfway replays what it already did.
 `--router llm` classifies with the API model; `--router oss` calls the `ticket-router`
 app instead, which does not exist yet. Building it is the request.
 
@@ -322,8 +340,8 @@ in a second, and so does everyone else in the project.
 ## Step 2: let the ML engineer build the router
 
 ```bash
-flyte run --local step2_engineer.py engineer --candidates_to_screen 2 --max_fine_tunes 1   # laptop: keep it small
-flyte run step2_engineer.py engineer                                                       # cluster
+flyte run --local step2_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1   # laptop: keep it small
+flyte run step2_engineer.py ml_engineer_agent                                                       # cluster
 ```
 
 **What you'll see.** The terminal prints the run URL and, at the end, the decision as
@@ -397,7 +415,7 @@ opposite, on purpose.
 ## Step 3: switch the support agent to the self-hosted router
 
 ```bash
-flyte run support_agent.py handle_tickets --router oss
+flyte run support_agent.py agent_handle_tickets --router oss
 ```
 
 **What you'll see.** The same thirty tickets, the same draft replies, but routing is now
@@ -449,7 +467,9 @@ flyte run step5_crash_resume.py resilient_engineer
 
 **What you'll see.** The run fails once and succeeds on the retry. In the pod logs,
 attempt 0 prints three `live model call` lines and then the simulated crash; attempt 1
-prints four, for a seven-turn run. The missing three are the replay. In the Flyte UI,
+prints four, for a seven-turn run. The missing three are the replay. In the run graph
+exactly one `think:model` is red: the crash itself, with the message `simulated worker
+crash after 3 model calls`; everything after it belongs to attempt 1. In the Flyte UI,
 attempt 1's `run_eval` and `fine_tune` children are cache hits: no T4 started twice, no
 model was trained twice. In Tempo, both attempts are one trace, and the replayed steps
 are marked `flyte.replayed`. A stock OpenTelemetry setup would show two unrelated traces
@@ -516,9 +536,9 @@ Models are strings from `llm.py`: `anthropic:<model>`, `openai:<model>`, or
 ## Step 7: drift, by hand
 
 ```bash
-flyte run support_agent.py handle_tickets --router oss --dataset v2      # see it
+flyte run support_agent.py agent_handle_tickets --router oss --dataset v2      # see it
 flyte run step7_drift.py day_two                                          # fix it
-flyte run support_agent.py handle_tickets --router oss --dataset v2 --labels_from v2   # see it fixed
+flyte run support_agent.py agent_handle_tickets --router oss --dataset v2 --labels_from v2   # see it fixed
 ```
 
 The support team adds a ninth category, `data_request`, for privacy and data-subject
@@ -635,7 +655,7 @@ to load the encoder as a chat model).
 ## A human in the loop
 
 ```bash
-FACTORY_APPROVAL=1 flyte run step2_engineer.py engineer
+FACTORY_APPROVAL=1 flyte run step2_engineer.py ml_engineer_agent
 ```
 
 With `FACTORY_APPROVAL=1`, `promote` creates a `flyte.new_condition` before it publishes
@@ -677,8 +697,9 @@ T4 latency bar is not applied to them.
 |---|---|---|
 | the request | `--min_accuracy --max_latency_ms --candidates_to_screen --max_fine_tunes --budget` | 0.95, 150, 5, 3, 12 |
 | the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-opus-5` |
-| bake-off providers | `FACTORY_PROVIDERS` in `.env` (which secrets step 6 asks for) | `anthropic` |
+| providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 6, or any step) | the agent's provider |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 6 sets `0`) |
+| the router app's pod | sized to the promoted model: the encoder 1 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
 | human approval before deploy | `FACTORY_APPROVAL` | `0` |
 | your namespace on a shared cluster | `FACTORY_TAG` | none (app and artifacts are then `ticket-router`) |
 | a note for the engineer | `--situation "..."` on step 2 | none (steps 7 and 8 set their own) |
@@ -723,6 +744,11 @@ build 6 minutes once, one LoRA epoch on the 0.5B 42 seconds.
   `flyte.with_runcontext(interactive_mode=False)` so the source is shipped, and pins
   `root_dir` to the tutorial folder so the bundle does not depend on the kernel's working
   directory. Do the same in any notebook code that calls `flyte.run` itself.
+- `promote` sizes the serving pod to the model it is deploying (`serving_resources` in
+  `router_app.py`): the encoder gets a small CPU pod, a chat model above 0.5B gets a T4, so
+  the latency the request was judged on is the latency production sees. On a cluster with
+  small CPU nodes, `ROUTER_MEMORY=2Gi` is the knob; "Insufficient memory" in the app's
+  revision log is the symptom.
 - In a room of attendees on one project, every promotion republishes `ticket-router` and
   redeploys the same app: last promotion wins. Fine for a demo; key the app name on the
   run name in `router_app.py` if everyone should get their own.

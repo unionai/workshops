@@ -131,10 +131,15 @@ GRAFANA_SECRETS = [secret("GRAFANA_TOKEN", "GRAFANA_TOKEN")] if GRAFANA_CONFIGUR
 VLLM_SECRET = PROVIDER_SECRETS["vllm"]
 
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "anthropic:claude-opus-5")
-MODEL_SECRET = PROVIDER_SECRETS[AGENT_MODEL.split(":", 1)[0]]
+AGENT_PROVIDER = AGENT_MODEL.split(":", 1)[0]
 
-# Providers the bake-off in step 6 may use. Add vllm once serve_model.py is deployed.
-FACTORY_PROVIDERS = [p.strip() for p in os.environ.get("FACTORY_PROVIDERS", "anthropic").split(",") if p.strip()]
+# Every provider a task may be asked to use: the agent's own, plus FACTORY_PROVIDERS (the
+# bake-off in step 6, or a `model=` override on any step). Add vllm once serve_model.py is
+# deployed. A task only gets the secrets it lists, so a provider missing here fails on the
+# cluster with an authentication error even though the key is in .env.
+FACTORY_PROVIDERS = [p.strip() for p in os.environ.get("FACTORY_PROVIDERS", "").split(",") if p.strip()]
+if AGENT_PROVIDER not in FACTORY_PROVIDERS:
+    FACTORY_PROVIDERS.insert(0, AGENT_PROVIDER)
 FACTORY_SECRETS = [PROVIDER_SECRETS[p] for p in FACTORY_PROVIDERS]
 
 # Everything above that was read from the environment has to travel with the tasks. A
@@ -150,6 +155,8 @@ _KNOBS = (
     "FACTORY_APPROVAL",
     "FACTORY_MAX_STEPS",
     "VLLM_BASE_URL",
+    "ROUTER_CPU",
+    "ROUTER_MEMORY",
 )
 PROPAGATED = {k: v for k, v in os.environ.items() if (k in _KNOBS or k.endswith("_SECRET_NAME")) and v}
 
@@ -230,7 +237,7 @@ agent_env = flyte.TaskEnvironment(
     name=tagged("factory-agent"),
     image=image,
     resources=flyte.Resources(cpu=1, memory="2Gi"),
-    secrets=[MODEL_SECRET],
+    secrets=[*FACTORY_SECRETS],
     env_vars={**PROPAGATED, "AGENT_MODEL": AGENT_MODEL},
     depends_on=[tools_env, gpu_env, cpu_env],
 )
@@ -240,7 +247,7 @@ observed_env = flyte.TaskEnvironment(
     name=tagged("factory-agent-observed"),
     image=image,
     resources=flyte.Resources(cpu=1, memory="2Gi"),
-    secrets=[MODEL_SECRET, *GRAFANA_SECRETS],
+    secrets=[*FACTORY_SECRETS, *GRAFANA_SECRETS],
     env_vars={**PROPAGATED, **GRAFANA_ENV_VARS, "AGENT_MODEL": AGENT_MODEL},
     depends_on=[tools_env, gpu_env, cpu_env],
 )

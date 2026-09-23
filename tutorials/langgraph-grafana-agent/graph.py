@@ -24,9 +24,18 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
-from flyteplugins.agents.core import ReportTimeline, abbrev, coerce_tool_args, durable_step, fingerprint
-from flyteplugins.agents.langgraph import ai_node, run_agent
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, messages_to_dict
+import flyte
+from flyteplugins.agents.core import ReportTimeline, abbrev, coerce_tool_args, fingerprint
+from flyteplugins.agents.langgraph import run_agent
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    message_to_dict,
+    messages_from_dict,
+    messages_to_dict,
+)
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field
 
@@ -149,7 +158,7 @@ class FactoryState(MessagesState):
     decision: dict
 
 
-def _action_label(tool_name: str, args: dict) -> str:
+def action_label(tool_name: str, args: dict) -> str:
     """`run_eval · qwen2.5-0.5b`, `fine_tune · modernbert-base · 3ep`, `rollback · v1789611341`."""
     parts = [tool_name]
     model = args.get("model") or args.get("version")
@@ -163,6 +172,53 @@ def _action_label(tool_name: str, args: dict) -> str:
     if args.get("dataset") and args["dataset"] != "v1":
         parts.append(str(args["dataset"]))
     return " · ".join(parts)[:60]
+
+
+def think_node(model, tools, *, name: str = "think"):
+    """The model turn, as a traced step you can read in the run graph.
+
+    The plugin's `ai_node` does the same job keyed only on a fingerprint of the transcript,
+    which is what the graph would show as the input. This one puts the turn number and the
+    message the model is reacting to first, and keeps the fingerprint last, so a retry still
+    replays only an identical transcript.
+    """
+    bound = model.bind_tools(list(tools))
+    timeline = ReportTimeline()
+    pending: dict = {}
+
+    async def _turn(turn: int, reacting_to: str, transcript: str) -> dict:
+        response = await bound.ainvoke(pending["messages"])
+        record = message_to_dict(response)
+        # Keep what a replay needs (content, tool calls, id); drop token counts and metadata.
+        record["data"] = {
+            k: v for k, v in record["data"].items() if k in ("type", "id", "name", "content", "tool_calls")
+        }
+        calls = [
+            f"{tc['name']}({', '.join(f'{k}={v}' for k, v in (tc.get('args') or {}).items())})"
+            for tc in (getattr(response, "tool_calls", None) or [])
+        ]
+        # The readable part first, so the run graph shows what the model said and asked for.
+        return {"says": response.text, "calls": calls, "record": record}
+
+    _turn.__name__ = _turn.__qualname__ = f"{name}:model"
+    traced = flyte.trace(_turn)
+
+    async def _think(state: dict) -> dict:
+        messages = list(state["messages"])
+        pending["messages"] = messages
+        turn = sum(isinstance(m, AIMessage) for m in messages) + 1
+        last = messages[-1]
+        prefix = f"{last.name}: " if isinstance(last, ToolMessage) else ""
+        key = fingerprint({"node": name, "messages": messages_to_dict(messages)})
+        out = await traced(turn, (prefix + last.text)[:400], key)  # plain text: abbrev() would wrap it in HTML
+        response = messages_from_dict([out["record"]])[0]
+        tool_calls = getattr(response, "tool_calls", None) or []
+        detail = "→ " + ", ".join(tc["name"] for tc in tool_calls) if tool_calls else abbrev(response.text, 200)
+        timeline.row(icon="🤖", label=name, meta="assistant", detail=detail)
+        return {"messages": [response]}
+
+    _think.__name__ = name
+    return _think
 
 
 def parallel_tool_node(tools, *, name: str = "tools"):
@@ -186,7 +242,7 @@ def parallel_tool_node(tools, *, name: str = "tools"):
                 # Name the action after what it is doing, so the run graph reads
                 # "run_eval · qwen2.5-0.5b" rather than five identical run_eval rows.
                 # dataclasses.replace keeps resources, cache and retries; override() would not.
-                named = dataclasses.replace(task, short_name=_action_label(call["name"], args))
+                named = dataclasses.replace(task, short_name=action_label(call["name"], args))
                 return str(await named.aio(**coerce_tool_args(task, args)))
             return str(await selected.ainvoke(args))
         except Exception as exc:  # surface tool errors back to the model, and keep a record
@@ -203,7 +259,7 @@ def parallel_tool_node(tools, *, name: str = "tools"):
         for call, output in zip(calls, outputs, strict=True):
             timeline.row(icon="🔧", label=call["name"], meta="tool result", detail=abbrev(output, 160))
             # A stable id, derived from the tool call. LangGraph assigns a random UUID to any
-            # message without one, and `ai_node` fingerprints the whole transcript (ids
+            # message without one, and the think step fingerprints the whole transcript (ids
             # included) to find a turn's durable record. Random ids would mean no replay.
             results.append(
                 ToolMessage(
@@ -218,18 +274,25 @@ def parallel_tool_node(tools, *, name: str = "tools"):
 
 def build_graph(model, tools=TOOLS, max_tool_rounds: int = MAX_TOOL_ROUNDS):
     """Compile the graph around a LangChain chat model."""
-    think = ai_node(model, tools, name="think")
+    think = think_node(model, tools, name="think")
     execute = parallel_tool_node(tools, name="tools")
     structured = model.with_structured_output(Decision)
 
+    pending: dict = {}
+
+    async def _decide(turns: int, tool_calls: int, transcript: str) -> str:
+        return json.dumps((await structured.ainvoke(pending["messages"])).model_dump())
+
+    _decide.__name__ = _decide.__qualname__ = "decision:model"
+    decide = flyte.trace(_decide)
+
     async def decision(state: FactoryState) -> dict:
         messages = [*state["messages"], HumanMessage(content=DECISION_PROMPT)]
-
-        async def _call() -> dict:
-            return (await structured.ainvoke(messages)).model_dump()
-
+        pending["messages"] = messages
+        turns = sum(isinstance(m, AIMessage) for m in messages)
+        calls = sum(isinstance(m, ToolMessage) for m in messages)
         key = fingerprint({"node": "decision", "messages": messages_to_dict(messages)})
-        data = await durable_step(key, _call, name="decision:model", dumps=json.dumps, loads=json.loads)
+        data = json.loads(await decide(turns, calls, key))
         tool_msgs = [m for m in state["messages"] if isinstance(m, ToolMessage)]
         # The args of every call, keyed by call id, so the report can show what was asked.
         call_args = {
@@ -247,9 +310,7 @@ def build_graph(model, tools=TOOLS, max_tool_rounds: int = MAX_TOOL_ROUNDS):
             }
             for m in tool_msgs
         ]
-        thoughts = [
-            m.text for m in state["messages"] if isinstance(m, AIMessage) and m.text and not m.tool_calls
-        ]
+        thoughts = [m.text for m in state["messages"] if isinstance(m, AIMessage) and m.text and not m.tool_calls]
         turns = {
             "model_turns": sum(1 for m in state["messages"] if isinstance(m, AIMessage)) + 1,
             "tool_calls": len(tool_msgs),
