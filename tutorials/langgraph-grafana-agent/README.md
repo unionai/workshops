@@ -299,8 +299,8 @@ app instead, which does not exist yet. Building it is the request.
 This is the factory with you at the controls: you pick the candidates and the epochs, the same tools do the work, and you look at what comes back. In step 2 the ML engineer takes over the controls. In the Flyte UI the evals appear side by side in a group called `baseline-evals`, and the fine-tune plus its recheck in `fine-tune-and-recheck`.
 
 ```bash
-flyte run --local step1_factory.py model_factory --n 20 --models '["smollm2-360m"]'   # laptop: one quick eval
-flyte run step1_factory.py model_factory --fine_tune_too                           # cluster: the full matrix
+flyte run --local model_factory.py model_factory --n 20 --models '["smollm2-360m"]'   # laptop: one quick eval
+flyte run model_factory.py model_factory --fine_tune_too                           # cluster: the full matrix
 ```
 
 **What you'll see.** The task report has a **Data** tab with the synthetic tickets (800
@@ -324,7 +324,7 @@ $ run_eval(model='artifact:ticket-router-qwen2.5-0.5b-ft@1ep-1789605305', n=120)
 artifact:...: accuracy 97.5% on 120 tickets; latency p50 68 ms, p95 69 ms ...
 ```
 
-**What just happened.** `step1_factory.py` called the same tool objects the agent will use,
+**What just happened.** `model_factory.py` called the same tool objects the agent will use,
 with `asyncio.gather` around the evals. Each `.ainvoke()` became a Flyte child
 action: on the cluster, a T4 container. `fine_tune` launched `train_model` on a T4, which
 saved the merged weights and registered them as a Union artifact with a model card; the
@@ -340,8 +340,8 @@ in a second, and so does everyone else in the project.
 ## Step 2: let the ML engineer build the router
 
 ```bash
-flyte run --local step2_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1   # laptop: keep it small
-flyte run step2_engineer.py ml_engineer_agent                                                       # cluster
+flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1   # laptop: keep it small
+flyte run ml_engineer.py ml_engineer_agent                                                       # cluster
 ```
 
 **What you'll see.** The terminal prints the run URL and, at the end, the decision as
@@ -380,7 +380,7 @@ artifact's history rather than a quiet re-pointing of the app. In the run above 
 **One run, unplanned.** In one of our runs the OpenAI API returned a 404 in the middle of
 the write-up, five minutes in, after four evals, three fine-tunes and a deploy. Flyte
 retried the task. Every model turn replayed from its record, every child action was
-already done, and attempt two finished in 13 seconds with nothing redone. That is step 5,
+already done, and attempt two finished in 13 seconds with nothing redone. That is step 8,
 happening by accident.
 
 **Watch it be wrong.** With a 95% bar, an earlier version of this agent promoted a model at
@@ -403,7 +403,7 @@ scales to zero after 30 idle minutes.
 
 **About that second attendee.** Step 1's request says "treat this as a fresh build, ignore
 what is deployed", so thirty people running it get thirty full investigations rather than
-twenty-nine "production already meets the bar" in 35 seconds. Steps 7 and 8 say the
+twenty-nine "production already meets the bar" in 35 seconds. Steps 5 and 6 say the
 opposite, on purpose.
 
 **Change the problem.** The request is the task's inputs. `--min_accuracy 0.95
@@ -459,85 +459,11 @@ and the binding that names the run as the conversation rides on that span.
 
 ---
 
-## Step 5: crash it, and watch it resume
-
-```bash
-flyte run step5_crash_resume.py resilient_engineer
-```
-
-**What you'll see.** The run fails once and succeeds on the retry. In the pod logs,
-attempt 0 prints three `live model call` lines and then the simulated crash; attempt 1
-prints four, for a seven-turn run. The missing three are the replay. In the run graph
-exactly one `think:model` is red: the crash itself, with the message `simulated worker
-crash after 3 model calls`; everything after it belongs to attempt 1. In the Flyte UI,
-attempt 1's `run_eval` and `fine_tune` children are cache hits: no T4 started twice, no
-model was trained twice. In Tempo, both attempts are one trace, and the replayed steps
-are marked `flyte.replayed`. A stock OpenTelemetry setup would show two unrelated traces
-with holes where the replays are.
-
-**What just happened.** The task dies after its third live model call on the first
-attempt, which for this agent is right after the fine-tune results come back. Flyte
-retries it in a fresh container. The turns it already paid for replay from their durable
-records; the tool calls it already made are cache hits; the decision is produced once.
-
-One detail that took a real run to find: a turn is looked up by a fingerprint of the
-whole transcript, message ids included, and LangGraph assigns a random id to any message
-that arrives without one. With random ids every attempt looks new and nothing replays.
-The graph gives its seed messages and tool results stable ids (`graph.py`). If you build
-your own graph on these nodes, do the same.
-
----
-
-## Step 6: bake off the engineer's brain
-
-```bash
-flyte run --local step6_bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5"]'
-flyte run step6_bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5", "vllm:qwen3-8b"]' --trials 2
-```
-
-**What you'll see.** One child action per (model, trial), in parallel. The report scores
-each: met the constraints, stayed in budget, runs spent, tokens, wall clock. In Grafana
-each agent model is its own agent version, so the conversations sit side by side and you
-can read how each one argued for the encoder over the 1.5B.
-
-**What just happened.** Same request, same tools, different `model` string. Because the
-evals and fine-tunes are cached, after the first agent the rest mostly hit cache, so the
-bake-off measures the agents rather than the GPUs. Promotion publishes artifacts but does
-not deploy here (`FACTORY_DEPLOY=0`). With a warm matrix, Claude Opus 5 met the
-request in 10 runs, 63k tokens and 99 seconds; Claude Haiku 4.5 met it in 10 runs, 53k
-tokens and 56 seconds; GPT-4.1 in 7 runs, 23k tokens and 49 seconds; GPT-4.1-mini in 11
-runs, 29k tokens and 100 seconds. Same tools, same cache, different amount of flailing.
-
-**The engineer on an open model.** `vllm:qwen3-8b` is the same agent driven by Qwen3-8B,
-served by vLLM on a Union app with one L40s. Deploy it once (it prefetches the weights
-into object storage, then streams them to the GPU on every cold start, and scales to zero
-when idle):
-
-```bash
-flyte create secret VLLM_API_KEY --value <any string>     # vLLM's own --api-key
-python serve_model.py                                    # prints the endpoint
-```
-
-Then put `VLLM_BASE_URL=https://<app>/v1` in `.env` and add `vllm` to `FACTORY_PROVIDERS`.
-On a shared cluster, attendees point at the instructor's app and its key by name
-(`VLLM_API_KEY_SECRET_NAME=<prefix>_VLLM_API_KEY`); nobody needs their own L40s. The app
-scales to zero after fifteen idle minutes and takes two or three minutes to stream the
-weights back, so hit `/v1/models` once before a room does. If the
-open model clears the bar, the ML engineer is off the API too, and it is a reasonable
-place to start the whole workshop from. On our
-cluster Qwen3-8B met the request too: it fine-tuned three candidates, promoted the 1.5B at
-100% and 84 ms, and passed the deployment test, in 12 runs, 33k tokens and 173 seconds. It
-spent the whole budget and picked a model ten times the size of the encoder that also
-passed, which is exactly the kind of judgment the report lets you compare.
-
-Models are strings from `llm.py`: `anthropic:<model>`, `openai:<model>`, or
-`vllm:<model>@<url>/v1` for anything OpenAI-compatible you serve yourself.
-
-## Step 7: drift, by hand
+## Step 5: drift, and the fix by hand
 
 ```bash
 flyte run support_agent.py agent_handle_tickets --router oss --dataset v2      # see it
-flyte run step7_drift.py day_two                                          # fix it
+flyte run drift.py day_two                                          # fix it
 flyte run support_agent.py agent_handle_tickets --router oss --dataset v2 --labels_from v2   # see it fixed
 ```
 
@@ -585,14 +511,14 @@ and after the engineer promotes a v2 model the `data_request` series appears and
 "trained on" panel flips from v1 to v2. Detection happens in Union (the trigger in step
 8); seeing it happen is Grafana's job.
 
-## Step 8: the loop closes itself
+## Step 6: the loop closes itself
 
 ```bash
-flyte deploy step8_adaptive_loop.py observed_env            # registers the trigger, once
-flyte run step8_adaptive_loop.py publish_tickets --version v2
+flyte deploy adaptive_loop.py observed_env            # registers the trigger, once
+flyte run adaptive_loop.py publish_tickets --version v2
 ```
 
-Step 7 had you run the factory when the data changed. Here nobody does:
+Step 5 had you run the factory when the data changed. Here nobody does:
 
 ```
 publish_tickets ─► artifact support-tickets @v2
@@ -608,7 +534,7 @@ adapt ─► the engineer agent, told: "new tickets landed, check production fir
 ```
 
 **What you'll see.** Publishing the tickets is one short run. A minute later a run of
-`adapt` appears that you did not start. It is the same engineer task as steps 2 and 7,
+`adapt` appears that you did not start. It is the same engineer task as steps 2 and 5,
 with the same Agent tab and the same decision page, just started by the platform with a
 different situation. If the model in production still meets the bar on the new tickets,
 the decision page says **Kept in production** with its measured numbers and nothing else
@@ -635,6 +561,80 @@ the agent decides whether the model has to change, the platform validates and se
 whatever it decides, and the whole thing is recorded as artifacts and runs you can walk
 back through.
 
+## Step 7: bake off the engineer's brain (optional)
+
+```bash
+flyte run --local bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5"]'
+flyte run bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5", "vllm:qwen3-8b"]' --trials 2
+```
+
+**What you'll see.** One child action per (model, trial), in parallel. The report scores
+each: met the constraints, stayed in budget, runs spent, tokens, wall clock. In Grafana
+each agent model is its own agent version, so the conversations sit side by side and you
+can read how each one argued for the encoder over the 1.5B.
+
+**What just happened.** Same request, same tools, different `model` string. Because the
+evals and fine-tunes are cached, after the first agent the rest mostly hit cache, so the
+bake-off measures the agents rather than the GPUs. Promotion publishes artifacts but does
+not deploy here (`FACTORY_DEPLOY=0`). With a warm matrix, Claude Opus 5 met the
+request in 10 runs, 63k tokens and 99 seconds; Claude Haiku 4.5 met it in 10 runs, 53k
+tokens and 56 seconds; GPT-4.1 in 7 runs, 23k tokens and 49 seconds; GPT-4.1-mini in 11
+runs, 29k tokens and 100 seconds. Same tools, same cache, different amount of flailing.
+
+**The engineer on an open model.** `vllm:qwen3-8b` is the same agent driven by Qwen3-8B,
+served by vLLM on a Union app with one L40s. Deploy it once (it prefetches the weights
+into object storage, then streams them to the GPU on every cold start, and scales to zero
+when idle):
+
+```bash
+flyte create secret VLLM_API_KEY --value <any string>     # vLLM's own --api-key
+python serve_model.py                                    # prints the endpoint
+```
+
+Then put `VLLM_BASE_URL=https://<app>/v1` in `.env` and add `vllm` to `FACTORY_PROVIDERS`.
+On a shared cluster, attendees point at the instructor's app and its key by name
+(`VLLM_API_KEY_SECRET_NAME=<prefix>_VLLM_API_KEY`); nobody needs their own L40s. The app
+scales to zero after fifteen idle minutes and takes two or three minutes to stream the
+weights back, so hit `/v1/models` once before a room does. If the
+open model clears the bar, the ML engineer is off the API too, and it is a reasonable
+place to start the whole workshop from. On our
+cluster Qwen3-8B met the request too: it fine-tuned three candidates, promoted the 1.5B at
+100% and 84 ms, and passed the deployment test, in 12 runs, 33k tokens and 173 seconds. It
+spent the whole budget and picked a model ten times the size of the encoder that also
+passed, which is exactly the kind of judgment the report lets you compare.
+
+Models are strings from `llm.py`: `anthropic:<model>`, `openai:<model>`, or
+`vllm:<model>@<url>/v1` for anything OpenAI-compatible you serve yourself.
+
+## Step 8: crash it, and watch it resume (optional)
+
+```bash
+flyte run crash_resume.py resilient_engineer
+```
+
+**What you'll see.** The run fails once and succeeds on the retry. In the pod logs,
+attempt 0 prints three `live model call` lines and then the simulated crash; attempt 1
+prints four, for a seven-turn run. The missing three are the replay. In the run graph
+exactly one `think:model` is red: the crash itself, with the message `simulated worker
+crash after 3 model calls`; everything after it belongs to attempt 1. In the Flyte UI,
+attempt 1's `run_eval` and `fine_tune` children are cache hits: no T4 started twice, no
+model was trained twice. In Tempo, both attempts are one trace, and the replayed steps
+are marked `flyte.replayed`. A stock OpenTelemetry setup would show two unrelated traces
+with holes where the replays are.
+
+**What just happened.** The task dies after its third live model call on the first
+attempt, which for this agent is right after the fine-tune results come back. Flyte
+retries it in a fresh container. The turns it already paid for replay from their durable
+records; the tool calls it already made are cache hits; the decision is produced once.
+
+One detail that took a real run to find: a turn is looked up by a fingerprint of the
+whole transcript, message ids included, and LangGraph assigns a random id to any message
+that arrives without one. With random ids every attempt looks new and nothing replays.
+The graph gives its seed messages and tool results stable ids (`graph.py`). If you build
+your own graph on these nodes, do the same.
+
+---
+
 ## Every promotion validated, with no agent
 
 ```bash
@@ -655,7 +655,7 @@ to load the encoder as a chat model).
 ## A human in the loop
 
 ```bash
-FACTORY_APPROVAL=1 flyte run step2_engineer.py ml_engineer_agent
+FACTORY_APPROVAL=1 flyte run ml_engineer.py ml_engineer_agent
 ```
 
 With `FACTORY_APPROVAL=1`, `promote` creates a `flyte.new_condition` before it publishes
@@ -688,8 +688,13 @@ T4 latency bar is not applied to them.
 | `router_app.py` | The serving app that mounts the promoted artifact |
 | `report.py` | HTML for the task reports |
 | `utils/workshop.py` | `run(task)` and `show()` for the notebook: submit, print the URL, wait, return outputs |
-| `support_agent.py` | The support agent: route, draft a reply. Steps 0, 3 and 7 |
-| `step1_factory.py` … `step8_adaptive_loop.py` | The other steps |
+| `support_agent.py` | The support agent: route, draft a reply. Steps 0, 3 and 5 |
+| `model_factory.py` | Step 1: the factory as a pipeline |
+| `ml_engineer.py` | Step 2: the ML engineer agent |
+| `drift.py` | Step 5: the fix by hand (`day_two`) |
+| `adaptive_loop.py` | Step 6: `publish_tickets`, the trigger, and `adapt` |
+| `bakeoff.py` | Step 7: the bake-off |
+| `crash_resume.py` | Step 8: crash and resume |
 | `validate_on_promote.py` | The artifact trigger: validate every new `ticket-router` version |
 | `serve_model.py` | Optional: serve an open model on a Union vLLM app to drive the agent with |
 
@@ -697,13 +702,13 @@ T4 latency bar is not applied to them.
 |---|---|---|
 | the request | `--min_accuracy --max_latency_ms --candidates_to_screen --max_fine_tunes --budget` | 0.95, 150, 5, 3, 12 |
 | the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-opus-5` |
-| providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 6, or any step) | the agent's provider |
-| deploy on promote | `FACTORY_DEPLOY` | `1` (step 6 sets `0`) |
+| providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 7, or any step) | the agent's provider |
+| deploy on promote | `FACTORY_DEPLOY` | `1` (step 7 sets `0`) |
 | the router app's pod | sized to the promoted model: the encoder 2 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
 | human approval before deploy | `FACTORY_APPROVAL` | `0` |
 | your namespace on a shared cluster | `FACTORY_TAG` | none (app and artifacts are then `ticket-router`) |
-| a note for the engineer | `--situation "..."` on step 2 | none (steps 7 and 8 set their own) |
-| fresh build vs. keep production | `Request.fresh` | `True` for steps 1 to 6 ("ignore what is deployed, build one"); `False` for 7 and 8 ("check production first") |
+| a note for the engineer | `--situation "..."` on step 2 | none (steps 5 and 6 set their own) |
+| fresh build vs. keep production | `Request.fresh` | `True` for steps 1 to 4, 7 and 8 ("ignore what is deployed, build one"); `False` for 5 and 6 ("check production first") |
 | test the deployment training | `FACTORY_MAX_STEPS=2` | off |
 
 Timings on the demo cluster: cold agent run 4 to 5 minutes, warm 45 seconds, image

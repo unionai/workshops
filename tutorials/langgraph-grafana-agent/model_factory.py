@@ -11,9 +11,9 @@ step 1 gets those results back in a second, for everyone in the project.
 
 No API key. No Grafana.
 
-    flyte run --local step1_factory.py model_factory --n 20 --models '["smollm2-360m"]'   # laptop: one quick eval
-    flyte run step1_factory.py model_factory                                # cluster: full evals on T4s
-    flyte run step1_factory.py model_factory --fine_tune_too           # also fine-tune the 0.5B
+    flyte run --local model_factory.py model_factory --n 20 --models '["smollm2-360m"]'   # laptop: one quick eval
+    flyte run model_factory.py model_factory                                # cluster: full evals on T4s
+    flyte run model_factory.py model_factory --fine_tune_too           # also fine-tune the 0.5B
 
 """
 

@@ -1,4 +1,4 @@
-"""Step 5: the agent crashes after kicking off the fine-tunes, resumes, and nothing is redone.
+"""Step 8 (optional): the agent crashes after kicking off the fine-tunes, resumes, and nothing is redone.
 
 A durable run is not one process. This task dies after its third live model call on the
 first attempt, which for this agent is typically right after the fine-tune results come
@@ -22,8 +22,8 @@ and the agent simply runs.
 Replay depends on the transcript hashing the same way on every attempt; see the note on
 stable message ids in graph.py.
 
-    flyte run step5_crash_resume.py resilient_engineer
-    flyte run --local step5_crash_resume.py resilient_engineer     # runs once, no crash
+    flyte run crash_resume.py resilient_engineer
+    flyte run --local crash_resume.py resilient_engineer     # runs once, no crash
 """
 
 from __future__ import annotations

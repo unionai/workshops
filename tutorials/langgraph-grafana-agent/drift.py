@@ -1,4 +1,4 @@
-"""Step 7: day two. The support team adds a category, and the factory has to turn again.
+"""Step 5: day two. The support team adds a category, and the factory has to turn again.
 
 Dataset v2 adds `data_request` (GDPR-style tickets that used to be misfiled under
 `other`). The model in production has never seen the label: it cannot say it, so its
@@ -11,8 +11,8 @@ numbers on the card. Open the artifact in the Union UI: the Versions tab is the 
 of the router, and the Lineage tab leads from the app back through each promotion to the
 fine-tune that produced it.
 
-    flyte run step7_drift.py day_two
-    flyte run step7_drift.py day_two --min_accuracy 0.9
+    flyte run drift.py day_two
+    flyte run drift.py day_two --min_accuracy 0.9
 """
 
 from __future__ import annotations

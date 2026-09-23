@@ -8,7 +8,7 @@ Five environments, so each step only asks for the credentials it actually uses:
     agent_env     the ML engineer. Needs the key for AGENT_MODEL's provider. Step 2.
     observed_env  the engineer (and the support agent), observed by Grafana. Adds the
                   Grafana token when configured. Steps 0, 3, 4, 5, 7, 8.
-    factory_env   the bake-off. Keys for every provider in FACTORY_PROVIDERS. Step 6.
+    factory_env   the bake-off. Keys for every provider in FACTORY_PROVIDERS. Step 7.
 
 Grafana configuration is four plain values and one secret. The four go in `.env` (or the
 environment) and are baked into the task as `env_vars`; the token is a Flyte secret:
@@ -134,7 +134,7 @@ AGENT_MODEL = os.environ.get("AGENT_MODEL", "anthropic:claude-opus-5")
 AGENT_PROVIDER = AGENT_MODEL.split(":", 1)[0]
 
 # Every provider a task may be asked to use: the agent's own, plus FACTORY_PROVIDERS (the
-# bake-off in step 6, or a `model=` override on any step). Add vllm once serve_model.py is
+# bake-off in step 7, or a `model=` override on any step). Add vllm once serve_model.py is
 # deployed. A task only gets the secrets it lists, so a provider missing here fails on the
 # cluster with an authentication error even though the key is in .env.
 FACTORY_PROVIDERS = [p.strip() for p in os.environ.get("FACTORY_PROVIDERS", "").split(",") if p.strip()]
@@ -252,7 +252,7 @@ observed_env = flyte.TaskEnvironment(
     depends_on=[tools_env, gpu_env, cpu_env],
 )
 
-# The bake-off. Step 4: the same agent driven by several models, compared.
+# The bake-off. Step 7: the same agent driven by several models, compared.
 factory_env = flyte.TaskEnvironment(
     name=tagged("factory-bakeoff"),
     image=image,

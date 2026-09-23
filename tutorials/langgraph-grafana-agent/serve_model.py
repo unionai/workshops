@@ -1,7 +1,7 @@
 """Serve an open model on a Union app, OpenAI-compatible, so the ML engineer agent itself
 can run on a model you own.
 
-Step 6 points the same agent at this endpoint with `vllm:qwen3-8b`. vLLM speaks the
+Step 7 points the same agent at this endpoint with `vllm:qwen3-8b`. vLLM speaks the
 OpenAI chat-completions API, so the only thing that changes in the agent is the model
 string; LangChain's `ChatOpenAI` does the rest. One app serves the whole room; it is not
 namespaced per attendee.
@@ -87,5 +87,5 @@ if __name__ == "__main__":
     print(f"Console: {app.url}")
     print(f"Put this in .env:  VLLM_BASE_URL={app.endpoint}/v1")
     print(
-        f'Then:              flyte run step6_bakeoff.py bakeoff --models \'["anthropic:claude-opus-5", "vllm:{MODEL_ID}"]\''
+        f'Then:              flyte run bakeoff.py bakeoff --models \'["anthropic:claude-opus-5", "vllm:{MODEL_ID}"]\''
     )

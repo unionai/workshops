@@ -1,7 +1,7 @@
 """Every promotion gets validated, automatically, with no agent code.
 
 A Union artifact trigger runs `validate_router` whenever a new version of `ticket-router`
-lands, whoever published it: the agent in step 1, a person on the CLI, another team's
+lands, whoever published it: the agent in step 2, a person on the CLI, another team's
 pipeline. The task receives the new version as a plain `Dir`, evaluates it on the full
 held-out set on a T4, and writes a report. In a room of thirty people promoting, this
 fires thirty times, and the artifact's Triggers tab lists every run.
@@ -10,7 +10,7 @@ Deploy the trigger once:
 
     flyte deploy validate_on_promote.py validate_env
 
-Then promote anything (step 1, or by hand) and watch it fire. To run it on demand:
+Then promote anything (step 2, or by hand) and watch it fire. To run it on demand:
 
     flyte run validate_on_promote.py validate_router --model artifact:ticket-router
 """
