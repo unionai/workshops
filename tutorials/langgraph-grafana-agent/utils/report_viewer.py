@@ -3,7 +3,7 @@
 `flyte run --local ...` in a notebook cell runs in a subshell, so you get no run
 object back — just text. These helpers find the report it wrote and render it.
 
-    !flyte run --local step1_retrieve.py search --question "..."
+    !flyte run --local model_factory.py model_factory
 
     from utils.report_viewer import show_latest
     show_latest()

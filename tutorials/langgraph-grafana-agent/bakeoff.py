@@ -1,4 +1,4 @@
-"""Step 6: the bake-off. Which model should drive the factory?
+"""Step 7 (optional): the bake-off. Which model should drive the factory?
 
 The agent's own brain is a model too, and it is graded like any other: did it promote
 something that meets the request, and how many runs did it spend getting there? This
@@ -12,10 +12,10 @@ The evals and fine-tunes the agents ask for are cached, so after the first agent
 the others mostly hit cache, and the bake-off measures the agents, not the GPUs.
 Promotion publishes artifacts but does not deploy (FACTORY_DEPLOY=0 on this environment).
 
-    flyte run --local step6_bakeoff.py bakeoff \
+    flyte run --local bakeoff.py bakeoff \
         --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5"]'
 
-    flyte run step6_bakeoff.py bakeoff \
+    flyte run bakeoff.py bakeoff \
         --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5", "openai:gpt-4.1"]' --trials 2
 """
 

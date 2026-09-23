@@ -1,4 +1,4 @@
-"""Step 8: the loop closes itself. New tickets land, the factory turns, nobody clicks.
+"""Step 6: the loop closes itself. New tickets land, the factory turns, nobody clicks.
 
 Step 5 had you run the factory when the data changed. Here the platform does it:
 
@@ -16,8 +16,8 @@ Step 5 had you run the factory when the data changed. Here the platform does it:
 Two artifact triggers chained through the agent. The only human act is publishing the
 tickets. Deploy the trigger once, then publish a dataset version and watch:
 
-    flyte deploy step8_adaptive_loop.py observed_env          # registers the trigger
-    flyte run step8_adaptive_loop.py publish_tickets --version v2
+    flyte deploy adaptive_loop.py observed_env          # registers the trigger
+    flyte run adaptive_loop.py publish_tickets --version v2
 
 The `support-tickets` artifact is the event and the record: it carries the tickets as
 JSONL plus a manifest naming the dataset version, so the trigger run knows what it is
