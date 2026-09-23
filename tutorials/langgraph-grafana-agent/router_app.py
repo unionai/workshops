@@ -54,7 +54,9 @@ def serving_resources(base: str | None) -> flyte.Resources:
     """
     spec = CANDIDATES.get(base or "", {})
     if spec.get("kind") == "encoder":
-        cpu, memory, gpu = 1, "2Gi", ""
+        # 2 CPUs, not 1: the encoder is CPU-bound, and on one core it answers in ~600 ms
+        # instead of ~200. Memory is what small nodes lack, and 2Gi is plenty for 149M params.
+        cpu, memory, gpu = 2, "2Gi", ""
     elif _billions(spec.get("params", "9B")) <= 0.6:
         cpu, memory, gpu = 2, "4Gi", ""
     else:
@@ -78,6 +80,7 @@ def make_router_app(version: str | None = None, base: str | None = None) -> Fast
         image=ml_image,
         resources=serving_resources(base),
         scaling=flyte.app.Scaling(replicas=(0, 1), scaledown_after=1800),
+        timeouts=flyte.app.Timeouts(request=600),  # a classify may be waiting on the model load
         requires_auth=False,
         # The app reports what it serves: predictions per label, confidence, latency, as
         # OpenTelemetry metrics to the same Grafana stack. That is the drift dashboard.
@@ -137,48 +140,80 @@ def _metrics():
 
 
 @router_app.on_startup
-async def load_model():
+async def start_loading():
+    """Answer `/` at once and load the model in the background.
+
+    The platform's readiness check wants the port open promptly. A 1.5B model read from the
+    mounted artifact takes a while, and a pod that is still loading when the check gives up
+    is restarted, forever. So the pod becomes ready immediately, `/` reports `loaded`, and
+    `/classify` waits for the model. `promote` polls `/` until the pod reports the right
+    model *and* `loaded`.
+    """
+    import asyncio
     import json
     import pathlib
 
+    meta = pathlib.Path(MODEL_DIR) / "factory.json"
+    _state["factory"] = json.loads(meta.read_text()) if meta.exists() else {}
+    _state["dataset"] = _state["factory"].get("dataset", "v1")
+    _state["loaded"] = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _done(fut):
+        if fut.exception():
+            _state["load_error"] = repr(fut.exception())
+        _state["loaded"].set()
+
+    loop.run_in_executor(None, _load_model).add_done_callback(_done)
+
+
+def _load_model():
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     t0 = time.perf_counter()
-    meta = pathlib.Path(MODEL_DIR) / "factory.json"
-    factory = json.loads(meta.read_text()) if meta.exists() else {}
+    factory = _state["factory"]
     kind = factory.get("kind") or kind_of(MODEL_DIR)
     # A T4 if the pod has one (see serving_resources), else CPU in fp32.
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
     tok = AutoTokenizer.from_pretrained(MODEL_DIR)
+    # On a GPU, stream the weights straight there (device_map) instead of staging the full
+    # fp32 checkpoint in CPU memory and casting: for a 1.5B model that staging alone is
+    # 6GB plus the fp16 copy, and the pod gets OOM-killed before `.to(cuda)` ever runs.
+    load_kwargs = {"dtype": dtype, "device_map": device} if device == "cuda" else {"dtype": dtype}
     if kind == "encoder":
         from transformers import AutoModelForSequenceClassification
 
-        model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR, dtype=dtype)
+        model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR, **load_kwargs)
     else:
-        model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, dtype=dtype)
+        model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, **load_kwargs)
     model = model.to(device).eval()
     # The model knows the label set it was trained on; the prompt has to match it.
-    _state.update(
-        tok=tok,
-        model=model,
-        kind=kind,
-        device=device,
-        loaded_in=time.perf_counter() - t0,
-        dataset=factory.get("dataset", "v1"),
-        factory=factory,
-    )
+    _state.update(tok=tok, model=model, kind=kind, device=device, loaded_in=time.perf_counter() - t0)
 
 
 class Ticket(BaseModel):
     text: str
 
 
+async def _wait_loaded(timeout_s: float = 590) -> None:
+    import asyncio
+
+    event = _state.get("loaded")
+    if event is not None:
+        await asyncio.wait_for(event.wait(), timeout=timeout_s)
+    if _state.get("load_error"):
+        raise RuntimeError(f"model failed to load: {_state['load_error']}")
+
+
 @app.get("/")
 async def info() -> dict:
+    event = _state.get("loaded")
     return {
         "model_dir": MODEL_DIR,
+        "loaded": bool(event and event.is_set()) and not _state.get("load_error"),
+        "load_error": _state.get("load_error"),
         "loaded_in_s": _state.get("loaded_in"),
         "device": _state.get("device"),
         "factory": _state.get("factory"),
@@ -190,6 +225,7 @@ async def info() -> dict:
 async def classify(ticket: Ticket) -> dict:
     import torch
 
+    await _wait_loaded()
     tok, model = _state["tok"], _state["model"]
     version = _state.get("dataset", "v1")
     m = _metrics()

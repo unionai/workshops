@@ -429,12 +429,25 @@ async def _deploy(app_env, expect_base: str | None = None, timeout_s: int = 600)
         while time.time() < deadline:
             try:
                 info = httpx.get(endpoint + "/", timeout=30).json()
-                seen = seen + 1 if (info.get("factory") or {}).get("base") == expect_base else 0
+                if info.get("load_error"):
+                    raise RuntimeError(f"app {APP_NAME} started but its model failed to load: {info['load_error']}")
+                right_model = (info.get("factory") or {}).get("base") == expect_base and info.get("loaded", True)
+                seen = seen + 1 if right_model else 0
                 if seen >= 3:  # three consecutive answers from the new revision
                     break
+            except RuntimeError:
+                raise
             except Exception:  # noqa: BLE001
                 seen = 0
             await asyncio.sleep(5)
+        else:
+            # The previous revision is still the one answering: the new pod never came up
+            # (a GPU node that has to scale up, an image pull, a crash). Say so, rather than
+            # letting test_deployment measure the old model and call it a pass.
+            raise RuntimeError(
+                f"app {APP_NAME} still serves the previous model after {timeout_s}s; the new revision has not become "
+                "ready. Check the app's revision log in the Union UI, then rollback or fix and promote again"
+            )
     return handle.url
 
 
@@ -483,10 +496,11 @@ async def test_deployment(n: int = 12, dataset: str = "v1") -> str:
             elif len(misses) < 3:
                 misses.append({"ticket": t.text[:70], "expected": t.label, "got": body["label"]})
     acc = hits / len(tickets)
+    device = (httpx.get(endpoint + "/", timeout=30).json().get("device")) or "cpu"
     lat = sorted(latencies)[len(latencies) // 2]
     text = (
         f"live app {APP_NAME} at {endpoint}: {hits}/{len(tickets)} correct ({acc:.0%}) on dataset {dataset}, "
-        f"p50 {lat:.0f} ms per ticket on the app's {info.get('device', 'cpu')} pod (a CPU pod is not comparable to the T4 eval). "
+        f"p50 {lat:.0f} ms per ticket on the app's {device} pod{' (a CPU pod is not comparable to the T4 eval)' if device == 'cpu' else ''}. "
         f"The app is serving a model trained on dataset {info.get('dataset')} from {(info.get('factory') or {}).get('base', '?')}."
     )
     if misses:
