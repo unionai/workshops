@@ -201,7 +201,10 @@ async def agent_handle_tickets(
                 "router": router,
                 "labels": labels,
             }
-            out = await graph.ainvoke(state, config=config)
+            # One group per ticket in the run graph: the route step and the draft step sit
+            # together under the ticket, instead of sixty steps in one flat list.
+            with flyte.group(f"ticket {t.id}"):
+                out = await graph.ainvoke(state, config=config)
             return {
                 "ticket_id": t.id,
                 "text": t.text,

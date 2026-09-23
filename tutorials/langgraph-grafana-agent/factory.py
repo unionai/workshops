@@ -15,7 +15,7 @@ import os
 import statistics
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from tickets import DATASET_VERSIONS, as_chat, load_split, parse_label
@@ -97,6 +97,8 @@ class EvalResult:
     device: str
     per_category: dict[str, float]
     mistakes: list[dict]
+    # expected label -> predicted label -> count. The whole story behind per_category.
+    confusion: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def summary(self) -> str:
         cats = ", ".join(f"{c} {a:.0%}" for c, a in self.per_category.items())
@@ -204,6 +206,7 @@ def evaluate(model_ref: str, n: int = 120, version: str = "v1") -> EvalResult:
     tickets = test[: max(1, min(n, len(test)))]
     latencies, correct = [], 0
     per_cat_hits = {c: [0, 0] for c in categories}
+    confusion = {c: {p: 0 for p in categories} for c in categories}
     mistakes = []
     with torch.inference_mode():
         for i, t in enumerate(tickets):
@@ -234,6 +237,7 @@ def evaluate(model_ref: str, n: int = 120, version: str = "v1") -> EvalResult:
                 reply = tok.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
                 pred = parse_label(reply, categories)
             per_cat_hits[t.label][1] += 1
+            confusion.setdefault(t.label, {})[pred] = confusion.setdefault(t.label, {}).get(pred, 0) + 1
             if pred == t.label:
                 correct += 1
                 per_cat_hits[t.label][0] += 1
@@ -251,6 +255,7 @@ def evaluate(model_ref: str, n: int = 120, version: str = "v1") -> EvalResult:
         device=dev,
         per_category={c: (h / t if t else 0.0) for c, (h, t) in per_cat_hits.items()},
         mistakes=mistakes,
+        confusion=confusion,
     )
 
 

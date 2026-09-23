@@ -139,16 +139,16 @@ For scale, the models the support agent could route with today, zero-shot on the
 
 | router | zero-shot | p50 | per 1,000 routes | where it runs |
 |---|---|---|---|---|
-| Claude Opus 5 | 98.3% | 1.7 s | $3.81 | API |
-| GPT-4.1 | 97.5% | 634 ms | $0.28 | API |
-| Claude Haiku 4.5 | 95.8% | 606 ms | $0.89 | API |
-| Qwen3-8B (vLLM) | 94.2% | 386 ms | ~$0.20 | one L40s, ours |
-| modernbert-base, fine-tuned | 99.2% | 14 ms on a T4, 35 to 270 ms on the app's CPU pod | < $0.01 | 149M params, ours |
+| Claude Opus 5 | 98.3% | 1.7 s | \$3.81 | API |
+| GPT-4.1 | 97.5% | 634 ms | \$0.28 | API |
+| Claude Haiku 4.5 | 95.8% | 606 ms | \$0.89 | API |
+| Qwen3-8B (vLLM) | 94.2% | 386 ms | ~\$0.20 | one L40s, ours |
+| modernbert-base, fine-tuned | 99.2% | 14 ms on a T4, 35 to 270 ms on the app's CPU pod | < \$0.01 | 149M params, ours |
 
 The big API models clear the bar without training and the trained encoder beats all of
 them at a hundredth of the latency. Cost is routing only, at list prices, from the tokens
 each call used (the Claude calls carry the tool-use schema, GPT does not; Qwen is one
-L40s at one request at a time). At 100k tickets a month that is $381 on Opus, $89 on
+L40s at one request at a time). At 100k tickets a month that is \$381 on Opus, \$89 on
 Haiku, and under a dollar of CPU time on the encoder. Qwen3-8B, an open model with 50× the encoder's
 parameters, does not clear it zero-shot.
 
@@ -184,7 +184,7 @@ second person in the room trains nothing.
 In the Flyte UI the run graph shows the fan-out, and every action is named after what
 it did: `run_eval · qwen2.5-0.5b` four across, then `fine_tune · modernbert-base · 3ep`
 with its `train_model` child, then the rechecks, then `promote` with `publish_router`
-under it, then `test_deployment`. Each eval and training action has its own report (numbers,
+under it, then `test_deployment`. Each eval and training action has its own report (numbers, a confusion matrix,
 per-category accuracy, sample mistakes). The parent task's report is the decision page:
 what was promoted, pass/fail chips against the request, everything the agent measured in
 one table, the sequence of calls, and the rationale, plus an **Agent** tab with the turn
@@ -281,17 +281,18 @@ through three API models; the cost column is routing and replies together, at li
 
 | Support agent model | Routing accuracy | Route p50 | Per 1,000 tickets |
 |---|---|---|---|
-| Claude Opus 5 | 96.7% | 2.28 s | $10.28 |
-| Claude Haiku 4.5 (the default) | 96.7% | 596 ms | $1.18 |
-| GPT-4.1 | 93.3% | 594 ms | $0.64 |
+| Claude Opus 5 | 96.7% | 2.28 s | \$10.28 |
+| Claude Haiku 4.5 (the default) | 96.7% | 596 ms | \$1.18 |
+| GPT-4.1 | 93.3% | 594 ms | \$0.64 |
 
 Opus thinks before it routes, which is why it is four times slower than the others at
 the same accuracy. That is the "before." Pick the model with `--model`, or `AGENT_MODEL`.
 
 **What just happened.** `support_agent.py` is a two-node LangGraph graph, `route → draft`.
-Each model call is a `flyte.trace` step whose arguments are the ticket itself, so the run
-graph shows every ticket's text going in and the queue or reply coming out, and a batch
-that dies halfway replays what it already did.
+Each ticket is a `flyte.group` in the run graph holding two `flyte.trace` steps, route and
+draft, whose arguments are the ticket itself: the graph shows every ticket's text going in
+and the queue or reply coming out, thirty small agents side by side, and a batch that dies
+halfway replays what it already did.
 `--router llm` classifies with the API model; `--router oss` calls the `ticket-router`
 app instead, which does not exist yet. Building it is the request.
 
@@ -424,13 +425,15 @@ flyte run support_agent.py agent_handle_tickets --router oss
 
 **What you'll see.** The same thirty tickets, the same draft replies, but routing is now
 an HTTP call to the app the engineer deployed. The route p50 includes the HTTP round trip
-to a CPU pod; what is left of the cost is the reply drafts:
+to a CPU pod; what is left of the cost is the reply drafts. The cost column counts API
+tokens only: the router pod is not metered, and at 2 CPUs, a few cents an hour on any
+cloud, it adds about a tenth of a cent per thousand tickets:
 
 | Support agent model | Routing accuracy | Route p50 | Per 1,000 tickets |
 |---|---|---|---|
-| Claude Opus 5 | 96.7% → 100% | 2.28 s → 128 ms | $10.28 → $6.47 |
-| Claude Haiku 4.5 | 96.7% → 100% | 596 ms → 170 ms | $1.18 → $0.30 |
-| GPT-4.1 | 93.3% → 96.7% | 594 ms → 200 ms | $0.64 → $0.34 |
+| Claude Opus 5 | 96.7% → 100% | 2.28 s → 128 ms | \$10.28 → \$6.47 |
+| Claude Haiku 4.5 | 96.7% → 100% | 596 ms → 170 ms | \$1.18 → \$0.30 |
+| GPT-4.1 | 93.3% → 96.7% | 594 ms → 200 ms | \$0.64 → \$0.34 |
 
 Put this report next to step 0's. In Grafana it is a second conversation from the same
 agent, with the routing generations gone.
