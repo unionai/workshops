@@ -82,6 +82,44 @@ def dataset_html(train: list[Ticket], test: list[Ticket], sample: int = 12) -> s
     return "".join(parts)
 
 
+def confusion_html(model: str, confusion: dict[str, dict[str, int]]) -> str:
+    """Expected down the side, predicted across the top, counts in the cells.
+
+    The diagonal is what went right; everything off it is a misroute, shaded by how much
+    of that row it ate. A model that dumps everything into `other` is one dark column.
+    """
+    order = [c for v in DATASET_VERSIONS.values() for c in v]
+    labels = list(dict.fromkeys(c for c in order if c in confusion or any(c in row for row in confusion.values())))
+    labels += [c for row in confusion.values() for c in row if c not in labels]
+    rows_expected = [c for c in labels if c in confusion]
+    head = "".join(
+        f'<th class=num style="writing-mode:vertical-rl;transform:rotate(180deg);padding:6px 4px">{_esc(c)}</th>'
+        for c in labels
+    )
+    parts = [
+        f"<h3>Confusion matrix: {_esc(model)}</h3>",
+        '<div class="sub">expected down, predicted across; the diagonal is correct</div>',
+        f'<div style="overflow-x:auto"><table><tr><th>expected &#92; predicted</th>{head}</tr>',
+    ]
+    for exp in rows_expected:
+        row = confusion.get(exp, {})
+        total = sum(row.values()) or 1
+        cells = []
+        for pred in labels:
+            n = row.get(pred, 0)
+            share = n / total
+            if n == 0:
+                style = "color:#bbb"
+            elif pred == exp:
+                style = f"background:rgba(46,160,67,{0.15 + 0.55 * share:.2f});font-weight:600"
+            else:
+                style = f"background:rgba(220,60,60,{0.15 + 0.6 * share:.2f});font-weight:600"
+            cells.append(f'<td class=num style="{style}">{n}</td>')
+        parts.append(f"<tr><td><b>{_esc(exp)}</b> <span class=sub>({total})</span></td>{''.join(cells)}</tr>")
+    parts.append("</table></div>")
+    return "".join(parts)
+
+
 def evals_html(results: list[dict], request=None) -> str:
     """The eval matrix. `results` are `factory.EvalResult` as dicts."""
     # Columns: every category any result was scored on, so a v1 model scored on v2 shows its
@@ -126,6 +164,9 @@ def evals_html(results: list[dict], request=None) -> str:
             + "</tr>"
         )
     parts.append("</table>")
+    for r in results:
+        if r.get("confusion"):
+            parts.append(confusion_html(r["model"], r["confusion"]))
     for r in results:
         if r.get("mistakes"):
             parts.append(
