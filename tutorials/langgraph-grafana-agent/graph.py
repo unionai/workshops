@@ -39,6 +39,7 @@ from langchain_core.messages import (
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field, field_validator
 
+from grafana_evals import parse_eval, record_evals
 from llm import DEFAULT_MODEL, chat_model
 from tools import TOOLS
 
@@ -379,6 +380,20 @@ async def engineer(request: Request, model_spec: str | None = None, model=None) 
     final = json.loads(text)
     tokens_in = sum(u.get("input_tokens", 0) for u in usage.usage_metadata.values())
     tokens_out = sum(u.get("output_tokens", 0) for u in usage.usage_metadata.values())
+    evals = [
+        r
+        for c in final["turns"]["tool_log"]
+        if c["name"] in ("run_eval", "run_eval_cpu")
+        if (r := parse_eval(str(c["args"].get("model", "?")), c["output"]))
+    ]
+    experiment_url = record_evals(
+        evals,
+        min_accuracy=request.min_accuracy,
+        max_latency_ms=request.max_latency_ms,
+        dataset=request.dataset,
+        agent_model=model_spec or DEFAULT_MODEL,
+        name="ml-engineer-agent",
+    )
     return {
         "request": request.__dict__,
         "model": model_spec or DEFAULT_MODEL,
@@ -391,4 +406,5 @@ async def engineer(request: Request, model_spec: str | None = None, model=None) 
         },
         "tool_log": final["turns"]["tool_log"],
         "thoughts": final["turns"]["thoughts"],
+        "grafana_experiment": experiment_url,
     }

@@ -422,54 +422,80 @@ def _base_of(model: str) -> str | None:
     return None
 
 
-async def _deploy(app_env, expect_version: str, timeout_s: int = 600) -> str:
+async def _deploy(app_env, expect_version: str, timeout_s: int = 900) -> str:
     """Deploy the router app and wait, with a deadline, until the new revision is the one answering.
 
-    On a cluster `serve()` blocks until the app reports activated, and a revision that
-    crashes on startup never does; a deadline turns that into a tool error the agent can
-    read (and roll back from). And "activated" is not "switched over": the previous pod
-    keeps answering during the rollout, so we also poll `/` until it reports the artifact
-    version we just published, which is what test_deployment will measure.
+    `serve()` returns as soon as the app is active, and an app with an older revision
+    already running is active before the new pod has even scheduled. So we watch the
+    app's own status until the revision we just created reports ready (or fails, which
+    surfaces "Insufficient memory" and friends as a tool error the agent can read), and
+    only then ask `/` to confirm the artifact version. Polling `/` during the rollout
+    would wake the old pod on a scaled-to-zero app and slow the new one down.
     """
     import httpx
+    from flyte.remote import App
+    from google.protobuf.json_format import MessageToDict
 
     await flyte.init_in_cluster.aio()
+    try:
+        before = App.get(APP_NAME).revision
+    except Exception:  # noqa: BLE001  (first deploy: no app yet)
+        before = 0
     try:
         handle = await asyncio.wait_for(
             flyte.with_servecontext(interactive_mode=False).serve.aio(app_env), timeout=timeout_s
         )
     except asyncio.TimeoutError:
         raise RuntimeError(
-            f"app {APP_NAME} was deployed but did not become healthy within {timeout_s}s; "
+            f"app {APP_NAME} was deployed but did not become active within {timeout_s}s; "
             "check its logs in the Union UI, then rollback to the previous version or fix and promote again"
         ) from None
-    from flyte.remote import App
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        conds = MessageToDict(App.get(APP_NAME).pb2).get("status", {}).get("conditions", [])
+        new = [c for c in conds if int(c.get("revision", 0)) > before]
+        if new:
+            latest_id = max(new, key=lambda c: int(c.get("revision", 0))).get("deploymentId")
+            mine = [c for c in new if c.get("deploymentId") == latest_id]
+            failed = [
+                c
+                for c in mine
+                if c.get("deploymentStatus") == "DEPLOYMENT_STATUS_FAILED" or "RevisionFailed" in c.get("message", "")
+            ]
+            if failed:
+                raise RuntimeError(
+                    f"app {APP_NAME} could not deploy {expect_version}: {failed[-1].get('message', '')[:400]}"
+                )
+            if any(
+                c.get("deploymentStatus") == "DEPLOYMENT_STATUS_ACTIVE" and c.get("substate") in ("RUNNING", "")
+                for c in mine
+            ):
+                break
+        await asyncio.sleep(10)
+    else:
+        raise RuntimeError(
+            f"app {APP_NAME} did not finish rolling out {expect_version} within {timeout_s}s. "
+            "Check the app's revision log in the Union UI, then rollback or fix and promote again"
+        )
 
     endpoint = App.get(APP_NAME).endpoint
-    deadline, seen = time.time() + timeout_s, 0
-    while time.time() < deadline:
+    for _ in range(12):  # the new revision is ready; confirm it is the one answering
         try:
-            info = httpx.get(endpoint + "/", timeout=30).json()
+            info = httpx.get(endpoint + "/", timeout=60).json()
             if info.get("load_error"):
                 raise RuntimeError(f"app {APP_NAME} started but its model failed to load: {info['load_error']}")
-            right_version = info.get("version") == expect_version and info.get("loaded", True)
-            seen = seen + 1 if right_version else 0
-            if seen >= 3:  # three consecutive answers from the new revision
-                break
+            if info.get("version") == expect_version and info.get("loaded", True):
+                return handle.url
         except RuntimeError:
             raise
         except Exception:  # noqa: BLE001
-            seen = 0
-        await asyncio.sleep(5)
-    else:
-        # The previous revision is still the one answering: the new pod never came up
-        # (a GPU node that has to scale up, an image pull, a crash). Say so, rather than
-        # letting test_deployment measure the old model and call it a pass.
-        raise RuntimeError(
-            f"app {APP_NAME} still serves the previous version after {timeout_s}s; {expect_version} has not become "
-            "ready. Check the app's revision log in the Union UI, then rollback or fix and promote again"
-        )
-    return handle.url
+            pass
+        await asyncio.sleep(10)
+    raise RuntimeError(
+        f"app {APP_NAME} rolled out but still answers as a different version than {expect_version}; "
+        "check the app in the Union UI, then rollback or promote again"
+    )
 
 
 async def _wait_for_app(timeout_s: int = 300) -> str:

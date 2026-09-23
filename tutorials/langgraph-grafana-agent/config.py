@@ -89,6 +89,14 @@ if GRAFANA_HOST:
     GRAFANA_LINKS = (
         GrafanaAgentObservability(host=GRAFANA_HOST),
         GrafanaTrace(host=GRAFANA_HOST, datasource_uid=TEMPO_DATASOURCE_UID),
+        # The evals of this run, as a scored experiment (see grafana_evals.py). Same id as the
+        # conversation, so the class's run-name templating lands on the right page.
+        GrafanaAgentObservability(
+            host=GRAFANA_HOST,
+            name="Grafana evals",
+            conversation_path="experiments/runs/{conversation_id}",
+            return_to=False,
+        ),
     )
 else:
     GRAFANA_LINKS = ()
@@ -228,7 +236,8 @@ tools_env = flyte.TaskEnvironment(
     name=tagged("factory-tools"),
     image=image,
     resources=flyte.Resources(cpu=1, memory="2Gi"),
-    env_vars={**PROPAGATED, "FACTORY_DEPLOY": "1" if FACTORY_DEPLOY else "0"},
+    env_vars={**PROPAGATED, **GRAFANA_ENV_VARS, "FACTORY_DEPLOY": "1" if FACTORY_DEPLOY else "0"},
+    secrets=[*GRAFANA_SECRETS],  # step 1's evals go to Grafana too (grafana_evals.py)
     depends_on=[gpu_env, cpu_env],
 )
 

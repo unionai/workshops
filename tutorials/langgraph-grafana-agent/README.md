@@ -444,19 +444,25 @@ first piece of this agent running on an open model.
 
 ## Step 4: watch both agents in Grafana
 
-Nothing to run. Open the step 2 run in the Flyte UI: the task carries two links.
+Nothing to run. Open the step 2 run in the Flyte UI: the task carries three links.
 **Grafana Agent Observability** opens this run's conversation: each `think` is a
 generation with its prompt, answer, model, tokens and cost; each tool call is a step; the
-header has the totals. **Grafana trace** opens the same run in Tempo, where a `fine_tune`
-span is a minute and a half wide and the three of them overlap. The support agent's runs
-from steps 0 and 3 are conversations too, side by side: one full of routing generations,
-one without them.
+header has the totals. **Grafana evals** opens the same run as an experiment: one trial
+per `run_eval` the engineer asked for, scored on accuracy and p50 latency against the
+request's bar, pass or fail, with the same id as the conversation so the numbers and the
+reasoning about them are one click apart. **Grafana trace** opens the run in Tempo,
+where a `fine_tune` span is a minute and a half wide and the three of them overlap. The
+support agent's runs from steps 0 and 3 are conversations too, side by side: one full of
+routing generations, one without them. Step 1's evals are an experiment as well, without
+an agent behind them.
 
 **What just happened.** Nothing changed in either agent. `config.py` calls
 `flyteplugins.agento11y.init()` once, at module scope, when the Grafana values are
 present. The plugin binds the Flyte run name as the conversation id and the task name as
 the agent name, and hands the graph a callback handler through the adapter. That is the
-whole integration.
+whole integration for conversations. The experiments are `grafana_evals.py`: at the end
+of a run it reads the eval results back out of the tool log and exports them through the
+SDK's experiments API, one trial per eval, and never fails a run over it.
 
 `init()` has to be at module scope: the Flyte task span opens before the task body runs,
 and the binding that names the run as the conversation rides on that span.
@@ -689,6 +695,7 @@ T4 latency bar is not applied to them.
 | `graph.py` | The LangGraph graph, the request, the typed decision, the parallel tool node |
 | `llm.py` | The agent's model, from a string |
 | `config.py` | Environments, images, secrets, the Grafana `init()` |
+| `grafana_evals.py` | Every eval of a run as a scored experiment in Grafana Agent Observability |
 | `router_app.py` | The serving app that mounts the promoted artifact |
 | `report.py` | HTML for the task reports |
 | `utils/workshop.py` | `run(task)` and `show()` for the notebook: submit, print the URL, wait, return outputs |
