@@ -156,6 +156,8 @@ async def start_loading():
     meta = pathlib.Path(MODEL_DIR) / "factory.json"
     _state["factory"] = json.loads(meta.read_text()) if meta.exists() else {}
     _state["dataset"] = _state["factory"].get("dataset", "v1")
+    router = pathlib.Path(MODEL_DIR) / "router.json"  # written by publish_router: which artifact version this is
+    _state["version"] = json.loads(router.read_text()).get("version") if router.exists() else None
     _state["loaded"] = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -212,6 +214,7 @@ async def info() -> dict:
     event = _state.get("loaded")
     return {
         "model_dir": MODEL_DIR,
+        "version": _state.get("version"),
         "loaded": bool(event and event.is_set()) and not _state.get("load_error"),
         "load_error": _state.get("load_error"),
         "loaded_in_s": _state.get("loaded_in"),

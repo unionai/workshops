@@ -1,7 +1,7 @@
 """The model factory: one string picks which model the agent thinks with.
 
-    anthropic:claude-opus-5                 Claude, via the Anthropic API (the default)
-    anthropic:claude-haiku-4-5              a cheaper Claude, for the bake-off in step 7
+    anthropic:claude-haiku-4-5              Claude, via the Anthropic API (the default: fast and cheap)
+    anthropic:claude-opus-5                 the big Claude, for the bake-off in step 7
     openai:gpt-4.1                          OpenAI, if you have a key
     vllm:qwen3-8b                           a model you serve yourself on a Union app
     vllm:qwen3-8b@https://host/v1           same, with the endpoint spelled out
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "anthropic:claude-opus-5")
+DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "anthropic:claude-haiku-4-5")
 
 
 def chat_model(spec: str | None = None):

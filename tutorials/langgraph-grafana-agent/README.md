@@ -137,16 +137,19 @@ measure once it is trained. The agent has to get there from numbers it produces 
 For scale, the models the support agent could route with today, zero-shot on the same
 120 tickets (p50 here is a network call from the cluster, not a T4):
 
-| router | zero-shot | p50 | where it runs |
-|---|---|---|---|
-| Claude Opus 5 | 98.3% | 1.7 s | API |
-| GPT-4.1 | 97.5% | 634 ms | API |
-| Claude Haiku 4.5 | 95.8% | 606 ms | API |
-| Qwen3-8B (vLLM) | 94.2% | 386 ms | one L40s, ours |
-| modernbert-base, fine-tuned | 99.2% | 14 ms on a T4, 232 ms on the app's CPU pod | 149M params, ours |
+| router | zero-shot | p50 | per 1,000 routes | where it runs |
+|---|---|---|---|---|
+| Claude Opus 5 | 98.3% | 1.7 s | $3.81 | API |
+| GPT-4.1 | 97.5% | 634 ms | $0.28 | API |
+| Claude Haiku 4.5 | 95.8% | 606 ms | $0.89 | API |
+| Qwen3-8B (vLLM) | 94.2% | 386 ms | ~$0.20 | one L40s, ours |
+| modernbert-base, fine-tuned | 99.2% | 14 ms on a T4, 35 to 270 ms on the app's CPU pod | < $0.01 | 149M params, ours |
 
 The big API models clear the bar without training and the trained encoder beats all of
-them at a hundredth of the latency. Qwen3-8B, an open model with 50× the encoder's
+them at a hundredth of the latency. Cost is routing only, at list prices, from the tokens
+each call used (the Claude calls carry the tool-use schema, GPT does not; Qwen is one
+L40s at one request at a time). At 100k tickets a month that is $381 on Opus, $89 on
+Haiku, and under a dollar of CPU time on the encoder. Qwen3-8B, an open model with 50× the encoder's
 parameters, does not clear it zero-shot.
 
 ### What a run looks like
@@ -174,9 +177,9 @@ This is the shape of a cold run, with the tool calls the agent actually made:
  5:20  decision  typed Decision, checked against the request
 ```
 
-Eight model turns, thirteen tool calls, about 13k tokens. Warm, with the eval matrix and
-the fine-tunes cached, the same run is under a minute, which is what the second person in
-the room sees.
+Eight model turns, thirteen tool calls, about 13k tokens. The evals run every time (a
+minute each, in parallel), so every run shows its work; the fine-tunes are cached, so the
+second person in the room trains nothing.
 
 In the Flyte UI the run graph shows the fan-out, and every action is named after what
 it did: `run_eval · qwen2.5-0.5b` four across, then `fine_tune · modernbert-base · 3ep`
@@ -222,8 +225,8 @@ dies with an empty `ConnectError`; the notebook already passes the flag.
 
 On a shared cluster, set `FACTORY_TAG=<your handle>` in `.env`. It namespaces what has
 to be yours: the serving app (`ticket-router-<tag>`), the production artifacts, and the
-environments that carry triggers. The GPU eval and training tasks stay shared, so the eval
-matrix is cached once for the whole room. Prefix your secret names the same way
+environments that carry triggers. The GPU training task stays shared, so each fine-tune
+is trained once for the whole room. Prefix your secret names the same way
 (`FLYTE_SECRET_PREFIX=SAGE_` makes the code ask for `SAGE_ANTHROPIC_API_KEY`), or point at
 an existing secret by name (`OPENAI_API_KEY_SECRET_NAME=my-openai-key`).
 
@@ -278,8 +281,8 @@ through three API models; the cost column is routing and replies together, at li
 
 | Support agent model | Routing accuracy | Route p50 | Per 1,000 tickets |
 |---|---|---|---|
-| Claude Opus 5 (the default) | 96.7% | 2.28 s | $10.28 |
-| Claude Haiku 4.5 | 96.7% | 596 ms | $1.18 |
+| Claude Opus 5 | 96.7% | 2.28 s | $10.28 |
+| Claude Haiku 4.5 (the default) | 96.7% | 596 ms | $1.18 |
 | GPT-4.1 | 93.3% | 594 ms | $0.64 |
 
 Opus thinks before it routes, which is why it is four times slower than the others at
@@ -332,8 +335,9 @@ last `run_eval` fetched that artifact by reference. Open the run in the Flyte UI
 can see the evals side by side.
 
 **Look at** the numbers before moving on. They are the ground the agent will stand on.
-And they are cached: when the engineer asks for the same eval in step 2, it gets the answer
-in a second, and so does everyone else in the project.
+The evals are not cached, so the engineer measures again in step 2 and you see it happen;
+the fine-tune is, so when the engineer asks for the same one it gets the weights back in
+seconds, and so does everyone else in the project.
 
 ---
 
@@ -440,19 +444,25 @@ first piece of this agent running on an open model.
 
 ## Step 4: watch both agents in Grafana
 
-Nothing to run. Open the step 2 run in the Flyte UI: the task carries two links.
+Nothing to run. Open the step 2 run in the Flyte UI: the task carries three links.
 **Grafana Agent Observability** opens this run's conversation: each `think` is a
 generation with its prompt, answer, model, tokens and cost; each tool call is a step; the
-header has the totals. **Grafana trace** opens the same run in Tempo, where a `fine_tune`
-span is a minute and a half wide and the three of them overlap. The support agent's runs
-from steps 0 and 3 are conversations too, side by side: one full of routing generations,
-one without them.
+header has the totals. **Grafana evals** opens the same run as an experiment: one trial
+per `run_eval` the engineer asked for, scored on accuracy and p50 latency against the
+request's bar, pass or fail, with the same id as the conversation so the numbers and the
+reasoning about them are one click apart. **Grafana trace** opens the run in Tempo,
+where a `fine_tune` span is a minute and a half wide and the three of them overlap. The
+support agent's runs from steps 0 and 3 are conversations too, side by side: one full of
+routing generations, one without them. Step 1's evals are an experiment as well, without
+an agent behind them.
 
 **What just happened.** Nothing changed in either agent. `config.py` calls
 `flyteplugins.agento11y.init()` once, at module scope, when the Grafana values are
 present. The plugin binds the Flyte run name as the conversation id and the task name as
 the agent name, and hands the graph a callback handler through the adapter. That is the
-whole integration.
+whole integration for conversations. The experiments are `grafana_evals.py`: at the end
+of a run it reads the eval results back out of the tool log and exports them through the
+SDK's experiments API, one trial per eval, and never fails a run over it.
 
 `init()` has to be at module scope: the Flyte task span opens before the task body runs,
 and the binding that names the run as the conversation rides on that span.
@@ -573,13 +583,13 @@ each: met the constraints, stayed in budget, runs spent, tokens, wall clock. In 
 each agent model is its own agent version, so the conversations sit side by side and you
 can read how each one argued for the encoder over the 1.5B.
 
-**What just happened.** Same request, same tools, different `model` string. Because the
-evals and fine-tunes are cached, after the first agent the rest mostly hit cache, so the
-bake-off measures the agents rather than the GPUs. Promotion publishes artifacts but does
-not deploy here (`FACTORY_DEPLOY=0`). With a warm matrix, Claude Opus 5 met the
-request in 10 runs, 63k tokens and 99 seconds; Claude Haiku 4.5 met it in 10 runs, 53k
-tokens and 56 seconds; GPT-4.1 in 7 runs, 23k tokens and 49 seconds; GPT-4.1-mini in 11
-runs, 29k tokens and 100 seconds. Same tools, same cache, different amount of flailing.
+**What just happened.** Same request, same tools, different `model` string. The
+fine-tunes are cached, so after the first agent the others train nothing, and the score
+that matters is runs spent and tokens rather than wall clock. Promotion publishes
+artifacts but does not deploy here (`FACTORY_DEPLOY=0`). On our cluster Claude Opus 5 met
+the request in 10 runs and 63k tokens; Claude Haiku 4.5 in 10 runs and 53k tokens;
+GPT-4.1 in 7 runs and 23k tokens; GPT-4.1-mini in 11 runs and 29k tokens. Same tools,
+different amount of flailing.
 
 **The engineer on an open model.** `vllm:qwen3-8b` is the same agent driven by Qwen3-8B,
 served by vLLM on a Union app with one L40s. Deploy it once (it prefetches the weights
@@ -617,7 +627,7 @@ attempt 0 prints three `live model call` lines and then the simulated crash; att
 prints four, for a seven-turn run. The missing three are the replay. In the run graph
 exactly one `think:model` is red: the crash itself, with the message `simulated worker
 crash after 3 model calls`; everything after it belongs to attempt 1. In the Flyte UI,
-attempt 1's `run_eval` and `fine_tune` children are cache hits: no T4 started twice, no
+attempt 1's `run_eval` and `fine_tune` children are already done: no T4 started twice, no
 model was trained twice. In Tempo, both attempts are one trace, and the replayed steps
 are marked `flyte.replayed`. A stock OpenTelemetry setup would show two unrelated traces
 with holes where the replays are.
@@ -625,7 +635,7 @@ with holes where the replays are.
 **What just happened.** The task dies after its third live model call on the first
 attempt, which for this agent is right after the fine-tune results come back. Flyte
 retries it in a fresh container. The turns it already paid for replay from their durable
-records; the tool calls it already made are cache hits; the decision is produced once.
+records; the tool calls it already made are not redone; the decision is produced once.
 
 One detail that took a real run to find: a turn is looked up by a fingerprint of the
 whole transcript, message ids included, and LangGraph assigns a random id to any message
@@ -685,6 +695,7 @@ T4 latency bar is not applied to them.
 | `graph.py` | The LangGraph graph, the request, the typed decision, the parallel tool node |
 | `llm.py` | The agent's model, from a string |
 | `config.py` | Environments, images, secrets, the Grafana `init()` |
+| `grafana_evals.py` | Every eval of a run as a scored experiment in Grafana Agent Observability |
 | `router_app.py` | The serving app that mounts the promoted artifact |
 | `report.py` | HTML for the task reports |
 | `utils/workshop.py` | `run(task)` and `show()` for the notebook: submit, print the URL, wait, return outputs |
@@ -701,7 +712,7 @@ T4 latency bar is not applied to them.
 | Knob | Where | Default |
 |---|---|---|
 | the request | `--min_accuracy --max_latency_ms --candidates_to_screen --max_fine_tunes --budget` | 0.95, 150, 5, 3, 12 |
-| the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-opus-5` |
+| the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-haiku-4-5` |
 | providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 7, or any step) | the agent's provider |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 7 sets `0`) |
 | the router app's pod | sized to the promoted model: the encoder 2 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
@@ -726,10 +737,13 @@ build 6 minutes once, one LoRA epoch on the 0.5B 42 seconds.
 - `fine_tune` is a CPU-side wrapper around `train_model`, the GPU task that produces the
   artifact. A tool has to return text for the model, and an artifact has to be a task's
   top-level output, so they are two tasks. `promote` and `publish_router` split the same way.
-- `cache="auto"` versions a task by its own source. Editing `tickets.py` does not
-  invalidate cached evals; edit `tools.py` (or bump `n`) if you need fresh numbers. And
-  never cache on an unversioned reference: `run_eval("artifact:ticket-router")` returns
-  whatever "latest" meant the first time it ran. Resolve the version first, as `adapt` does.
+- Only `train_model` is cached. Evals used to be, and a cache hit returns the number
+  without the report, which in a room reads as "nothing happened". `cache="auto"` keys on
+  the inputs and the task's own source, not on files the task reads, so `fine_tune` passes
+  a fingerprint of the training tickets as an input: edit the data and the fine-tune is
+  retrained, edit anything else and it is not. And never cache on an unversioned
+  reference: a task given `artifact:ticket-router` would return whatever "latest" meant
+  the first time it ran. Resolve the version first, as `adapt` does.
 - A child task's spec is serialized where it is launched. For the agent's tools that is
   inside the agent's pod, which has no `.env`, so every knob `config.py` reads from the
   environment is also passed to every environment as `env_vars` (`PROPAGATED`). Forget

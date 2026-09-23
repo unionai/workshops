@@ -33,7 +33,7 @@ from graph import engineer as _engineer
 from llm import short_name
 from report import bakeoff_html, score
 
-DEFAULT_MODELS = ["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5"]
+DEFAULT_MODELS = ["anthropic:claude-haiku-4-5", "anthropic:claude-opus-5"]
 
 
 @factory_env.task(retries=2, links=GRAFANA_LINKS)

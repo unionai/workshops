@@ -9,7 +9,7 @@ from __future__ import annotations
 import html
 import re
 
-from tickets import CATEGORIES, Ticket
+from tickets import CATEGORIES, DATASET_VERSIONS, Ticket
 
 SERIES = "#2a78d6"
 INK = "#0b0b0b"
@@ -84,6 +84,11 @@ def dataset_html(train: list[Ticket], test: list[Ticket], sample: int = 12) -> s
 
 def evals_html(results: list[dict], request=None) -> str:
     """The eval matrix. `results` are `factory.EvalResult` as dicts."""
+    # Columns: every category any result was scored on, so a v1 model scored on v2 shows its
+    # 0% on data_request instead of hiding it.
+    cats = list(
+        dict.fromkeys(c for v in DATASET_VERSIONS.values() for c in v if any(c in r["per_category"] for r in results))
+    )
     parts = [CSS, '<div class="rp"><h2>Eval results</h2>']
     if request is not None:
         parts.append(
@@ -112,14 +117,12 @@ def evals_html(results: list[dict], request=None) -> str:
         )
     parts.append("</table>")
     parts.append(
-        "<h3>Per category</h3><table><tr><th>model</th>"
-        + "".join(f"<th class=num>{c}</th>" for c in CATEGORIES)
-        + "</tr>"
+        "<h3>Per category</h3><table><tr><th>model</th>" + "".join(f"<th class=num>{c}</th>" for c in cats) + "</tr>"
     )
     for r in results:
         parts.append(
             f"<tr><td>{_esc(r['model'])}</td>"
-            + "".join(f"<td class=num>{r['per_category'].get(c, 0):.0%}</td>" for c in CATEGORIES)
+            + "".join(f"<td class=num>{r['per_category'].get(c, 0):.0%}</td>" for c in cats)
             + "</tr>"
         )
     parts.append("</table>")
@@ -230,7 +233,9 @@ def score(result: dict) -> dict:
     """Did the engineer do the job? Checked against the request it was given and its own numbers."""
     d, req, s = result["decision"], result["request"], result["stats"]
     promote_ok = "promote" in s.get("tools_used", []) and "promote" not in s.get("tools_failed", [])
-    deployment_tested = "test_deployment" in s.get("tools_used", []) and "test_deployment" not in s.get("tools_failed", [])
+    deployment_tested = "test_deployment" in s.get("tools_used", []) and "test_deployment" not in s.get(
+        "tools_failed", []
+    )
     accuracy_ok = d["accuracy"] >= req["min_accuracy"]
     latency_ok = d["latency_p50_ms"] <= req["max_latency_ms"]
     action = d.get("action") or ("promoted" if d.get("promoted") else "gave_up")

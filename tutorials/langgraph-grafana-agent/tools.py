@@ -14,10 +14,13 @@ artifact and deploys the serving app that mounts it; `test_deployment` calls the
 `rollback` redeploys an earlier version. Lineage in the Union UI then runs from the
 training run, through the artifact, to the running app.
 
-Two tools are cached (`cache="auto"`): the same eval of the same model is the same
-answer, so a second call by anyone in the project returns in a second instead of a
-minute. In a room full of people running the same agent, the first person pays for each
-cell of the eval matrix and everyone else hits cache.
+Evals are not cached, on purpose: a cache hit returns the number but not the report, and
+in a workshop a run whose children all say "cached" looks like a run where nothing
+happened. An eval is a minute on a T4 and they run in parallel, so every run shows its
+work. Training is cached (`cache="auto"` on `train_model`): the same fine-tune of the same
+model is the same weights, and a room full of people should not each train the same
+three models. The cache key is the inputs plus a fingerprint of the training tickets, so
+editing the data retrains; editing an unrelated file does not.
 """
 
 from __future__ import annotations
@@ -175,14 +178,14 @@ async def _eval(model: str, n: int, dataset: str) -> str:
 
 
 @tool
-@gpu_env.task(cache="auto", retries=2, report=True)
+@gpu_env.task(retries=2, report=True)
 async def run_eval(model: str, n: int = 120, dataset: str = "v1") -> str:
     """Classify n held-out tickets with a model (a candidate id, or an artifact:<name>@<version> reference) on a dataset version, on a T4, and measure accuracy plus per-ticket latency. This is the latency the request is judged on."""
     return await _eval(model, n, dataset)
 
 
 @tool
-@cpu_env.task(cache="auto", retries=2, report=True)
+@cpu_env.task(retries=2, report=True)
 async def run_eval_cpu(model: str, n: int = 120, dataset: str = "v1") -> str:
     """Same as run_eval but on a small CPU node: no GPU needed, cheaper, slower per ticket. Sensible for models marked small enough for CPU. Latency here is CPU latency, not the T4 number the request asks for."""
     return await _eval(model, n, dataset)
@@ -253,9 +256,23 @@ async def _train(model: str, epochs: float, lora_r: int, dataset: str) -> tuple[
     return artifacts.new(weights, meta), summary
 
 
+def _data_fingerprint(dataset: str) -> str:
+    """A hash of the training tickets, so the cache key covers the data and not only its name."""
+    import hashlib
+
+    rows = sorted(f"{t.text}\t{t.label}" for t in load_split("train", dataset))
+    return hashlib.sha256("\n".join(rows).encode()).hexdigest()[:16]
+
+
 @gpu_env.task(cache="auto", retries=1, produces_artifacts=True, report=True)
-async def train_model(model: str, epochs: float = 1.0, lora_r: int = 16, dataset: str = "v1") -> tuple[Dir, str]:
-    """Train a candidate on a T4 and register the weights as a model artifact."""
+async def train_model(
+    model: str, epochs: float = 1.0, lora_r: int = 16, dataset: str = "v1", data: str = ""
+) -> tuple[Dir, str]:
+    """Train a candidate on a T4 and register the weights as a model artifact.
+
+    `data` is the fingerprint of the training tickets. It is not used here; it is an input
+    so that it is part of the cache key: edit the tickets and the fine-tune is retrained.
+    """
     return await _train(model, epochs, lora_r, dataset)
 
 
@@ -267,7 +284,7 @@ async def fine_tune(model: str, epochs: float = 1.0, lora_r: int = 16, dataset: 
     named = dataclasses.replace(
         train_model, short_name=f"train_model · {short} · {epochs:g}ep" + (f" · {dataset}" if dataset != "v1" else "")
     )
-    weights, summary = await named(model, epochs, lora_r, dataset)
+    weights, summary = await named(model, epochs, lora_r, dataset, _data_fingerprint(dataset))
     if _is_local():
         # No artifact registry off-cluster: the model is a local directory, pass its path.
         return summary.split("\nartifact:")[0] + f"\nnew model reference: {weights.path}"
@@ -289,8 +306,13 @@ async def publish_router(
     view leads back to this promotion, and from there to the fine-tune that made the weights.
     """
     local = await _materialize(model)
-    weights = await Dir.from_local(local)
     version = f"v{int(time.time())}"
+    # The app reads this at startup and reports it on `/`, so a deploy can wait for *this*
+    # version to be the one answering. The base model name is not enough: a retrain of
+    # the same base looks identical to the pod it is replacing.
+    with open(os.path.join(local, "router.json"), "w") as f:
+        json.dump({"version": version, "model": model, "dataset": dataset}, f)
+    weights = await Dir.from_local(local)
     entry = {
         "model": model,
         "accuracy": accuracy,
@@ -386,7 +408,7 @@ async def promote(model: str, accuracy: float, latency_p50_ms: float, reason: st
     # 2. Ship it: deploy the app that mounts the latest ticket-router artifact.
     if not FACTORY_DEPLOY:
         return text + " Deployment skipped (FACTORY_DEPLOY=0)."
-    url = await _deploy(make_router_app(published, base=_base_of(model)), expect_base=_base_of(model))
+    url = await _deploy(make_router_app(published, base=_base_of(model)), expect_version=published)
     return text + f" Deployed the {APP_NAME} app: {url}. Run test_deployment to check it before you finish."
 
 
@@ -400,55 +422,80 @@ def _base_of(model: str) -> str | None:
     return None
 
 
-async def _deploy(app_env, expect_base: str | None = None, timeout_s: int = 600) -> str:
+async def _deploy(app_env, expect_version: str, timeout_s: int = 900) -> str:
     """Deploy the router app and wait, with a deadline, until the new revision is the one answering.
 
-    On a cluster `serve()` blocks until the app reports activated, and a revision that
-    crashes on startup never does; a deadline turns that into a tool error the agent can
-    read (and roll back from). And "activated" is not "switched over": the previous pod
-    keeps answering during the rollout, so we also poll `/` until it reports the model we
-    just deployed (by base name), which is what test_deployment will measure.
+    `serve()` returns as soon as the app is active, and an app with an older revision
+    already running is active before the new pod has even scheduled. So we watch the
+    app's own status until the revision we just created reports ready (or fails, which
+    surfaces "Insufficient memory" and friends as a tool error the agent can read), and
+    only then ask `/` to confirm the artifact version. Polling `/` during the rollout
+    would wake the old pod on a scaled-to-zero app and slow the new one down.
     """
     import httpx
+    from flyte.remote import App
+    from google.protobuf.json_format import MessageToDict
 
     await flyte.init_in_cluster.aio()
+    try:
+        before = App.get(APP_NAME).revision
+    except Exception:  # noqa: BLE001  (first deploy: no app yet)
+        before = 0
     try:
         handle = await asyncio.wait_for(
             flyte.with_servecontext(interactive_mode=False).serve.aio(app_env), timeout=timeout_s
         )
     except asyncio.TimeoutError:
         raise RuntimeError(
-            f"app {APP_NAME} was deployed but did not become healthy within {timeout_s}s; "
+            f"app {APP_NAME} was deployed but did not become active within {timeout_s}s; "
             "check its logs in the Union UI, then rollback to the previous version or fix and promote again"
         ) from None
-    if expect_base:
-        from flyte.remote import App
 
-        endpoint = App.get(APP_NAME).endpoint
-        deadline, seen = time.time() + timeout_s, 0
-        while time.time() < deadline:
-            try:
-                info = httpx.get(endpoint + "/", timeout=30).json()
-                if info.get("load_error"):
-                    raise RuntimeError(f"app {APP_NAME} started but its model failed to load: {info['load_error']}")
-                right_model = (info.get("factory") or {}).get("base") == expect_base and info.get("loaded", True)
-                seen = seen + 1 if right_model else 0
-                if seen >= 3:  # three consecutive answers from the new revision
-                    break
-            except RuntimeError:
-                raise
-            except Exception:  # noqa: BLE001
-                seen = 0
-            await asyncio.sleep(5)
-        else:
-            # The previous revision is still the one answering: the new pod never came up
-            # (a GPU node that has to scale up, an image pull, a crash). Say so, rather than
-            # letting test_deployment measure the old model and call it a pass.
-            raise RuntimeError(
-                f"app {APP_NAME} still serves the previous model after {timeout_s}s; the new revision has not become "
-                "ready. Check the app's revision log in the Union UI, then rollback or fix and promote again"
-            )
-    return handle.url
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        conds = MessageToDict(App.get(APP_NAME).pb2).get("status", {}).get("conditions", [])
+        new = [c for c in conds if int(c.get("revision", 0)) > before]
+        if new:
+            latest_id = max(new, key=lambda c: int(c.get("revision", 0))).get("deploymentId")
+            mine = [c for c in new if c.get("deploymentId") == latest_id]
+            failed = [
+                c
+                for c in mine
+                if c.get("deploymentStatus") == "DEPLOYMENT_STATUS_FAILED" or "RevisionFailed" in c.get("message", "")
+            ]
+            if failed:
+                raise RuntimeError(
+                    f"app {APP_NAME} could not deploy {expect_version}: {failed[-1].get('message', '')[:400]}"
+                )
+            if any(
+                c.get("deploymentStatus") == "DEPLOYMENT_STATUS_ACTIVE" and c.get("substate") in ("RUNNING", "")
+                for c in mine
+            ):
+                break
+        await asyncio.sleep(10)
+    else:
+        raise RuntimeError(
+            f"app {APP_NAME} did not finish rolling out {expect_version} within {timeout_s}s. "
+            "Check the app's revision log in the Union UI, then rollback or fix and promote again"
+        )
+
+    endpoint = App.get(APP_NAME).endpoint
+    for _ in range(12):  # the new revision is ready; confirm it is the one answering
+        try:
+            info = httpx.get(endpoint + "/", timeout=60).json()
+            if info.get("load_error"):
+                raise RuntimeError(f"app {APP_NAME} started but its model failed to load: {info['load_error']}")
+            if info.get("version") == expect_version and info.get("loaded", True):
+                return handle.url
+        except RuntimeError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(10)
+    raise RuntimeError(
+        f"app {APP_NAME} rolled out but still answers as a different version than {expect_version}; "
+        "check the app in the Union UI, then rollback or promote again"
+    )
 
 
 async def _wait_for_app(timeout_s: int = 300) -> str:
@@ -501,7 +548,8 @@ async def test_deployment(n: int = 12, dataset: str = "v1") -> str:
     text = (
         f"live app {APP_NAME} at {endpoint}: {hits}/{len(tickets)} correct ({acc:.0%}) on dataset {dataset}, "
         f"p50 {lat:.0f} ms per ticket on the app's {device} pod{' (a CPU pod is not comparable to the T4 eval)' if device == 'cpu' else ''}. "
-        f"The app is serving a model trained on dataset {info.get('dataset')} from {(info.get('factory') or {}).get('base', '?')}."
+        f"The app is serving {ROUTER_ARTIFACT}@{info.get('version', '?')}: "
+        f"{(info.get('factory') or {}).get('base', '?')} trained on dataset {info.get('dataset')}."
     )
     if misses:
         text += "\nmisses: " + json.dumps(misses)
@@ -541,7 +589,7 @@ async def rollback(version: str) -> str:
         f"Rollback to {ROUTER_ARTIFACT}@{version} (source {attrs.get('source_model', '?')}).",
         attrs.get("dataset", "v1"),
     )
-    url = await _deploy(make_router_app(published, base=_base_of(source)), expect_base=_base_of(source))
+    url = await _deploy(make_router_app(published, base=_base_of(source)), expect_version=published)
     return (
         f"rolled back: republished {ROUTER_ARTIFACT}@{version} as {ROUTER_ARTIFACT}@{published}; "
         f"{APP_NAME} now serves it: {url}. Run test_deployment to confirm."

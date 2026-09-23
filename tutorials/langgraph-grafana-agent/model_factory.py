@@ -27,8 +27,10 @@ import flyte
 import flyte.report
 from flyteplugins.agents.core import coerce_tool_args
 
-from config import tools_env
+from config import GRAFANA_LINKS, tools_env
+from grafana_evals import record_evals
 from graph import Request, action_label
+from llm import DEFAULT_MODEL
 from report import dataset_html, evals_html
 from tickets import load_split
 from tools import fine_tune, list_candidates, run_eval, run_eval_cpu
@@ -65,7 +67,7 @@ def _parse(summary: str, model: str, n: int) -> dict:
     }
 
 
-@tools_env.task(report=True)
+@tools_env.task(report=True, links=GRAFANA_LINKS)
 async def model_factory(
     n: int = 120,
     models: list[str] = ["smollm2-360m", "qwen2.5-0.5b", "qwen2.5-1.5b"],
@@ -99,6 +101,16 @@ async def model_factory(
             transcript.append(f"$ run_eval(model={path!r}, n={n})\n{out}\n")
             results.append(_parse(out, f"{tune_model} (fine-tuned, {epochs:g} ep)", n))
 
+    url = record_evals(
+        results,
+        min_accuracy=0.95,
+        max_latency_ms=150.0,
+        dataset=dataset,
+        agent_model=DEFAULT_MODEL,
+        name="model-factory",
+    )
+    if url:
+        transcript.append(f"evals in Grafana: {url}\n")
     await flyte.report.replace.aio(evals_html(results, Request(dataset=dataset)))
     await flyte.report.flush.aio()
     text = "\n".join(transcript)
