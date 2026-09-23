@@ -306,8 +306,13 @@ async def publish_router(
     view leads back to this promotion, and from there to the fine-tune that made the weights.
     """
     local = await _materialize(model)
-    weights = await Dir.from_local(local)
     version = f"v{int(time.time())}"
+    # The app reads this at startup and reports it on `/`, so a deploy can wait for *this*
+    # version to be the one answering. The base model name is not enough: a retrain of
+    # the same base looks identical to the pod it is replacing.
+    with open(os.path.join(local, "router.json"), "w") as f:
+        json.dump({"version": version, "model": model, "dataset": dataset}, f)
+    weights = await Dir.from_local(local)
     entry = {
         "model": model,
         "accuracy": accuracy,
@@ -403,7 +408,7 @@ async def promote(model: str, accuracy: float, latency_p50_ms: float, reason: st
     # 2. Ship it: deploy the app that mounts the latest ticket-router artifact.
     if not FACTORY_DEPLOY:
         return text + " Deployment skipped (FACTORY_DEPLOY=0)."
-    url = await _deploy(make_router_app(published, base=_base_of(model)), expect_base=_base_of(model))
+    url = await _deploy(make_router_app(published, base=_base_of(model)), expect_version=published)
     return text + f" Deployed the {APP_NAME} app: {url}. Run test_deployment to check it before you finish."
 
 
@@ -417,14 +422,14 @@ def _base_of(model: str) -> str | None:
     return None
 
 
-async def _deploy(app_env, expect_base: str | None = None, timeout_s: int = 600) -> str:
+async def _deploy(app_env, expect_version: str, timeout_s: int = 600) -> str:
     """Deploy the router app and wait, with a deadline, until the new revision is the one answering.
 
     On a cluster `serve()` blocks until the app reports activated, and a revision that
     crashes on startup never does; a deadline turns that into a tool error the agent can
     read (and roll back from). And "activated" is not "switched over": the previous pod
-    keeps answering during the rollout, so we also poll `/` until it reports the model we
-    just deployed (by base name), which is what test_deployment will measure.
+    keeps answering during the rollout, so we also poll `/` until it reports the artifact
+    version we just published, which is what test_deployment will measure.
     """
     import httpx
 
@@ -438,33 +443,32 @@ async def _deploy(app_env, expect_base: str | None = None, timeout_s: int = 600)
             f"app {APP_NAME} was deployed but did not become healthy within {timeout_s}s; "
             "check its logs in the Union UI, then rollback to the previous version or fix and promote again"
         ) from None
-    if expect_base:
-        from flyte.remote import App
+    from flyte.remote import App
 
-        endpoint = App.get(APP_NAME).endpoint
-        deadline, seen = time.time() + timeout_s, 0
-        while time.time() < deadline:
-            try:
-                info = httpx.get(endpoint + "/", timeout=30).json()
-                if info.get("load_error"):
-                    raise RuntimeError(f"app {APP_NAME} started but its model failed to load: {info['load_error']}")
-                right_model = (info.get("factory") or {}).get("base") == expect_base and info.get("loaded", True)
-                seen = seen + 1 if right_model else 0
-                if seen >= 3:  # three consecutive answers from the new revision
-                    break
-            except RuntimeError:
-                raise
-            except Exception:  # noqa: BLE001
-                seen = 0
-            await asyncio.sleep(5)
-        else:
-            # The previous revision is still the one answering: the new pod never came up
-            # (a GPU node that has to scale up, an image pull, a crash). Say so, rather than
-            # letting test_deployment measure the old model and call it a pass.
-            raise RuntimeError(
-                f"app {APP_NAME} still serves the previous model after {timeout_s}s; the new revision has not become "
-                "ready. Check the app's revision log in the Union UI, then rollback or fix and promote again"
-            )
+    endpoint = App.get(APP_NAME).endpoint
+    deadline, seen = time.time() + timeout_s, 0
+    while time.time() < deadline:
+        try:
+            info = httpx.get(endpoint + "/", timeout=30).json()
+            if info.get("load_error"):
+                raise RuntimeError(f"app {APP_NAME} started but its model failed to load: {info['load_error']}")
+            right_version = info.get("version") == expect_version and info.get("loaded", True)
+            seen = seen + 1 if right_version else 0
+            if seen >= 3:  # three consecutive answers from the new revision
+                break
+        except RuntimeError:
+            raise
+        except Exception:  # noqa: BLE001
+            seen = 0
+        await asyncio.sleep(5)
+    else:
+        # The previous revision is still the one answering: the new pod never came up
+        # (a GPU node that has to scale up, an image pull, a crash). Say so, rather than
+        # letting test_deployment measure the old model and call it a pass.
+        raise RuntimeError(
+            f"app {APP_NAME} still serves the previous version after {timeout_s}s; {expect_version} has not become "
+            "ready. Check the app's revision log in the Union UI, then rollback or fix and promote again"
+        )
     return handle.url
 
 
@@ -518,7 +522,8 @@ async def test_deployment(n: int = 12, dataset: str = "v1") -> str:
     text = (
         f"live app {APP_NAME} at {endpoint}: {hits}/{len(tickets)} correct ({acc:.0%}) on dataset {dataset}, "
         f"p50 {lat:.0f} ms per ticket on the app's {device} pod{' (a CPU pod is not comparable to the T4 eval)' if device == 'cpu' else ''}. "
-        f"The app is serving a model trained on dataset {info.get('dataset')} from {(info.get('factory') or {}).get('base', '?')}."
+        f"The app is serving {ROUTER_ARTIFACT}@{info.get('version', '?')}: "
+        f"{(info.get('factory') or {}).get('base', '?')} trained on dataset {info.get('dataset')}."
     )
     if misses:
         text += "\nmisses: " + json.dumps(misses)
@@ -558,7 +563,7 @@ async def rollback(version: str) -> str:
         f"Rollback to {ROUTER_ARTIFACT}@{version} (source {attrs.get('source_model', '?')}).",
         attrs.get("dataset", "v1"),
     )
-    url = await _deploy(make_router_app(published, base=_base_of(source)), expect_base=_base_of(source))
+    url = await _deploy(make_router_app(published, base=_base_of(source)), expect_version=published)
     return (
         f"rolled back: republished {ROUTER_ARTIFACT}@{version} as {ROUTER_ARTIFACT}@{published}; "
         f"{APP_NAME} now serves it: {url}. Run test_deployment to confirm."

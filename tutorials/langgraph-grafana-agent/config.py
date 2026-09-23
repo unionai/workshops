@@ -130,7 +130,7 @@ PROVIDER_SECRETS = {
 GRAFANA_SECRETS = [secret("GRAFANA_TOKEN", "GRAFANA_TOKEN")] if GRAFANA_CONFIGURED else []
 VLLM_SECRET = PROVIDER_SECRETS["vllm"]
 
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "anthropic:claude-opus-5")
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "anthropic:claude-haiku-4-5")
 AGENT_PROVIDER = AGENT_MODEL.split(":", 1)[0]
 
 # Every provider a task may be asked to use: the agent's own, plus FACTORY_PROVIDERS (the

@@ -137,16 +137,19 @@ measure once it is trained. The agent has to get there from numbers it produces 
 For scale, the models the support agent could route with today, zero-shot on the same
 120 tickets (p50 here is a network call from the cluster, not a T4):
 
-| router | zero-shot | p50 | where it runs |
-|---|---|---|---|
-| Claude Opus 5 | 98.3% | 1.7 s | API |
-| GPT-4.1 | 97.5% | 634 ms | API |
-| Claude Haiku 4.5 | 95.8% | 606 ms | API |
-| Qwen3-8B (vLLM) | 94.2% | 386 ms | one L40s, ours |
-| modernbert-base, fine-tuned | 99.2% | 14 ms on a T4, 232 ms on the app's CPU pod | 149M params, ours |
+| router | zero-shot | p50 | per 1,000 routes | where it runs |
+|---|---|---|---|---|
+| Claude Opus 5 | 98.3% | 1.7 s | $3.81 | API |
+| GPT-4.1 | 97.5% | 634 ms | $0.28 | API |
+| Claude Haiku 4.5 | 95.8% | 606 ms | $0.89 | API |
+| Qwen3-8B (vLLM) | 94.2% | 386 ms | ~$0.20 | one L40s, ours |
+| modernbert-base, fine-tuned | 99.2% | 14 ms on a T4, 35 to 270 ms on the app's CPU pod | < $0.01 | 149M params, ours |
 
 The big API models clear the bar without training and the trained encoder beats all of
-them at a hundredth of the latency. Qwen3-8B, an open model with 50× the encoder's
+them at a hundredth of the latency. Cost is routing only, at list prices, from the tokens
+each call used (the Claude calls carry the tool-use schema, GPT does not; Qwen is one
+L40s at one request at a time). At 100k tickets a month that is $381 on Opus, $89 on
+Haiku, and under a dollar of CPU time on the encoder. Qwen3-8B, an open model with 50× the encoder's
 parameters, does not clear it zero-shot.
 
 ### What a run looks like
@@ -278,8 +281,8 @@ through three API models; the cost column is routing and replies together, at li
 
 | Support agent model | Routing accuracy | Route p50 | Per 1,000 tickets |
 |---|---|---|---|
-| Claude Opus 5 (the default) | 96.7% | 2.28 s | $10.28 |
-| Claude Haiku 4.5 | 96.7% | 596 ms | $1.18 |
+| Claude Opus 5 | 96.7% | 2.28 s | $10.28 |
+| Claude Haiku 4.5 (the default) | 96.7% | 596 ms | $1.18 |
 | GPT-4.1 | 93.3% | 594 ms | $0.64 |
 
 Opus thinks before it routes, which is why it is four times slower than the others at
@@ -702,7 +705,7 @@ T4 latency bar is not applied to them.
 | Knob | Where | Default |
 |---|---|---|
 | the request | `--min_accuracy --max_latency_ms --candidates_to_screen --max_fine_tunes --budget` | 0.95, 150, 5, 3, 12 |
-| the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-opus-5` |
+| the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-haiku-4-5` |
 | providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 7, or any step) | the agent's provider |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 7 sets `0`) |
 | the router app's pod | sized to the promoted model: the encoder 2 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
