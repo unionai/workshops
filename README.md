@@ -5,30 +5,32 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 
 ---
 
-## 👉 Tonight's workshop: RAG and Agentic Memory
+## 👉 Tonight's workshop: Fine-tuning open models with agents
 
-### **[tutorials/rag-agent-memory/](tutorials/rag-agent-memory/)**
+### **[tutorials/langgraph-grafana-agent/](tutorials/langgraph-grafana-agent/)**
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/rag-agent-memory/rag-agent-memory-tutorial.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/langgraph-grafana-agent/langgraph-grafana-agent-tutorial.ipynb)
 
-Build a document index, search it with no model at all, answer from it with citations,
-*see* the embedding space in 2D, then point the same vector store the other way so an
-agent writes its own memories into it.
+*Durable, self-healing agents on Union, with end-to-end observability in Grafana.*
 
-**Runs entirely in Colab.** No cluster, no vector database to host, and no API key needed
-until step 2 (step 3's chart doesn't need one either). Or run it locally with
-`flyte run --local`, or on a Flyte cluster where every step becomes a container.
+A support agent in production routes tickets with an API call. An ML engineer agent,
+built with LangGraph, gets the request to replace that call with a model we own: it
+evaluates open candidates on T4s in parallel, fine-tunes the ones worth it, promotes the
+winner as a Union artifact, deploys it, and tests the live app. Then the data drifts, a
+trigger notices, and the engineer retrains without anyone clicking. Every run is a
+conversation and a scored experiment in Grafana Agent Observability.
 
-Along the way: what tokenization actually does to your text, why chunking is a
-hyperparameter rather than plumbing, where dense retrieval quietly fails, and how to
-swap Chroma for Qdrant without touching a single step.
+**Runs from Colab against a Union cluster** we give you access to; the GPU work happens
+there. Bring a laptop and a browser. A Claude or OpenAI key only if you want to drive the
+agent yourself.
 
 ```bash
 git clone https://github.com/unionai/workshops
-cd workshops/tutorials/rag-agent-memory
+cd workshops/tutorials/langgraph-grafana-agent
 uv venv .venv --python 3.11 && source .venv/bin/activate
 uv pip install -r requirements.txt
-flyte run --local step0_index.py index
+flyte create config --endpoint <your-endpoint> --project flytesnacks --domain development --builder remote
+flyte run support_agent.py agent_handle_tickets --router llm
 ```
 
 ---
@@ -37,6 +39,8 @@ flyte run --local step0_index.py index
 
 | Example | Description |
 |---------|-------------|
+| [Model Factory Agent + Grafana](tutorials/langgraph-grafana-agent/) | A LangGraph agent plays ML engineer: evaluates five candidates on T4s in parallel, fine-tunes the right ones (and discovers a 149M encoder beats the chat models), promotes it as a Union artifact, deploys it, tests the live app, and turns the factory again when the data changes; Grafana Agent Observability watches every turn |
+| [SkyRL SQL Agent](tutorials/skyrl-sql-agent/) | Multi-turn RL against a real database — write one SkyRL-Gym environment, then drive it with no model, with a 0.5B, with Claude, or with SkyRL's distributed trainer; GRPO rollouts fan out as durable Flyte tasks |
 | [RAG and Agentic Memory](tutorials/rag-agent-memory/) | One vector store, pointed two directions — build a RAG index, watch retrieval work with no model involved, visualize the embedding space, then let an agent write its own memories back into it |
 | [Code Mode — NYC Taxi analyst](tutorials/code-mode-analysis/) | Claude writes one program, the Monty sandbox runs it, and its loops fan out into durable parallel tasks over real NYC taxi data |
 | [LangGraph Research Pipeline](tutorials/langgraph_agent_research/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks |
@@ -66,6 +70,7 @@ flyte run --local step0_index.py index
 
 | Tutorial | Description |
 |----------|-------------|
+| [Model Factory Agent + Grafana](tutorials/langgraph-grafana-agent/) | The agent runs the model factory: parallel T4 evals, fine-tunes, artifact promotion, a deployed router app it tests and can roll back, an artifact trigger that validates every promotion, a human approval gate, and a day-two retrain; observed in Grafana Agent Observability, with a crash-and-resume that trains nothing twice |
 | [Code Mode — NYC Taxi analyst](tutorials/code-mode-analysis/) | The agent writes a *program* instead of calling tools one at a time. It runs in the Monty sandbox, and a loop in the generated code becomes a fan-out of durable, parallel query tasks over 3M+ real taxi trips |
 | [RAG and Agentic Memory](tutorials/rag-agent-memory/) | One Chroma store, pointed two directions — build a document index, search it with no model, answer from it with citations, see the embedding space in 2D, then let an agent write its own memories back into it |
 | [LangGraph Research Pipeline](tutorials/langgraph_agent_research/) | Research agent pipeline — LangGraph orchestrates planning and quality gates, Flyte fans out parallel researcher tasks via Tavily web search |
