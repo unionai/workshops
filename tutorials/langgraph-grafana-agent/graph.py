@@ -37,7 +37,7 @@ from langchain_core.messages import (
     messages_to_dict,
 )
 from langgraph.graph import END, START, MessagesState, StateGraph
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from llm import DEFAULT_MODEL, chat_model
 from tools import TOOLS
@@ -150,8 +150,17 @@ class Decision(BaseModel):
     )
     rolled_back: bool = False
     runs_spent: int = Field(description="Number of run_eval and fine_tune calls made.")
-    evidence: list[str] = Field(description="Two to five concrete numbers from the tool results.")
+    evidence: list[str] = Field(description="Two to five concrete numbers from the tool results, as a list of strings.")
     rationale: str = Field(description="One paragraph the support team would understand.")
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _evidence_as_list(cls, v):
+        # The model sometimes hands back one string instead of a list. That is not worth
+        # failing the run (and retrying the whole task) over: split it into lines.
+        if isinstance(v, str):
+            return [line.strip(" -*\t") for line in v.splitlines() if line.strip()] or [v]
+        return v
 
 
 class FactoryState(MessagesState):
@@ -280,7 +289,7 @@ def build_graph(model, tools=TOOLS, max_tool_rounds: int = MAX_TOOL_ROUNDS):
 
     pending: dict = {}
 
-    async def _decide(turns: int, tool_calls: int, transcript: str) -> str:
+    async def _decide(deciding_from: str, turns: int, tool_calls: int, transcript: str) -> str:
         return json.dumps((await structured.ainvoke(pending["messages"])).model_dump())
 
     _decide.__name__ = _decide.__qualname__ = "decision:model"
@@ -291,8 +300,12 @@ def build_graph(model, tools=TOOLS, max_tool_rounds: int = MAX_TOOL_ROUNDS):
         pending["messages"] = messages
         turns = sum(isinstance(m, AIMessage) for m in messages)
         calls = sum(isinstance(m, ToolMessage) for m in messages)
+        # What the model is deciding from: its own last words, and the last tool result.
+        last_ai = next((m.text for m in reversed(messages) if isinstance(m, AIMessage) and m.text), "")
+        last_tool = next((f"{m.name}: {m.text}" for m in reversed(messages) if isinstance(m, ToolMessage)), "")
+        deciding_from = (last_ai + "\n" + last_tool).strip()[:400]
         key = fingerprint({"node": "decision", "messages": messages_to_dict(messages)})
-        data = json.loads(await decide(turns, calls, key))
+        data = json.loads(await decide(deciding_from, turns, calls, key))
         tool_msgs = [m for m in state["messages"] if isinstance(m, ToolMessage)]
         # The args of every call, keyed by call id, so the report can show what was asked.
         call_args = {
