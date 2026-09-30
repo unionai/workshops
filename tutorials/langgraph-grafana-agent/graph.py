@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import flyte
+import flyte.report
 from flyteplugins.agents.core import ReportTimeline, abbrev, coerce_tool_args, fingerprint
 from flyteplugins.agents.langgraph import run_agent
 from langchain_core.messages import (
@@ -39,8 +40,10 @@ from langchain_core.messages import (
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field, field_validator
 
+from config import GPU_TOOLS, gpu_slots
 from grafana_evals import parse_eval, record_evals
 from llm import DEFAULT_MODEL, chat_model
+from report import graph_html
 from tools import TOOLS
 
 MAX_TOOL_ROUNDS = 10
@@ -240,6 +243,7 @@ def parallel_tool_node(tools, *, name: str = "tools"):
     """
     registry = {getattr(t, "name", getattr(t, "__name__", "")): t for t in tools}
     timeline = ReportTimeline()
+    slots = gpu_slots()  # per-run cap on GPU tools in flight, if FACTORY_MAX_PARALLEL_GPU is set
 
     async def _one(call: dict) -> str:
         selected = registry.get(call["name"])
@@ -248,6 +252,10 @@ def parallel_tool_node(tools, *, name: str = "tools"):
         args = call.get("args") or {}
         try:
             task = getattr(selected, "flyte_task", None)
+            if task is not None and slots is not None and call["name"] in GPU_TOOLS:
+                async with slots:
+                    named = dataclasses.replace(task, short_name=action_label(call["name"], args))
+                    return str(await named.aio(**coerce_tool_args(task, args)))
             if task is not None:
                 # Name the action after what it is doing, so the run graph reads
                 # "run_eval · qwen2.5-0.5b" rather than five identical run_eval rows.
@@ -364,6 +372,14 @@ async def engineer(request: Request, model_spec: str | None = None, model=None) 
 
     model = model or chat_model(model_spec)
     graph = build_graph(model)
+
+    # A tab with the graph drawn, up before the first turn so people can look at it while
+    # the run works. Outside a task (local runs) the report is a no-op.
+    try:
+        flyte.report.get_tab("Graph").replace(graph_html(graph))
+        await flyte.report.flush.aio()
+    except Exception as exc:  # noqa: BLE001
+        print(f"graph tab skipped: {type(exc).__name__}: {exc}")
     usage = UsageMetadataCallbackHandler()
     # Stable ids for the same reason as in parallel_tool_node: the transcript must hash the
     # same way on every attempt for the recorded model turns to replay.

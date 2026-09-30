@@ -27,13 +27,15 @@ import flyte
 import flyte.report
 from flyteplugins.agents.core import coerce_tool_args
 
-from config import GRAFANA_LINKS, tools_env
+from config import GPU_TOOLS, GRAFANA_LINKS, MAX_PARALLEL_GPU, gpu_slots, tools_env
 from grafana_evals import record_evals
 from graph import Request, action_label
 from llm import DEFAULT_MODEL
 from report import dataset_html, evals_html
 from tickets import load_split
 from tools import fine_tune, list_candidates, run_eval, run_eval_cpu
+
+_SLOTS = None
 
 
 async def _call(tool, **args) -> str:
@@ -43,6 +45,11 @@ async def _call(tool, **args) -> str:
     """
     task = tool.flyte_task
     named = dataclasses.replace(task, short_name=action_label(tool.name, args))
+    if tool.name in GPU_TOOLS and MAX_PARALLEL_GPU > 0:  # the same GPU cap the engineer's tool node applies
+        global _SLOTS
+        _SLOTS = _SLOTS or gpu_slots()
+        async with _SLOTS:
+            return str(await named.aio(**coerce_tool_args(task, args)))
     return str(await named.aio(**coerce_tool_args(task, args)))
 
 
