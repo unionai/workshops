@@ -120,6 +120,36 @@ def confusion_html(model: str, confusion: dict[str, dict[str, int]]) -> str:
     return "".join(parts)
 
 
+def graph_html(compiled) -> str:
+    """The engineer's LangGraph graph, drawn, for a tab of its own in the run report.
+
+    Rendered to PNG through LangGraph's Mermaid exporter (which calls mermaid.ink); if
+    that is unreachable from the pod, the Mermaid source is shown instead so the tab is
+    never empty.
+    """
+    import base64
+
+    g = compiled.get_graph()
+    try:
+        png = base64.b64encode(g.draw_mermaid_png()).decode()
+        picture = f'<img src="data:image/png;base64,{png}" alt="the engineer graph" style="max-width:520px">'
+    except Exception as exc:  # noqa: BLE001  (no network from the pod, or the exporter changed)
+        picture = (
+            f"<pre>{_esc(g.draw_mermaid())}</pre><div class=sub>(image export failed: {_esc(str(exc)[:80])})</div>"
+        )
+    return (
+        CSS
+        + '<div class="rp"><h2>The ML engineer agent, as a graph</h2>'
+        + '<div class="sub">think → tools → think … → decision. Solid edges always happen; dotted ones are the model\'s choice.</div>'
+        + picture
+        + "<table><tr><th>node</th><th>what it is</th></tr>"
+        + "<tr><td><b>think</b></td><td>one model turn: read the transcript, say something, ask for tools. A traced step, replayed on retry.</td></tr>"
+        + "<tr><td><b>tools</b></td><td>every tool the last turn asked for, run at the same time; each is a Flyte task in its own container, a T4 for the GPU ones.</td></tr>"
+        + "<tr><td><b>decision</b></td><td>the transcript turned into a typed Decision: what was promoted, the numbers, the rationale. Also a traced step.</td></tr>"
+        + "</table></div>"
+    )
+
+
 def evals_html(results: list[dict], request=None) -> str:
     """The eval matrix. `results` are `factory.EvalResult` as dicts."""
     # Columns: every category any result was scored on, so a v1 model scored on v2 shows its
