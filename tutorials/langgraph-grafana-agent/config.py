@@ -163,10 +163,25 @@ _KNOBS = (
     "FACTORY_APPROVAL",
     "FACTORY_MAX_STEPS",
     "VLLM_BASE_URL",
+    "FACTORY_MAX_PARALLEL_GPU",
     "ROUTER_CPU",
     "ROUTER_MEMORY",
 )
 PROPAGATED = {k: v for k, v in os.environ.items() if (k in _KNOBS or k.endswith("_SECRET_NAME")) and v}
+
+# How many GPU tools one run may have in flight at once. 0 means no limit: "evaluate these
+# five" is five T4s. In a room of thirty people on one GPU pool, set it to 1 or 2 so a
+# single run cannot take the whole pool; the calls still go out in one turn, they just queue.
+MAX_PARALLEL_GPU = int(os.environ.get("FACTORY_MAX_PARALLEL_GPU", "0") or 0)
+GPU_TOOLS = {"run_eval", "fine_tune"}  # the tools that end up on a T4
+
+
+def gpu_slots():
+    """A semaphore for GPU tools, or None when there is no limit. One per run."""
+    import asyncio
+
+    return asyncio.Semaphore(MAX_PARALLEL_GPU) if MAX_PARALLEL_GPU > 0 else None
+
 
 # ── Image ────────────────────────────────────────────────────────────────────
 

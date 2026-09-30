@@ -39,6 +39,7 @@ from langchain_core.messages import (
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field, field_validator
 
+from config import GPU_TOOLS, gpu_slots
 from grafana_evals import parse_eval, record_evals
 from llm import DEFAULT_MODEL, chat_model
 from tools import TOOLS
@@ -240,6 +241,7 @@ def parallel_tool_node(tools, *, name: str = "tools"):
     """
     registry = {getattr(t, "name", getattr(t, "__name__", "")): t for t in tools}
     timeline = ReportTimeline()
+    slots = gpu_slots()  # per-run cap on GPU tools in flight, if FACTORY_MAX_PARALLEL_GPU is set
 
     async def _one(call: dict) -> str:
         selected = registry.get(call["name"])
@@ -248,6 +250,10 @@ def parallel_tool_node(tools, *, name: str = "tools"):
         args = call.get("args") or {}
         try:
             task = getattr(selected, "flyte_task", None)
+            if task is not None and slots is not None and call["name"] in GPU_TOOLS:
+                async with slots:
+                    named = dataclasses.replace(task, short_name=action_label(call["name"], args))
+                    return str(await named.aio(**coerce_tool_args(task, args)))
             if task is not None:
                 # Name the action after what it is doing, so the run graph reads
                 # "run_eval · qwen2.5-0.5b" rather than five identical run_eval rows.

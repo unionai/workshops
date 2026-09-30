@@ -723,6 +723,7 @@ T4 latency bar is not applied to them.
 | the request | `--min_accuracy --max_latency_ms --candidates_to_screen --max_fine_tunes --budget` | 0.95, 150, 5, 3, 12 |
 | the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-haiku-4-5` |
 | providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 7, or any step) | the agent's provider |
+| GPU tools in flight per run | `FACTORY_MAX_PARALLEL_GPU`: the engineer still asks for five evals in one turn, but only this many run at once. Set 1 or 2 for a room on one GPU pool | `0` (no limit) |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 7 sets `0`) |
 | the router app's pod | sized to the promoted model: the encoder 2 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
 | human approval before deploy | `FACTORY_APPROVAL` | `0` |
