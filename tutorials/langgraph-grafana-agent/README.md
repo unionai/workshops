@@ -1,5 +1,11 @@
 # The model factory, run by an agent, watched by Grafana
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/langgraph-grafana-agent/langgraph-grafana-agent-tutorial.ipynb)
+
+The notebook is the workshop: step by step, against a cluster, with the code shown as
+you go. This README is the full write-up: the same steps as CLI commands, the numbers
+behind every claim, and the gotchas we hit building it.
+
 There are two agents in this tutorial.
 
 The first is the **support agent**: the thing in production. A ticket comes in, it routes
