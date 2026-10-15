@@ -460,7 +460,8 @@ it showed on the deployed v1 encoder, measured on the two full test splits:
 | v2 tickets (new category) | 87.3% | 95.8% | 11.1% | 7 of 16 |
 
 Accuracy fell eleven points; confidence fell one and a half. Half of the GDPR tickets were
-misrouted with 90%+ confidence. A softmax over eight labels has no way to say "none of
+misrouted with 90%+ confidence (a third with another fine-tune of the same encoder on tryv2:
+88.9% accuracy, 97.1% mean confidence, 5 of 14 misroutes at 90%+). A softmax over eight labels has no way to say "none of
 these"; it does not know what it does not know. So confidence is a weak alarm for a new
 category, and we chose not to build the loop on it.
 
