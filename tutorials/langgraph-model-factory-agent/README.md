@@ -1,7 +1,5 @@
 # The model factory, run by an agent
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/langgraph-model-factory-agent/langgraph-model-factory-agent-tutorial.ipynb)
-
 The notebook is the workshop: step by step, against a cluster, with the code shown as
 you go. This README is the full write-up: the same steps as CLI commands, the numbers
 behind every claim, and the gotchas we hit building it.
@@ -215,7 +213,7 @@ flyte create secret ANTHROPIC_API_KEY --value sk-ant-...
 ```
 
 The first call opens your browser to sign in. Anywhere without a browser to hand off to
-(Colab, a remote shell) add `--auth-type headless`: the first call then prints a login URL
+(a hosted notebook, a remote shell) add `--auth-type headless`: the first call then prints a login URL
 and a code to paste back. Without it the browser flow fails silently and the first upload
 dies with an empty `ConnectError`; the notebook already passes the flag.
 

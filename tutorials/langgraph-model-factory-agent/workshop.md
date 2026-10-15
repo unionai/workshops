@@ -2,7 +2,7 @@
 
 *Durable, self-healing agents on Union.*
 
-Hands-on, 90 minutes. Bring a laptop; everything runs in Colab or on a cluster we give you access to.
+Hands-on, 90 minutes. Bring a laptop; everything runs in a hosted notebook against a cluster we give you access to.
 
 ## What we'll build
 
