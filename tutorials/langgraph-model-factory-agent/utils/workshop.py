@@ -16,23 +16,39 @@ import json
 import time
 from pathlib import Path
 
-# The tutorial folder. The code bundle a run uploads is rooted here, so the pod imports
-# `llm`, `tools` and friends by their bare names. Left to the SDK, the root is guessed from
-# the environment, and in Colab that guess is wrong: the modules land in the bundle under a
-# nested path and the first import fails with "No module named 'llm'".
+# The tutorial folder: where this file's parent folder lives, by default.
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _root_for(task) -> Path:
+    """The folder holding the task's source file. The code bundle is rooted there.
+
+    The pod imports `config`, `llm`, `tools` and friends by their bare names, so the bundle
+    root has to be the folder they sit in. Left to the SDK, the root is guessed from the
+    environment, and in Colab that guess is wrong: the modules land in the bundle under a
+    nested path and the first import fails with "No module named 'config'". Rooting on the
+    task's own file also survives a notebook that keeps `utils/` somewhere else.
+    """
+    import inspect
+
+    func = getattr(task, "func", None)
+    try:
+        return Path(inspect.getfile(func)).resolve().parent if func else ROOT
+    except (TypeError, OSError):
+        return ROOT
 
 
 def run(task, *, local: bool = False, **kwargs):
     import flyte
 
+    root = _root_for(task)
     if local:
-        flyte.init(root_dir=ROOT)
+        flyte.init(root_dir=root)
         return _first(flyte.with_runcontext(mode="local").run(task, **kwargs).outputs())
 
     from flyte.remote import ActionDetails, Run
 
-    flyte.init_from_config(_config_path(), root_dir=ROOT)
+    flyte.init_from_config(_config_path(root), root_dir=root)
     # In a notebook the SDK would pickle the task instead of bundling the source files. The
     # pickle carries the task's module by value but only *references* the modules it imports,
     # so the pod dies on the first one: "No module named 'llm'". Ship the source instead.
@@ -55,13 +71,15 @@ def run(task, *, local: bool = False, **kwargs):
     return _first(r.outputs())
 
 
-def _config_path():
-    """The cluster config, looked up from the tutorial folder rather than the current directory.
+def _config_path(root: Path = ROOT):
+    """The cluster config: next to the code, else in the current directory.
 
-    `flyte create config` writes `config.yaml` where it is run; the notebook runs it here. With
-    no file here the SDK's own search (FLYTECTL_CONFIG, ~/.flyte, ...) applies.
+    `flyte create config` writes `config.yaml` where it is run; the notebook runs it in the
+    tutorial folder, and a notebook run from elsewhere writes it there instead. With no file
+    in either place the SDK's own search (FLYTECTL_CONFIG, ~/.flyte, ...) applies.
     """
-    for candidate in (ROOT / "config.yaml", ROOT / ".flyte" / "config.yaml"):
+    cwd = Path.cwd()
+    for candidate in (root / "config.yaml", root / ".flyte" / "config.yaml", cwd / "config.yaml"):
         if candidate.exists():
             return candidate
     return None
