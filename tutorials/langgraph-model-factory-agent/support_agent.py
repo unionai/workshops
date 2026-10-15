@@ -1,0 +1,262 @@
+"""The support agent: the thing in production that the factory builds a router for.
+
+A deliberately small LangGraph agent. A ticket comes in, the router picks a queue, and the
+queue's own drafting agent (the same model, prompted as that team) writes a two-line reply
+for the team to send. It is a stand-in for whatever customer-facing agent you actually run;
+the point is that its first step, routing, is a classification problem that today costs an
+API call per ticket and is the first thing to move to a self-hosted open-source model.
+
+    route ──► draft ──► END
+
+Two routers, one flag:
+
+    --router llm   the API model classifies the ticket (today's production)
+    --router oss   the ticket-router app the factory deployed (tomorrow's)
+
+Run it over a batch of held-out tickets and the report shows routing accuracy, p50
+latency, tokens and cost per 1,000 tickets, and the distribution of queues, so "before" and
+"after" sit next to each other. Run it over dataset v2 and the same report shows drift: the
+GDPR tickets pile up in `other`, at low confidence.
+
+    flyte run --local support_agent.py agent_handle_tickets --n 10 --router llm
+    flyte run support_agent.py agent_handle_tickets --router oss
+    flyte run support_agent.py agent_handle_tickets --router oss --dataset v2      # drift, visible
+
+Every model and app call is a traced step, so a batch that dies halfway replays what it
+already did, and the run graph shows each ticket's text going in and the queue coming out.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from typing import TypedDict
+
+import flyte
+import flyte.report
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, Field
+
+from config import agent_env
+from llm import DEFAULT_MODEL, chat_model, cost_usd, short_name
+from report import support_html
+from tickets import DATASET_VERSIONS, load_split, parse_label
+from tools import _wait_for_app  # module scope: the code bundle only carries modules loaded at submit time
+
+QUEUE_OWNERS = {
+    "billing": "Billing team",
+    "refund": "Refunds desk",
+    "shipping": "Logistics",
+    "account_access": "Account security",
+    "bug_report": "Engineering triage",
+    "feature_request": "Product",
+    "cancellation": "Retention",
+    "data_request": "Privacy office",
+    "other": "General support",
+}
+
+
+class TicketState(TypedDict, total=False):
+    ticket_id: str
+    text: str
+    expected: str
+    queue: str
+    confidence: float | None
+    route_ms: float
+    reply: str
+    router: str
+    labels: list[str]
+
+
+class Route(BaseModel):
+    queue: str = Field(description="Exactly one of the allowed queue names.")
+
+
+def build_support_graph(model, router: str, endpoint: str | None, model_name: str):
+    """The two-node graph. Routing is either a model call or an HTTP call to the app.
+
+    Each call is a `flyte.trace` step, so a batch that dies halfway replays what it already
+    did, and each step is a row in the run graph with the ticket text as its input and the
+    queue or reply as its output. The arguments are the memo key, which is why the model's
+    name is one of them.
+    """
+    structured = model.with_structured_output(Route)
+
+    @flyte.trace
+    async def route_with_app(ticket_id: str, text: str) -> dict:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(endpoint + "/classify", json={"text": text})
+            r.raise_for_status()
+            return r.json()
+
+    @flyte.trace
+    async def route_with_model(ticket_id: str, text: str, labels: list[str], model_name: str) -> str:
+        msgs = [SystemMessage(content=system_prompt_for(labels)), HumanMessage(content=text)]
+        return (await structured.ainvoke(msgs)).queue
+
+    @flyte.trace
+    async def draft_reply(ticket_id: str, queue: str, text: str, model_name: str) -> str:
+        owner = QUEUE_OWNERS.get(queue, "General support")
+        msgs = [
+            SystemMessage(
+                content=f"You draft replies for the {owner}. Two sentences, plain, no promises you cannot keep, no sign-off."
+            ),
+            HumanMessage(content=f"Ticket routed to {queue}:\n\n{text}"),
+        ]
+        # `.text` joins the text blocks: Claude with thinking on returns a list of blocks.
+        return (await model.ainvoke(msgs)).text
+
+    async def route(state: TicketState) -> dict:
+        labels = state["labels"]
+        t0 = time.perf_counter()
+        if router == "oss":
+            body = await route_with_app(state["ticket_id"], state["text"])
+            queue = body["label"] if body["label"] in labels else "other"
+            confidence = body.get("confidence")
+            latency = body.get("latency_ms", (time.perf_counter() - t0) * 1000)
+        else:
+            raw = await route_with_model(state["ticket_id"], state["text"], labels, model_name)
+            queue = parse_label(raw, labels)
+            confidence = None
+            latency = (time.perf_counter() - t0) * 1000
+        return {"queue": queue, "confidence": confidence, "route_ms": latency}
+
+    async def draft(state: TicketState) -> dict:
+        reply = await draft_reply(state["ticket_id"], state["queue"], state["text"], model_name)
+        return {"reply": reply}
+
+    builder = StateGraph(TicketState)
+    builder.add_node("route", route)
+    builder.add_node("draft", draft)
+    builder.add_edge(START, "route")
+    builder.add_edge("route", "draft")
+    builder.add_edge("draft", END)
+    return builder.compile()
+
+
+def system_prompt_for(labels: list[str]) -> str:
+    return (
+        "You are a support ticket router. Classify the ticket into exactly one queue from this list: "
+        + ", ".join(labels)
+        + ". Reply with the queue name only."
+    )
+
+
+async def _endpoint() -> str:
+    """The app's endpoint, once it answers: a promotion may have just redeployed it."""
+    await flyte.init_in_cluster.aio()
+    return await _wait_for_app()
+
+
+@agent_env.task(report=True, retries=2)
+async def agent_handle_tickets(
+    n: int = 30,
+    router: str = "llm",
+    dataset: str = "v1",
+    labels_from: str = "v1",
+    model: str | None = None,
+    concurrency: int = 4,
+) -> dict:
+    """Run the support agent over n held-out tickets and report how the routing went.
+
+    `dataset` is where the tickets come from; `labels_from` is the queue list the router
+    knows about (production's, which is why v2 tickets on a v1 router show drift).
+    """
+    if router not in ("llm", "oss"):
+        raise ValueError("router must be 'llm' or 'oss'")
+    if dataset not in DATASET_VERSIONS or labels_from not in DATASET_VERSIONS:
+        raise ValueError(f"datasets: {', '.join(DATASET_VERSIONS)}")
+    from langchain_core.callbacks import UsageMetadataCallbackHandler
+
+    labels = DATASET_VERSIONS[labels_from]
+    chat = chat_model(model)
+    endpoint = None
+    if router == "oss":
+        ctx = flyte.ctx()
+        if ctx is None or ctx.mode == "local":
+            raise ValueError(
+                "--router oss needs the deployed ticket-router app; run this on the cluster (or promote something first)"
+            )
+        endpoint = await _endpoint()
+    graph = build_support_graph(chat, router, endpoint, short_name(model))
+    usage = UsageMetadataCallbackHandler()
+    config = {"callbacks": [usage]}
+
+    tickets = load_split("test", dataset)[-max(1, min(n, 126)) :]
+    sem = asyncio.Semaphore(concurrency)
+
+    async def one(t) -> dict:
+        async with sem:
+            state: TicketState = {
+                "ticket_id": t.id,
+                "text": t.text,
+                "expected": t.label,
+                "router": router,
+                "labels": labels,
+            }
+            # One group per ticket in the run graph: the route step and the draft step sit
+            # together under the ticket, instead of sixty steps in one flat list.
+            with flyte.group(f"ticket {t.id}"):
+                out = await graph.ainvoke(state, config=config)
+            return {
+                "ticket_id": t.id,
+                "text": t.text,
+                "expected": t.label,
+                "queue": out["queue"],
+                "confidence": out.get("confidence"),
+                "route_ms": round(out["route_ms"], 1),
+                "reply": out["reply"],
+            }
+
+    started = time.perf_counter()
+    rows = await asyncio.gather(*(one(t) for t in tickets))
+    seconds = time.perf_counter() - started
+
+    correct = sum(r["queue"] == r["expected"] for r in rows)
+    tokens_in = sum(u.get("input_tokens", 0) for u in usage.usage_metadata.values())
+    tokens_out = sum(u.get("output_tokens", 0) for u in usage.usage_metadata.values())
+    spent = cost_usd(model, tokens_in, tokens_out)
+    lat = sorted(r["route_ms"] for r in rows)[len(rows) // 2]
+    dist = {q: sum(r["queue"] == q for r in rows) for q in labels}
+    unknown_expected = sum(r["expected"] not in labels for r in rows)
+    # What production can watch without labels (the app returns a softmax confidence for the
+    # encoder), next to what only labels reveal. The point of reporting both: a classifier
+    # is often confidently wrong on a kind of ticket it was never trained on.
+    confs = [r["confidence"] for r in rows if r.get("confidence") is not None]
+    wrong = [r for r in rows if r["queue"] != r["expected"]]
+    mean_conf = round(sum(confs) / len(confs), 4) if confs else None
+    low_conf_share = round(sum(c < 0.9 for c in confs) / len(confs), 4) if confs else None
+    confidently_wrong = sum((r.get("confidence") or 0) >= 0.9 for r in wrong) if confs else None
+    stats = {
+        "router": router,
+        "model": model or DEFAULT_MODEL,
+        "dataset": dataset,
+        "labels_from": labels_from,
+        "n": len(rows),
+        "routing_accuracy": round(correct / len(rows), 4),
+        "route_p50_ms": round(lat, 1),
+        "tokens": tokens_in + tokens_out,
+        "cost_usd": None if spent is None else round(spent, 4),
+        "cost_per_1000_tickets_usd": None if spent is None else round(spent / len(rows) * 1000, 2),
+        "seconds": round(seconds, 1),
+        "queue_distribution": dist,
+        "tickets_with_unknown_queue": unknown_expected,
+        "mean_confidence": mean_conf,
+        "low_confidence_share": low_conf_share,  # routes under 90% confidence
+        "misroutes": len(wrong),
+        "confidently_wrong": confidently_wrong,  # misroutes the router made at 90%+ confidence
+    }
+    await flyte.report.replace.aio(support_html(rows, stats))
+    await flyte.report.flush.aio()
+    print(json.dumps(stats, indent=2))
+    return stats
+
+
+if __name__ == "__main__":
+    flyte.init_from_config()
+    run = flyte.run(agent_handle_tickets, n=30, router="llm")
+    print(run.url)
