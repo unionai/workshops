@@ -12,11 +12,15 @@ Five environments, so each step only asks for the credentials it actually uses:
 Everything the environments read from `.env` is also passed to the tasks as `env_vars`
 (see PROPAGATED below), because a child task's spec is serialized inside the parent's pod,
 which has no `.env`.
+
+Where the GPU work runs is one knob, ACCELERATOR (see below): a T4 or an L40s on a cluster,
+the GPU in your Mac on an Apple Silicon devbox, or the CPU anywhere else.
 """
 
 from __future__ import annotations
 
 import os
+import platform
 import re
 
 import flyte
@@ -36,6 +40,53 @@ TAG = re.sub(r"[^a-z0-9-]+", "-", os.environ.get("FACTORY_TAG", "").lower()).str
 def tagged(name: str) -> str:
     return f"{name}-{TAG}" if TAG else name
 
+
+# ── Where the GPU work runs ──────────────────────────────────────────────────
+
+# ACCELERATOR picks the pod shape for run_eval and train_model, and factory.device() picks
+# the matching torch device at run time:
+#
+#     T4      a 16 GB CUDA card on a cluster. The numbers in the README. The default.
+#     L40s    a 48 GB CUDA card on a cluster.
+#     apple   the GPU in this Mac. The task runs natively on the Mac, PyTorch uses `mps`,
+#             and the devbox still records the run. Needs `flyte start devbox --apple-silicon`.
+#     cpu     no GPU. Slow for the chat models; fine for the encoder.
+#
+# On a Mac whose .flyte/config.yaml points at a devbox the default is `apple`; the cluster
+# config next to the code keeps the cluster default. Set it explicitly to override.
+
+
+def _default_accelerator() -> str:
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".flyte", "config.yaml")
+        try:
+            if "localhost:30080" in open(cfg).read():
+                return "apple"
+        except OSError:
+            pass
+    return "T4"
+
+
+ACCELERATOR = os.environ.get("ACCELERATOR") or _default_accelerator()
+SHAPES = {
+    "T4": flyte.Resources(cpu=3, memory="12Gi", gpu="T4:1", disk="30Gi"),
+    "L40s": flyte.Resources(cpu=6, memory="32Gi", gpu="L40s:1", disk="32Gi"),
+    # The pod only proxies a process on the Mac; the request reserves devbox capacity, not the
+    # work. Size the run by the Mac's memory instead (the 1.5B LoRA peaks around 12 GB).
+    "apple": flyte.Resources(cpu=1, memory="2Gi", gpu="AppleSilicon"),
+    "cpu": flyte.Resources(cpu=2, memory="8Gi", disk="20Gi"),
+}
+if ACCELERATOR not in SHAPES:
+    raise ValueError(f"ACCELERATOR={ACCELERATOR!r}; choose one of {list(SHAPES)}")
+ON_MAC = ACCELERATOR == "apple"
+# How the GPU is named in prompts, reports and the request's latency bar.
+GPU_LABEL = {"T4": "T4", "L40s": "L40s", "apple": "Apple Silicon GPU", "cpu": "CPU"}[ACCELERATOR]
+GPU_ARTICLE = {"T4": "a T4", "L40s": "an L40s", "apple": "the Mac's GPU", "cpu": "the CPU"}[ACCELERATOR]
+
+# Whether the platform has an artifact registry (Union does; a devbox does not). Decided at
+# run time by tools.registry(): one failed lookup and the factory passes models around as
+# task outputs instead. FACTORY_ARTIFACTS=0 forces that off anywhere.
+FACTORY_ARTIFACTS = os.environ.get("FACTORY_ARTIFACTS", "1") not in ("0", "false", "no")
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
 
@@ -75,6 +126,8 @@ FACTORY_SECRETS = [PROVIDER_SECRETS[p] for p in FACTORY_PROVIDERS]
 # inside the agent's pod, which has no .env. Without this, a pod would fall back to the
 # defaults (no secret prefix, the Anthropic provider) and request the wrong secrets.
 _KNOBS = (
+    "ACCELERATOR",
+    "FACTORY_ARTIFACTS",
     "FLYTE_SECRET_PREFIX",
     "FACTORY_TAG",
     "AGENT_MODEL",
@@ -92,7 +145,9 @@ PROPAGATED = {k: v for k, v in os.environ.items() if (k in _KNOBS or k.endswith(
 # How many GPU tools one run may have in flight at once. 0 means no limit: "evaluate these
 # five" is five T4s. In a room of thirty people on one GPU pool, set it to 1 or 2 so a
 # single run cannot take the whole pool; the calls still go out in one turn, they just queue.
-MAX_PARALLEL_GPU = int(os.environ.get("FACTORY_MAX_PARALLEL_GPU", "0") or 0)
+# A Mac has one GPU, so there the default is 1: the calls still go out together, and run one
+# after another. Raise it on a Mac with memory to spare.
+MAX_PARALLEL_GPU = int(os.environ.get("FACTORY_MAX_PARALLEL_GPU", "1" if ON_MAC else "0") or 0)
 GPU_TOOLS = {"run_eval", "fine_tune"}  # the tools that end up on a T4
 
 
@@ -139,31 +194,34 @@ FACTORY_APPROVAL = os.environ.get("FACTORY_APPROVAL", "0") in ("1", "true", "yes
 
 # ── Environments ─────────────────────────────────────────────────────────────
 
-# The expensive tools: run_eval and train_model. One T4 per call; the agent can ask for
-# several at once and they run side by side.
+# The expensive tools: run_eval and train_model. One GPU per call (ACCELERATOR says which);
+# the agent can ask for several at once and on a cluster they run side by side.
 gpu_env = flyte.TaskEnvironment(
     name="factory-gpu",
     image=ml_image,
-    resources=flyte.Resources(cpu=3, memory="12Gi", gpu="T4:1", disk="30Gi"),
+    resources=SHAPES[ACCELERATOR],
     env_vars={**PROPAGATED},
 )
 
 # CPU inference: the same stack on a small CPU node, for evaluating models the way the
-# serving app will run them (the app is a CPU pod). Training always goes to the T4.
-# Sized under the demo cluster's t3a.xlarge nodes.
+# serving app will run them (the app is a CPU pod). Training always goes to the GPU.
+# Sized under the demo cluster's t3a.xlarge nodes. On a Mac it is the Mac's CPU: the task
+# runs on the host like the GPU ones (a devbox container cannot run this stack natively).
 cpu_env = flyte.TaskEnvironment(
     name="factory-cpu",
     image=ml_image,
-    resources=flyte.Resources(cpu=2, memory="8Gi", disk="20Gi"),
+    resources=SHAPES["apple"] if ON_MAC else SHAPES["cpu"],
     env_vars={**PROPAGATED, "FACTORY_DEVICE": "cpu"},
 )
 
 # The cheap tools: list_candidates, the fine_tune wrapper (which launches train_model on
-# the GPU or CPU env), promote. No secrets.
+# the GPU or CPU env), promote. No secrets. On a Mac these run on the host as well: promote
+# deploys the app by uploading its spec to a signed URL, and a devbox signs URLs for
+# `localhost:30002`, which the Mac can reach and a pod cannot.
 tools_env = flyte.TaskEnvironment(
     name=tagged("factory-tools"),
     image=image,
-    resources=flyte.Resources(cpu=1, memory="2Gi"),
+    resources=SHAPES["apple"] if ON_MAC else flyte.Resources(cpu=1, memory="2Gi"),
     env_vars={**PROPAGATED, "FACTORY_DEPLOY": "1" if FACTORY_DEPLOY else "0"},
     depends_on=[gpu_env, cpu_env],
 )

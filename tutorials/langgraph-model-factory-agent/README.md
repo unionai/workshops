@@ -29,10 +29,12 @@ Flyte runs every tool the engineer calls as its own durable container and record
 model turn, so a run that dies halfway replays what it already did, and the report scores
 the agent against the record of what its tools actually returned rather than its prose.
 
-The whole thing runs three ways: in Colab with `flyte run --local` (the fine-tunes use
-Colab's T4), on your laptop (CPU, slow, use small `--n`), or on a Union cluster, which is
-where the parallel GPUs, the artifacts, the deployed app and the triggers live. The
-notebook `langgraph-model-factory-agent-tutorial.ipynb` walks the same steps.
+The whole thing runs three ways: on a Union cluster, which is where the parallel GPUs, the
+artifacts, the deployed app and the triggers live (the notebook
+`langgraph-model-factory-agent-tutorial.ipynb` walks the same steps from Colab); on your own
+machine with a Flyte devbox, which on an Apple Silicon Mac puts the evals, the fine-tunes
+and the router app on the Mac's GPU (see [On your own machine](#on-your-own-machine-a-flyte-devbox));
+or with `flyte run --local` and no cluster at all, in Colab on its T4 or on a laptop's CPU.
 
 | Step | You will | Needs |
 |---|---|---|
@@ -226,6 +228,61 @@ an existing secret by name (`OPENAI_API_KEY_SECRET_NAME=my-openai-key`).
 
 The first cluster run builds two images. The one with the training stack takes about six
 minutes, once.
+
+### On your own machine: a Flyte devbox
+
+A devbox is a Flyte control plane in one container on your machine (Linux, Windows with
+WSL2, or a Mac). On an Apple Silicon Mac, start it with `--apple-silicon` and every task
+that asks for a GPU runs natively on the Mac, PyTorch on `mps`, while the devbox keeps
+the run graph, the cache, the retries, the logs and the reports:
+
+```bash
+flyte start devbox --apple-silicon        # a Mac; elsewhere: flyte start devbox
+flyte create config --devbox              # writes .flyte/config.yaml pointing at localhost:30080
+flyte create secret anthropic-api-key --value sk-ant-...
+echo "ANTHROPIC_API_KEY_SECRET_NAME=anthropic-api-key" >> .env
+flyte run model_factory.py model_factory --fine_tune_too      # same commands as the cluster
+```
+
+Needs Docker Desktop, `uv`, and `flyte` 2.12 or later. The one knob is `ACCELERATOR`
+(`T4` | `L40s` | `apple` | `cpu`): it picks the pod shape for `run_eval` and `train_model`
+and the torch device. On a Mac whose `.flyte/config.yaml` points at a devbox it defaults
+to `apple`; a devbox without a GPU wants `ACCELERATOR=cpu` in `.env`, and then the
+encoder is the candidate to fine-tune (seconds, not the quarter hour a chat model takes
+on a CPU). Then every step runs as written, with the T4 swapped for your GPU: steps 0 to
+4, the bake-off, and the crash. Measured on an M5 Max, same code, same commands:
+
+| | Union cluster (T4) | Apple Silicon devbox (M5 Max) |
+|---|---|---|
+| qwen2.5-0.5b zero-shot, p50 | 68 ms | 27 ms |
+| one LoRA epoch on the 0.5B | 42 s | 26 s, bf16 |
+| modernbert-base, 3 epochs, fine-tuned | 99.2%, 14 ms | 99.2%, 6 ms |
+| the support agent on the router (step 3) | 100%, 170 ms via a CPU pod | 100%, 15 ms, the app on `mps` |
+| the agent, step 2, fine-tunes cached | 45 s warm, 4 to 5 min cold | 2 min 47 s warm: evals rerun, promote, deploy, live test (9 runs) |
+| first run | ~6 min image build | ~5 min: a linux/arm64 image plus a Mac Python env with torch |
+
+Three things are different on a devbox, and the code notices each one at run time:
+
+- **No artifact registry.** That is a Union feature. `tools.registry()` asks once; when
+  the answer is no, `fine_tune` hands back the storage path of its output directory as
+  the model reference, `promote` mounts that directory into the app directly, and
+  `production_status` asks the live app what it is serving. Same files, no versions to
+  roll back through (rollback says so, and promote the earlier reference again), no
+  lineage tab, and no artifact triggers: step 5 and the validate-on-promote trigger need
+  Union. `FACTORY_ARTIFACTS=0` forces this mode anywhere.
+- **One GPU.** `FACTORY_MAX_PARALLEL_GPU` defaults to 1 on a Mac: the engineer still asks
+  for four evals in one turn and they take turns. Raise it on a Mac with memory to spare.
+- **Promote runs on the Mac.** A devbox signs upload URLs for `localhost`, has no remote
+  image builder, and reports an app as plain ACTIVE with no revision history. So in
+  `apple` mode the tool tasks run on the host alongside the GPU ones, and `promote`
+  builds the app image with the local builder and takes the app's `/` as proof of the
+  rollout. The agent does not know any of this; its tools return the same text.
+
+Memory, not the pod request, is the limit: the pod only proxies a process on the Mac.
+The 0.5B LoRA needs about 8 GB of unified memory; the 1.5B several times that. On a
+16 GB Mac, give step 2 `--candidates_to_screen 2 --max_fine_tunes 1`, or let the engineer
+screen everything and watch the encoder win on a few hundred megabytes. The notebook
+works against a devbox as well: skip its "connect to the cluster" cell.
 
 ---
 
@@ -634,7 +691,7 @@ writes that up. No extra infrastructure; it is a native Flyte condition.
 
 ## Measuring on CPU
 
-`run_eval_cpu` is `run_eval` on a small CPU node. Training always goes to the T4, but the
+`run_eval_cpu` is `run_eval` on a small CPU node. Training always goes to the GPU, but the
 serving app is a CPU pod, so the CPU number is what production will look like. The
 fine-tuned encoder classifies a ticket in about 230 ms on the demo cluster's 2-vCPU nodes
 (14 ms on the T4); the fine-tuned 0.5B chat model takes about 1.3 s. The agent is told
@@ -652,7 +709,7 @@ T4 latency bar is not applied to them.
 | `tools.py` | The eight tools as Flyte tasks, plus `train_model` and `publish_router` behind them |
 | `graph.py` | The LangGraph graph, the request, the typed decision, the parallel tool node |
 | `llm.py` | The agent's model, from a string |
-| `config.py` | Environments, images, secrets |
+| `config.py` | Environments, images, secrets, and the `ACCELERATOR` knob |
 | `router_app.py` | The serving app that mounts the promoted artifact |
 | `report.py` | HTML for the task reports |
 | `utils/workshop.py` | `run(task)` and `show()` for the notebook: submit, print the URL, wait, return outputs |
@@ -671,7 +728,9 @@ T4 latency bar is not applied to them.
 | the request | `--min_accuracy --max_latency_ms --candidates_to_screen --max_fine_tunes --budget` | 0.95, 150, 5, 3, 12 |
 | the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-haiku-4-5` |
 | providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 6, or any step) | the agent's provider |
-| GPU tools in flight per run | `FACTORY_MAX_PARALLEL_GPU`: the engineer still asks for five evals in one turn, but only this many run at once. Set 1 or 2 for a room on one GPU pool | `0` (no limit) |
+| where the GPU work runs | `ACCELERATOR`: `T4`, `L40s`, `apple` (the Mac's GPU, on an Apple Silicon devbox), `cpu` | `T4`; `apple` on a Mac pointed at a devbox |
+| artifact registry | `FACTORY_ARTIFACTS=0` passes models around as task outputs instead (what a devbox does on its own) | detected |
+| GPU tools in flight per run | `FACTORY_MAX_PARALLEL_GPU`: the engineer still asks for five evals in one turn, but only this many run at once. Set 1 or 2 for a room on one GPU pool | `0` (no limit); `1` on a Mac |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 6 sets `0`) |
 | the router app's pod | sized to the promoted model: the encoder 2 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
 | human approval before deploy | `FACTORY_APPROVAL` | `0` |
@@ -694,7 +753,7 @@ there is normal, not stuck.
   model that answers "The category is billing." pays for every token; a fine-tuned one
   answers `billing` and stops. That is why fine-tuning lowers latency too.
 - The T4 has no bf16. Training loads fp32 weights and uses fp16 autocast; at these sizes
-  that fits easily.
+  that fits easily. On Apple Silicon the same code uses bf16 autocast and ships bf16 weights.
 - `fine_tune` is a CPU-side wrapper around `train_model`, the GPU task that produces the
   artifact. A tool has to return text for the model, and an artifact has to be a task's
   top-level output, so they are two tasks. `promote` and `publish_router` split the same way.

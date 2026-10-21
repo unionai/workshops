@@ -9,6 +9,7 @@ from __future__ import annotations
 import html
 import re
 
+from config import GPU_ARTICLE, GPU_LABEL
 from tickets import CATEGORIES, DATASET_VERSIONS, Ticket
 
 SERIES = "#2a78d6"
@@ -144,7 +145,7 @@ def graph_html(compiled) -> str:
         + picture
         + "<table><tr><th>node</th><th>what it is</th></tr>"
         + "<tr><td><b>think</b></td><td>one model turn: read the transcript, say something, ask for tools. A traced step, replayed on retry.</td></tr>"
-        + "<tr><td><b>tools</b></td><td>every tool the last turn asked for, run at the same time; each is a Flyte task in its own container, a T4 for the GPU ones.</td></tr>"
+        + "<tr><td><b>tools</b></td><td>every tool the last turn asked for, run at the same time; each is a Flyte task in its own container, " + GPU_ARTICLE + " for the GPU ones.</td></tr>"
         + "<tr><td><b>decision</b></td><td>the transcript turned into a typed Decision: what was promoted, the numbers, the rationale. Also a traced step.</td></tr>"
         + "</table></div>"
     )
@@ -344,7 +345,7 @@ def _measurements(result: dict) -> list[dict]:
                 if model.startswith("artifact:")
                 else model,
                 "fine_tuned": model.startswith("artifact:"),
-                "device": "CPU" if call["name"] == "run_eval_cpu" else "T4",
+                "device": "CPU" if call["name"] == "run_eval_cpu" else GPU_LABEL,
                 "dataset": call["args"].get("dataset", "v1"),
                 "n": int(m.group(2)),
                 "accuracy": float(m.group(1)) / 100,
@@ -429,14 +430,14 @@ def decision_html(result: dict) -> str:
         )
         for r in rows:
             acc_ok, lat_ok = r["accuracy"] >= req["min_accuracy"], r["p50"] <= req["max_latency_ms"]
-            note = "T4 latency" if r["device"] == "T4" else "CPU latency (serving)"
-            bar_ok = acc_ok and (lat_ok if r["device"] == "T4" else True)
+            note = f"{GPU_LABEL} latency" if r["device"] != "CPU" else "CPU latency (serving)"
+            bar_ok = acc_ok and (lat_ok if r["device"] != "CPU" else True)
             verdict_cell = (
                 '<span class="ok">passes</span>'
                 if bar_ok
                 else '<span class="bad">'
                 + ", ".join(
-                    x for x, bad in (("accuracy", not acc_ok), ("latency", r["device"] == "T4" and not lat_ok)) if bad
+                    x for x, bad in (("accuracy", not acc_ok), ("latency", r["device"] != "CPU" and not lat_ok)) if bad
                 )
                 + "</span>"
             )

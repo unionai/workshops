@@ -22,13 +22,15 @@ import time
 
 import flyte
 import flyte.app
+import flyte.io
 from fastapi import FastAPI
 from flyte.app.extras import FastAPIAppEnvironment
 from pydantic import BaseModel
 
-from config import PROPAGATED, ml_image, tagged
+from config import ON_MAC, PROPAGATED, SHAPES, ml_image, tagged
 from factory import (  # top-level on purpose: the app's code bundle only carries modules loaded at deploy time
     CANDIDATES,
+    half_dtype,
     kind_of,
 )
 from tickets import DATASET_VERSIONS, parse_label, system_prompt
@@ -52,6 +54,10 @@ def serving_resources(base: str | None) -> flyte.Resources:
     sees. ROUTER_CPU, ROUTER_MEMORY and ROUTER_GPU override for an unusual cluster (they
     travel with the run). An unknown base is treated as large.
     """
+    if ON_MAC:
+        # On an Apple Silicon devbox the app runs natively on the Mac, on its GPU: a devbox
+        # container cannot run this stack, and the Mac is the production box anyway.
+        return SHAPES["apple"]
     spec = CANDIDATES.get(base or "", {})
     if spec.get("kind") == "encoder":
         # 2 CPUs, not 1: the encoder is CPU-bound, and on one core it answers in ~600 ms
@@ -67,13 +73,18 @@ def serving_resources(base: str | None) -> flyte.Resources:
     return flyte.Resources(cpu=cpu, memory=memory, gpu=gpu) if gpu else flyte.Resources(cpu=cpu, memory=memory)
 
 
-def make_router_app(version: str | None = None, base: str | None = None) -> FastAPIAppEnvironment:
+def make_router_app(
+    version: str | None = None, base: str | None = None, weights: flyte.io.Dir | None = None
+) -> FastAPIAppEnvironment:
     """The app environment, mounting the latest `ticket-router` artifact or a pinned version.
 
     `promote` deploys the latest; `rollback` deploys a pinned earlier version. Same app,
     same name, different artifact version resolved at deploy time, and a pod sized to
-    `base`, the candidate the artifact was made from.
+    `base`, the candidate the artifact was made from. On a platform with no artifact
+    registry, `promote` passes the output directory itself as `weights` and the app mounts
+    that instead.
     """
+    model = weights if weights is not None else flyte.app.ArtifactValue(name=tagged("ticket-router"), type="directory", version=version)
     return FastAPIAppEnvironment(
         name=tagged("ticket-router"),
         app=app,
@@ -84,11 +95,7 @@ def make_router_app(version: str | None = None, base: str | None = None) -> Fast
         requires_auth=False,
         env_vars={**PROPAGATED},
         parameters=[
-            flyte.app.Parameter(
-                name="model",
-                value=flyte.app.ArtifactValue(name=tagged("ticket-router"), type="directory", version=version),
-                mount=MODEL_DIR,
-            )
+            flyte.app.Parameter(name="model", value=model, mount=MODEL_DIR),
         ],
     )
 
@@ -115,8 +122,9 @@ async def start_loading():
     meta = pathlib.Path(MODEL_DIR) / "factory.json"
     _state["factory"] = json.loads(meta.read_text()) if meta.exists() else {}
     _state["dataset"] = _state["factory"].get("dataset", "v1")
-    router = pathlib.Path(MODEL_DIR) / "router.json"  # written by publish_router: which artifact version this is
-    _state["version"] = json.loads(router.read_text()).get("version") if router.exists() else None
+    router = pathlib.Path(MODEL_DIR) / "router.json"  # written by publish_router: which version this is, and why
+    _state["router"] = json.loads(router.read_text()) if router.exists() else {}
+    _state["version"] = _state["router"].get("version")
     _state["loaded"] = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -135,9 +143,9 @@ def _load_model():
     t0 = time.perf_counter()
     factory = _state["factory"]
     kind = factory.get("kind") or kind_of(MODEL_DIR)
-    # A T4 if the pod has one (see serving_resources), else CPU in fp32.
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
+    # A T4 if the pod has one (see serving_resources), the Mac's GPU on a devbox, else CPU in fp32.
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    dtype = half_dtype(device)
     tok = AutoTokenizer.from_pretrained(MODEL_DIR)
     # On a GPU, stream the weights straight there (device_map) instead of staging the full
     # fp32 checkpoint in CPU memory and casting: for a 1.5B model that staging alone is
@@ -179,6 +187,7 @@ async def info() -> dict:
         "loaded_in_s": _state.get("loaded_in"),
         "device": _state.get("device"),
         "factory": _state.get("factory"),
+        "router": _state.get("router"),
         "dataset": _state.get("dataset"),
     }
 

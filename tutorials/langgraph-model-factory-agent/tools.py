@@ -38,7 +38,7 @@ import flyte.report
 from flyte.io import Dir
 from flyteplugins.agents.langgraph import tool
 
-from config import FACTORY_APPROVAL, FACTORY_DEPLOY, cpu_env, gpu_env, tagged, tools_env
+from config import FACTORY_APPROVAL, FACTORY_ARTIFACTS, FACTORY_DEPLOY, GPU_ARTICLE, GPU_LABEL, cpu_env, gpu_env, tagged, tools_env
 from factory import CANDIDATES, evaluate
 from factory import fine_tune as _fine_tune
 from report import (  # module scope: the code bundle only carries modules loaded at serialization
@@ -56,6 +56,50 @@ FT_PREFIX = "ticket-router"  # fine-tune artifacts are shared across tags: same 
 def _is_local() -> bool:
     ctx = flyte.ctx()
     return ctx is None or ctx.mode == "local"
+
+
+_REGISTRY: str | None = None
+
+
+async def registry() -> str:
+    """`artifacts` on a platform with an artifact registry (Union), `outputs` everywhere else.
+
+    Decided once per process, by asking. A devbox accepts `artifacts.new(...)` on a task
+    output without complaint and then cannot find the artifact, so the first lookup is the
+    only reliable test. In `outputs` mode the fine-tunes and the promoted router are passed
+    around as the storage paths of task outputs, and the app mounts the output directly:
+    the same files, no registry, no lineage tab.
+    """
+    global _REGISTRY
+    if _REGISTRY is None:
+        if _is_local() or not FACTORY_ARTIFACTS:
+            _REGISTRY = "outputs"
+        else:
+            from flyte.remote import Artifact
+
+            try:
+                async for _ in Artifact.listall.aio(name=ROUTER_ARTIFACT):
+                    break
+                _REGISTRY = "artifacts"
+            except Exception as e:  # noqa: BLE001
+                if "not found" not in str(e).lower() and "unimplemented" not in str(e).lower():
+                    raise
+                _REGISTRY = "outputs"
+    return _REGISTRY
+
+
+def reach(endpoint: str) -> str:
+    """The URL a *task* uses to call an app.
+
+    A task on a devbox only knows the app's public URL, `http://<app>-<project>-<domain>.localhost:30081`,
+    which a pod cannot resolve. Inside a pod, swap it for the devbox's in-cluster service name.
+    """
+    from urllib.parse import urlparse
+
+    host = urlparse(endpoint).hostname or ""
+    if host.endswith(".localhost") and os.getenv("KUBERNETES_SERVICE_HOST"):
+        return f"http://{host.removesuffix('.localhost')}.flyte.svc.cluster.local"
+    return endpoint
 
 
 def _looks_like_artifact(ref: str) -> bool:
@@ -103,9 +147,9 @@ async def list_candidates(dataset: str = "v1") -> str:
         for k, v in CANDIDATES.items()
     ]
     lines.append(
-        "\nrun_eval and fine_tune use a T4. Models marked [small enough for CPU] can also be evaluated with "
+        f"\nrun_eval and fine_tune use {GPU_ARTICLE}. Models marked [small enough for CPU] can also be evaluated with "
         "run_eval_cpu, which is what production looks like: the router app serves on a CPU pod. "
-        "The request's latency bar is measured on the T4."
+        f"The request's latency bar is measured on {GPU_ARTICLE}."
     )
     cats = DATASET_VERSIONS[dataset]
     lines.append(
@@ -122,6 +166,9 @@ async def production_status() -> str:
     if _is_local():
         return "Local run: no artifact registry or app off-cluster. Nothing is in production."
     from flyte.remote import App, Artifact
+
+    if await registry() == "outputs":
+        return await _production_status_from_app()
 
     lines = []
     try:
@@ -177,17 +224,41 @@ async def _eval(model: str, n: int, dataset: str) -> str:
     return text
 
 
+async def _production_status_from_app() -> str:
+    """No artifact registry (a devbox): production is whatever the router app says it is serving."""
+    import httpx
+    from flyte.remote import App
+
+    await flyte.init_in_cluster.aio()
+    try:
+        endpoint = reach(App.get(APP_NAME).endpoint)
+    except Exception:  # noqa: BLE001  (no app yet)
+        return f"IN PRODUCTION NOW: nothing. The {APP_NAME} app has not been deployed; nothing has been promoted."
+    try:
+        info = httpx.get(endpoint + "/", timeout=60).json()
+    except Exception as e:  # noqa: BLE001
+        return f"The {APP_NAME} app exists at {endpoint} but did not answer ({str(e)[:80]}). Treat production as unknown."
+    r = info.get("router") or {}
+    return (
+        f"IN PRODUCTION NOW: {r.get('model', '?')}  (version {info.get('version', '?')}; "
+        f"measured on dataset {info.get('dataset', 'v1')} when promoted: accuracy {r.get('accuracy', '?')}, "
+        f"p50 {r.get('latency_p50_ms', '?')} ms; served from {info.get('model_dir')} on the app's {info.get('device', '?')}).\n"
+        "This platform has no artifact registry: models are referenced by the storage path of the task output "
+        "that produced them, as printed by fine_tune and promote. Evaluate the live model by that exact reference."
+    )
+
+
 @tool
 @gpu_env.task(retries=2, report=True)
 async def run_eval(model: str, n: int = 120, dataset: str = "v1") -> str:
-    """Classify n held-out tickets with a model (a candidate id, or an artifact:<name>@<version> reference) on a dataset version, on a T4, and measure accuracy plus per-ticket latency. This is the latency the request is judged on."""
+    """Classify n held-out tickets with a model (a candidate id, or a model reference returned by fine_tune) on a dataset version, on the factory's GPU, and measure accuracy plus per-ticket latency. This is the latency the request is judged on."""
     return await _eval(model, n, dataset)
 
 
 @tool
 @cpu_env.task(retries=2, report=True)
 async def run_eval_cpu(model: str, n: int = 120, dataset: str = "v1") -> str:
-    """Same as run_eval but on a small CPU node: no GPU needed, cheaper, slower per ticket. Sensible for models marked small enough for CPU. Latency here is CPU latency, not the T4 number the request asks for."""
+    """Same as run_eval but on a small CPU node: no GPU needed, cheaper, slower per ticket. Sensible for models marked small enough for CPU. Latency here is CPU latency, not the GPU number the request asks for."""
     return await _eval(model, n, dataset)
 
 
@@ -268,7 +339,7 @@ def _data_fingerprint(dataset: str) -> str:
 async def train_model(
     model: str, epochs: float = 1.0, lora_r: int = 16, dataset: str = "v1", data: str = ""
 ) -> tuple[Dir, str]:
-    """Train a candidate on a T4 and register the weights as a model artifact.
+    """Train a candidate on the factory's GPU and register the weights as a model artifact.
 
     `data` is the fingerprint of the training tickets. It is not used here; it is an input
     so that it is part of the cache key: edit the tickets and the fine-tune is retrained.
@@ -279,14 +350,15 @@ async def train_model(
 @tool
 @tools_env.task(retries=1)
 async def fine_tune(model: str, epochs: float = 1.0, lora_r: int = 16, dataset: str = "v1") -> str:
-    """Fine-tune a model on the training tickets of a dataset version, on a T4, and register the result as a model artifact. Chat models get LoRA (about a minute per epoch); the encoder gets a full fine-tune of its untrained head (seconds per epoch, so give it 2-3). `epochs` and `lora_r` are yours to choose. Returns an artifact:<name>@<version> reference to pass to run_eval and promote."""
+    """Fine-tune a model on the training tickets of a dataset version, on the factory's GPU, and register the result as a model artifact. Chat models get LoRA (about a minute per epoch); the encoder gets a full fine-tune of its untrained head (seconds per epoch, so give it 2-3). `epochs` and `lora_r` are yours to choose. Returns a model reference (artifact:<name>@<version>, or a storage path on a platform without a registry) to pass to run_eval and promote."""
     short = model.split("@")[0].removeprefix("artifact:ticket-router-") if model.startswith("artifact:") else model
     named = dataclasses.replace(
         train_model, short_name=f"train_model · {short} · {epochs:g}ep" + (f" · {dataset}" if dataset != "v1" else "")
     )
     weights, summary = await named(model, epochs, lora_r, dataset, _data_fingerprint(dataset))
-    if _is_local():
-        # No artifact registry off-cluster: the model is a local directory, pass its path.
+    if await registry() == "outputs":
+        # No artifact registry: the model is the output directory (local, or in the devbox's
+        # object store); its path is the reference.
         return summary.split("\nartifact:")[0] + f"\nnew model reference: {weights.path}"
     name_version = summary.rsplit("artifact: ", 1)[-1].strip()
     return summary.split("\nartifact:")[0] + f"\nnew model reference: artifact:{name_version}"
@@ -310,9 +382,6 @@ async def publish_router(
     # The app reads this at startup and reports it on `/`, so a deploy can wait for *this*
     # version to be the one answering. The base model name is not enough: a retrain of
     # the same base looks identical to the pod it is replacing.
-    with open(os.path.join(local, "router.json"), "w") as f:
-        json.dump({"version": version, "model": model, "dataset": dataset}, f)
-    weights = await Dir.from_local(local)
     entry = {
         "model": model,
         "accuracy": accuracy,
@@ -321,6 +390,9 @@ async def publish_router(
         "dataset": dataset,
         "version": version,
     }
+    with open(os.path.join(local, "router.json"), "w") as f:
+        json.dump(entry, f)
+    weights = await Dir.from_local(local)
     card = artifacts.Card.create_from(
         content=f"# ticket-router {version}\n\n{reason}\n\n```json\n{json.dumps(entry, indent=2)}\n```",
         format="md",
@@ -393,6 +465,19 @@ async def promote(model: str, accuracy: float, latency_p50_ms: float, reason: st
     if FACTORY_APPROVAL and not await _ask_for_approval(model, accuracy, latency_p50_ms, reason):
         return f"promotion of {model} was DECLINED by the approver. Nothing was published or deployed."
 
+    if await registry() == "outputs":
+        # No artifact registry (a devbox): the promoted weights are a task output, and the
+        # app mounts that output directory. Same files, no versions to roll back through.
+        weights, published = await publish_router(model, accuracy, latency_p50_ms, reason, dataset)
+        text = (
+            f"promoted {model} as ticket-router {published} (accuracy {accuracy:.1%}, p50 {latency_p50_ms:.0f} ms); "
+            f"weights at {weights.path}."
+        )
+        if not FACTORY_DEPLOY:
+            return text + " Deployment skipped (FACTORY_DEPLOY=0)."
+        url = await _deploy(make_router_app(published, base=_base_of(model), weights=weights), expect_version=published)
+        return text + f" Deployed the {APP_NAME} app: {url}. Run test_deployment to check it before you finish."
+
     # Remember what was in production before, so rollback has somewhere to go.
     try:
         previous = Artifact.get(ROUTER_ARTIFACT).version
@@ -422,6 +507,30 @@ def _base_of(model: str) -> str | None:
     return None
 
 
+def _host_builder():
+    """Build the app's image where this task runs, when that is a Mac.
+
+    Inside a pod the SDK uses the platform's remote image builder, which a devbox does not
+    have. On an Apple Silicon devbox this task runs natively on the Mac, where Docker and
+    the devbox registry are, so the local builder applies; the image was already built for
+    the GPU tasks, so this is a registry check, not a build. Anywhere else: unchanged.
+    """
+    import contextlib
+    import platform
+
+    if platform.system() != "Darwin":
+        return contextlib.nullcontext()
+    from flyte._initialize import get_init_config, init_config_context
+
+    # The host process gets a minimal PATH; Docker Desktop's CLI, which the local builder
+    # uses to check the registry, lives in /usr/local/bin.
+    if "/usr/local/bin" not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/local/bin"
+    # The devbox registry is `localhost:30000`; the in-cluster config does not say so, and
+    # without it the image is looked up under a bare name and never found.
+    return init_config_context(get_init_config().replace(image_builder="local", image_registry="localhost:30000"))
+
+
 async def _deploy(app_env, expect_version: str, timeout_s: int = 900) -> str:
     """Deploy the router app and wait, with a deadline, until the new revision is the one answering.
 
@@ -442,9 +551,10 @@ async def _deploy(app_env, expect_version: str, timeout_s: int = 900) -> str:
     except Exception:  # noqa: BLE001  (first deploy: no app yet)
         before = 0
     try:
-        handle = await asyncio.wait_for(
-            flyte.with_servecontext(interactive_mode=False).serve.aio(app_env), timeout=timeout_s
-        )
+        with _host_builder():
+            handle = await asyncio.wait_for(
+                flyte.with_servecontext(interactive_mode=False).serve.aio(app_env), timeout=timeout_s
+            )
     except asyncio.TimeoutError:
         raise RuntimeError(
             f"app {APP_NAME} was deployed but did not become active within {timeout_s}s; "
@@ -454,6 +564,13 @@ async def _deploy(app_env, expect_version: str, timeout_s: int = 900) -> str:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         conds = MessageToDict(App.get(APP_NAME).pb2).get("status", {}).get("conditions", [])
+        if conds and not any("revision" in c for c in conds):
+            # A devbox reports plain ACTIVE conditions with no revision history. The version
+            # check below is the proof that the new pod is the one answering.
+            if any(c.get("deploymentStatus") == "DEPLOYMENT_STATUS_ACTIVE" for c in conds):
+                break
+            await asyncio.sleep(10)
+            continue
         new = [c for c in conds if int(c.get("revision", 0)) > before]
         if new:
             latest_id = max(new, key=lambda c: int(c.get("revision", 0))).get("deploymentId")
@@ -479,7 +596,7 @@ async def _deploy(app_env, expect_version: str, timeout_s: int = 900) -> str:
             "Check the app's revision log in the Union UI, then rollback or fix and promote again"
         )
 
-    endpoint = App.get(APP_NAME).endpoint
+    endpoint = reach(App.get(APP_NAME).endpoint)
     for _ in range(12):  # the new revision is ready; confirm it is the one answering
         try:
             info = httpx.get(endpoint + "/", timeout=60).json()
@@ -503,7 +620,7 @@ async def _wait_for_app(timeout_s: int = 300) -> str:
     import httpx
     from flyte.remote import App
 
-    endpoint = App.get(APP_NAME).endpoint
+    endpoint = reach(App.get(APP_NAME).endpoint)
     deadline = time.time() + timeout_s
     last = ""
     while time.time() < deadline:
@@ -547,7 +664,7 @@ async def test_deployment(n: int = 12, dataset: str = "v1") -> str:
     lat = sorted(latencies)[len(latencies) // 2]
     text = (
         f"live app {APP_NAME} at {endpoint}: {hits}/{len(tickets)} correct ({acc:.0%}) on dataset {dataset}, "
-        f"p50 {lat:.0f} ms per ticket on the app's {device} pod{' (a CPU pod is not comparable to the T4 eval)' if device == 'cpu' else ''}. "
+        f"p50 {lat:.0f} ms per ticket on the app's {device} pod{f' (a CPU pod is not comparable to the {GPU_LABEL} eval)' if device == 'cpu' else ''}. "
         f"The app is serving {ROUTER_ARTIFACT}@{info.get('version', '?')}: "
         f"{(info.get('factory') or {}).get('base', '?')} trained on dataset {info.get('dataset')}."
     )
@@ -563,6 +680,11 @@ async def rollback(version: str) -> str:
     """Roll production back to an earlier `ticket-router` artifact version (from production_status or promote's reply): the old weights are republished as the newest version, so production is always the latest version, and the app is redeployed. Use when a deployment test fails."""
     if _is_local():
         return "Local run: nothing to roll back off-cluster."
+    if await registry() == "outputs":
+        return (
+            "This platform has no artifact registry, so there is no version history to roll back through. "
+            "To go back, call promote again with the earlier model reference (the storage path fine_tune returned for it)."
+        )
     from flyte.remote import Artifact
 
     old = Artifact.get(ROUTER_ARTIFACT, version=version)  # raises if it does not exist
