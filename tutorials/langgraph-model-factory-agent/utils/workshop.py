@@ -43,7 +43,10 @@ def run(task, *, local: bool = False, **kwargs):
 
     root = _root_for(task)
     if local:
+        # No cluster: the task and every tool it calls run in this process. Nothing to open;
+        # the output of each step is the result below.
         flyte.init(root_dir=root)
+        print(f"local run: {getattr(task, 'name', task)} in this kernel (no cluster; it takes as long as the work does)")
         return _first(flyte.with_runcontext(mode="local").run(task, **kwargs).outputs())
 
     from flyte.remote import ActionDetails, Run

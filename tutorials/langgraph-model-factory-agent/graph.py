@@ -154,6 +154,14 @@ class Decision(BaseModel):
     evidence: list[str] = Field(description="Two to five concrete numbers from the tool results, as a list of strings.")
     rationale: str = Field(description="One paragraph the support team would understand.")
 
+    @field_validator("accuracy", mode="before")
+    @classmethod
+    def _accuracy_as_fraction(cls, v):
+        """Open models tend to write 97.5 where the schema says 0.975; take the percentage."""
+        if isinstance(v, str):
+            v = float(v.strip().rstrip("%"))
+        return v / 100 if isinstance(v, (int, float)) and 1 < v <= 100 else v
+
     @field_validator("evidence", mode="before")
     @classmethod
     def _evidence_as_list(cls, v):

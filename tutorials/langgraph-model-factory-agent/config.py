@@ -83,6 +83,11 @@ ON_MAC = ACCELERATOR == "apple"
 GPU_LABEL = {"T4": "T4", "L40s": "L40s", "apple": "Apple Silicon GPU", "cpu": "CPU"}[ACCELERATOR]
 GPU_ARTICLE = {"T4": "a T4", "L40s": "an L40s", "apple": "the Mac's GPU", "cpu": "the CPU"}[ACCELERATOR]
 
+# A run with no platform at all (`flyte run --local`, Colab) keeps what it promotes here: the
+# weights of each version and a pointer to the current one. The support agent's `--router oss`
+# loads the current version in-process from this directory.
+LOCAL_DIR = os.environ.get("FACTORY_LOCAL_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".factory")
+
 # Whether the platform has an artifact registry (Union does; a devbox does not). Decided at
 # run time by tools.registry(): one failed lookup and the factory passes models around as
 # task outputs instead. FACTORY_ARTIFACTS=0 forces that off anywhere.
@@ -152,10 +157,17 @@ GPU_TOOLS = {"run_eval", "fine_tune"}  # the tools that end up on a T4
 
 
 def gpu_slots():
-    """A semaphore for GPU tools, or None when there is no limit. One per run."""
+    """A semaphore for GPU tools, or None when there is no limit. One per run.
+
+    A run with no platform (`flyte run --local`, Colab) has one process and one GPU, so
+    its GPU tools take turns unless FACTORY_MAX_PARALLEL_GPU says otherwise.
+    """
     import asyncio
 
-    return asyncio.Semaphore(MAX_PARALLEL_GPU) if MAX_PARALLEL_GPU > 0 else None
+    limit = MAX_PARALLEL_GPU
+    if limit == 0 and (flyte.ctx() is None or flyte.ctx().mode == "local"):
+        limit = 1
+    return asyncio.Semaphore(limit) if limit > 0 else None
 
 
 # ── Image ────────────────────────────────────────────────────────────────────
@@ -238,6 +250,8 @@ agent_env = flyte.TaskEnvironment(
 )
 
 # The bake-off. Step 6: the same agent driven by several models, compared.
+# Deploys are off here, whatever .env says: four agents promoting four models must not
+# redeploy one app four times (and race each other for which version answers).
 factory_env = flyte.TaskEnvironment(
     name=tagged("factory-bakeoff"),
     image=image,
@@ -246,7 +260,7 @@ factory_env = flyte.TaskEnvironment(
     env_vars={
         **PROPAGATED,
         "AGENT_MODEL": AGENT_MODEL,
-        "FACTORY_DEPLOY": "1" if FACTORY_DEPLOY else "0",
+        "FACTORY_DEPLOY": "0",
     },
     depends_on=[tools_env, gpu_env, cpu_env],
 )

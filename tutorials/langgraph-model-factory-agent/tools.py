@@ -38,7 +38,18 @@ import flyte.report
 from flyte.io import Dir
 from flyteplugins.agents.langgraph import tool
 
-from config import FACTORY_APPROVAL, FACTORY_ARTIFACTS, FACTORY_DEPLOY, GPU_ARTICLE, GPU_LABEL, cpu_env, gpu_env, tagged, tools_env
+from config import (
+    FACTORY_APPROVAL,
+    FACTORY_ARTIFACTS,
+    FACTORY_DEPLOY,
+    GPU_ARTICLE,
+    GPU_LABEL,
+    LOCAL_DIR,
+    cpu_env,
+    gpu_env,
+    tagged,
+    tools_env,
+)
 from factory import CANDIDATES, evaluate
 from factory import fine_tune as _fine_tune
 from report import (  # module scope: the code bundle only carries modules loaded at serialization
@@ -86,6 +97,89 @@ async def registry() -> str:
                     raise
                 _REGISTRY = "outputs"
     return _REGISTRY
+
+
+# ── The local registry: what a run with no platform promotes to ──────────────
+#
+# `flyte run --local` (a laptop, Colab) has no artifact registry and no app. `promote`
+# copies the winner into LOCAL_DIR/ticket-router/<version>/ and points `current.json` at
+# it; the support agent's `--router oss` and `test_deployment` load that in-process.
+
+
+def _local_registry() -> str:
+    return os.path.join(LOCAL_DIR, ROUTER_ARTIFACT)
+
+
+def local_current() -> dict | None:
+    """The version in production in a local run: {version, path, model, accuracy, ...} or None."""
+    p = os.path.join(_local_registry(), "current.json")
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def _local_versions() -> list[dict]:
+    reg = _local_registry()
+    if not os.path.isdir(reg):
+        return []
+    out = []
+    for name in sorted(os.listdir(reg), reverse=True):
+        p = os.path.join(reg, name, "router.json")
+        if os.path.exists(p):
+            with open(p) as f:
+                out.append({**json.load(f), "path": os.path.join(reg, name)})
+    return out
+
+
+def _local_publish(model: str, accuracy: float, latency_p50_ms: float, reason: str, dataset: str) -> dict:
+    import shutil
+
+    version = f"v{int(time.time())}"
+    dest = os.path.join(_local_registry(), version)
+    shutil.copytree(model, dest)
+    entry = {
+        "model": model,
+        "accuracy": accuracy,
+        "latency_p50_ms": latency_p50_ms,
+        "reason": reason,
+        "dataset": dataset,
+        "version": version,
+    }
+    with open(os.path.join(dest, "router.json"), "w") as f:
+        json.dump(entry, f, indent=2)
+    with open(os.path.join(_local_registry(), "current.json"), "w") as f:
+        json.dump({**entry, "path": dest}, f, indent=2)
+    return {**entry, "path": dest}
+
+
+def _local_test(n: int, dataset: str) -> str:
+    """test_deployment with no app: the current local version, loaded in-process."""
+    current = local_current()
+    if not current:
+        return "FAIL: nothing is in production. Nothing has been promoted in this local registry; promote first."
+    from router_app import Router
+
+    r = Router(current["path"])
+    tickets = load_split("test", dataset)[-max(1, min(n, 40)) :]
+    hits, latencies, misses = 0, [], []
+    for t in tickets:
+        body = r.classify(t.text)
+        latencies.append(body["latency_ms"])
+        if body["label"] == t.label:
+            hits += 1
+        elif len(misses) < 3:
+            misses.append({"ticket": t.text[:70], "expected": t.label, "got": body["label"]})
+    acc = hits / len(tickets)
+    lat = sorted(latencies)[len(latencies) // 2]
+    text = (
+        f"local router (no app off-platform; the promoted model loaded in-process from {current['path']}): "
+        f"{hits}/{len(tickets)} correct ({acc:.0%}) on dataset {dataset}, p50 {lat:.0f} ms per ticket on {r.device}. "
+        f"Serving ticket-router@{current['version']}: {r.factory.get('base', '?')} trained on dataset {r.dataset}."
+    )
+    if misses:
+        text += "\nmisses: " + json.dumps(misses)
+    return ("PASS" if acc >= 0.75 else "FAIL") + ": " + text
 
 
 def reach(endpoint: str) -> str:
@@ -164,7 +258,21 @@ async def list_candidates(dataset: str = "v1") -> str:
 async def production_status() -> str:
     """What is in production right now: the ticket-router artifact versions (newest first) and the deployed app."""
     if _is_local():
-        return "Local run: no artifact registry or app off-cluster. Nothing is in production."
+        current = local_current()
+        if not current:
+            return (
+                "IN PRODUCTION NOW: nothing. Local run: the local registry is empty; nothing has been promoted. "
+                "Model references here are directory paths, as returned by fine_tune."
+            )
+        others = [v for v in _local_versions() if v["version"] != current["version"]]
+        text = (
+            f"IN PRODUCTION NOW: {current['path']}  (version {current['version']}; weights from {current['model']}; "
+            f"measured on dataset {current['dataset']} when promoted: accuracy {current['accuracy']}, p50 {current['latency_p50_ms']} ms).\n"
+            "Local run: no app; the support agent loads this directory in-process. Evaluate the live model by this exact path."
+        )
+        if others:
+            text += "\nEarlier versions (rollback takes a version): " + ", ".join(v["version"] for v in others)
+        return text
     from flyte.remote import App, Artifact
 
     if await registry() == "outputs":
@@ -292,10 +400,24 @@ async def _train(model: str, epochs: float, lora_r: int, dataset: str) -> tuple[
     max_steps = int(os.environ.get("FACTORY_MAX_STEPS", "-1"))  # deployment tests only
     live = [] if _is_local() else [_live_training_report(model, epochs, lora_r, dataset)]
     r = _fine_tune(path, local_out, epochs=epochs, max_steps=max_steps, lora_r=lora_r, version=dataset, callbacks=live)
+    if _is_local():
+        # One process for the whole run, and training seeds Python's `random`, so two
+        # fine-tunes would draw the same "random" output path from the SDK. Name it ourselves.
+        dest = os.path.join(tempfile.mkdtemp(prefix="factory-weights-"), f"{base}-ft")
+        weights = await Dir.from_local(local_out, remote_destination=dest)
+        # No registry and no upload endpoint off-platform: the directory is the output.
+        summary = r.summary()
+        await flyte.report.replace.aio(
+            training_html(
+                model, epochs, lora_r, dataset, r.history or [], summary=summary, seconds=r.seconds, device=r.device
+            )
+        )
+        await flyte.report.flush.aio()
+        return weights, summary
     weights = await Dir.from_local(local_out)
     name = f"{FT_PREFIX}-{base}-ft"
     version = f"{dataset}-{epochs:g}ep-r{lora_r}-{int(time.time())}"
-    card = artifacts.Card.create_from(
+    card = await artifacts.Card.create_from.aio(
         content=(
             f"# {name}\n\nLoRA fine-tune of `{model}` on {len(load_split('train', dataset))} synthetic "
             f"support tickets, dataset {dataset} ({', '.join(DATASET_VERSIONS[dataset])}).\n\n"
@@ -447,17 +569,15 @@ async def promote(model: str, accuracy: float, latency_p50_ms: float, reason: st
     """Promote one model to production: publish it as the `ticket-router` artifact and deploy the serving app that mounts it. Call this once, at the end, with the numbers you measured. Follow it with test_deployment."""
     _dataset(dataset)
     if _is_local():
-        entry = {
-            "model": model,
-            "accuracy": accuracy,
-            "latency_p50_ms": latency_p50_ms,
-            "reason": reason,
-            "dataset": dataset,
-        }
-        path = os.path.join(tempfile.mkdtemp(prefix="registry-"), "ticket-router.json")
-        with open(path, "w") as f:
-            json.dump(entry, f, indent=2)
-        return f"promoted {model} (accuracy {accuracy:.1%}, p50 {latency_p50_ms:.0f} ms). Local run: registry written to {path}; no artifact or app off-cluster."
+        # No platform: copy the winner into the local registry and make it current. The
+        # support agent and test_deployment load it from there, in-process.
+        entry = _local_publish(await _materialize(model), accuracy, latency_p50_ms, reason, dataset)
+        return (
+            f"promoted {model} as ticket-router {entry['version']} "
+            f"(accuracy {accuracy:.1%}, p50 {latency_p50_ms:.0f} ms). Local run: no app to deploy; the model is in "
+            f"production at {entry['path']} and the support agent loads it in-process. "
+            "Run test_deployment to check it before you finish."
+        )
 
     from flyte.remote import Artifact
 
@@ -641,7 +761,7 @@ async def test_deployment(n: int = 12, dataset: str = "v1") -> str:
     """Send n held-out tickets to the LIVE ticket-router app and report its accuracy and latency. Call this after promote. If it fails, use rollback."""
     _dataset(dataset)
     if _is_local():
-        return "Local run: no app to test off-cluster. Skipping."
+        return _local_test(n, dataset)
     import httpx
 
     await flyte.init_in_cluster.aio()
@@ -679,11 +799,19 @@ async def test_deployment(n: int = 12, dataset: str = "v1") -> str:
 async def rollback(version: str) -> str:
     """Roll production back to an earlier `ticket-router` artifact version (from production_status or promote's reply): the old weights are republished as the newest version, so production is always the latest version, and the app is redeployed. Use when a deployment test fails."""
     if _is_local():
-        return "Local run: nothing to roll back off-cluster."
+        match = [v for v in _local_versions() if v["version"] == version]
+        if not match:
+            return f"no local version {version!r}; production_status lists the ones there are."
+        old = match[0]
+        entry = _local_publish(
+            old["path"], old["accuracy"], old["latency_p50_ms"], f"Rollback to {version}.", old["dataset"]
+        )
+        return f"rolled back: {version} republished as {entry['version']} and made current ({entry['path']}). Run test_deployment to confirm."
     if await registry() == "outputs":
         return (
             "This platform has no artifact registry, so there is no version history to roll back through. "
-            "To go back, call promote again with the earlier model reference (the storage path fine_tune returned for it)."
+            "To go back, call promote again with the earlier model reference "
+            "(the storage path fine_tune returned for it)."
         )
     from flyte.remote import Artifact
 
