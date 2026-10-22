@@ -214,6 +214,19 @@ The devbox and Colab paths also need a model API key (Anthropic by default, or O
 with a few dollars of credit; the workshop cluster already holds one. The devbox and
 `--local` paths download about 5 GB of models on the first run (no Hugging Face account).
 
+**Working with a coding agent?** Two skill sets teach Claude Code, Codex and friends the
+Flyte 2 SDK and Union, so they stop guessing at the API while you follow along or extend
+the tutorial:
+
+- [flyteorg/flyte-agent-plugins](https://github.com/flyteorg/flyte-agent-plugins): 21 skills
+  for building, deploying and running Flyte workflows, plus two MCP servers (Flyte docs
+  search, and acting on a cluster). `uvx flyte-skills install`, or in Claude Code
+  `/plugin marketplace add flyteorg/flyte-agent-plugins` then `/plugin install flyte@flyte-agent-plugins`.
+- [unionai-oss/union-skills](https://github.com/unionai-oss/union-skills): skills for
+  deploying and operating Union (connecting a cluster, running workflows, debugging one
+  that won't come up). `uvx union-skills install`, or `/plugin marketplace add unionai-oss/union-skills`
+  then `/plugin install union@union-skills`.
+
 What you need on your machine, by path:
 
 | | Union cluster | Devbox (your machine) | No cluster (`--local`) |
@@ -373,11 +386,11 @@ of an hour.
 <details id="setup-cluster">
 <summary><b>On the workshop cluster (<code>tryv2</code>), or your own Union cluster</b></summary>
 
-The workshop runs in the `workshopfactory` project on `tryv2.hosted.unionai.cloud`. From
+The workshop runs in the `factorysea` project on `tryv2.hosted.unionai.cloud`. From
 a laptop, the whole setup is the config file:
 
 ```bash
-flyte create config --endpoint tryv2.hosted.unionai.cloud --project workshopfactory --domain development --builder remote
+flyte create config --endpoint tryv2.hosted.unionai.cloud --project factorysea --domain development --builder remote
 flyte get secret                    # ANTHROPIC_API_KEY is already there; nothing to create
 flyte run model_factory.py model_factory --fine_tune_too       # the first run signs you in
 ```
