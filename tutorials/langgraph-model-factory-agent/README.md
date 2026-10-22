@@ -344,7 +344,8 @@ What stands in for the platform, in `tools.py`, decided at run time by `flyte.ct
   the same `report.html` locally, into the run's metadata folder. In the notebook, `run()`
   renders the step's own report under the cell, and `show_reports(all=True)` renders every
   report of that run: each eval's table and confusion matrix, each fine-tune's loss curve,
-  the engineer's timeline and decision (`utils/report_viewer.py`).
+  the engineer's timeline and decision (`utils/report_viewer.py`). A cached fine-tune did
+  not run again, so it has no new report.
 - **The run graph, in the terminal.** Add `--tui` to any `--local` command and the SDK
   opens its terminal UI on the run as it goes: the actions, their logs and outputs, the
   same tree the console shows for a cluster run (`flyte[tui]` is in `requirements.txt`).

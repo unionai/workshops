@@ -30,7 +30,17 @@ def title_of(path: pathlib.Path) -> str:
     text = path.read_text(errors="ignore")
     m = re.search(r"<h[12][^>]*>(.*?)</h[12]>", text, re.S)
     if m:
-        return html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip()
+        title = html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip()
+        if ":" not in title:
+            # "Eval results" says nothing about which model; a later heading does
+            # ("Confusion matrix: qwen2.5-1.5b").
+            sub = re.search(r"<h[3-4][^>]*>[^<:]*:\s*([^<]+)</h[3-4]>", text)
+            if sub:
+                name = html.unescape(sub.group(1)).strip()
+                if "/" in name:  # a fine-tune's weights directory: keep only its name
+                    name = name.rstrip("/").rsplit("/", 1)[-1]
+                title += " · " + name
+        return title
     tabs = re.findall(r'handleLinkClick\(this\)">([^<]*)<', text)
     return ", ".join(t for t in tabs if t != "main") or path.parent.name
 
