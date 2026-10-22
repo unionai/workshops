@@ -52,15 +52,19 @@ def tagged(name: str) -> str:
 #             and the devbox still records the run. Needs `flyte start devbox --apple-silicon`.
 #     cpu     no GPU. Slow for the chat models; fine for the encoder.
 #
-# On a Mac whose .flyte/config.yaml points at a devbox the default is `apple`; the cluster
-# config next to the code keeps the cluster default. Set it explicitly to override.
+# On a Mac whose Flyte config points at a devbox the default is `apple`; a cluster config
+# keeps the cluster default. The config is the one the CLI reads: `.flyte/config.yaml`
+# next to the code, or the file named by FLYTECTL_CONFIG (or UCTL_CONFIG) when you keep
+# a devbox config and a cluster config side by side. Set ACCELERATOR to override.
 
 
 def _default_accelerator() -> str:
     if platform.system() == "Darwin" and platform.machine() == "arm64":
-        cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".flyte", "config.yaml")
+        here = os.path.dirname(os.path.abspath(__file__))
+        cfg = os.environ.get("UCTL_CONFIG") or os.environ.get("FLYTECTL_CONFIG")
+        cfg = os.path.join(here, cfg) if cfg and not os.path.isabs(cfg) else cfg
         try:
-            if "localhost:30080" in open(cfg).read():
+            if "localhost:30080" in open(cfg or os.path.join(here, ".flyte", "config.yaml")).read():
                 return "apple"
         except OSError:
             pass
@@ -146,6 +150,10 @@ _KNOBS = (
     "ROUTER_MEMORY",
 )
 PROPAGATED = {k: v for k, v in os.environ.items() if (k in _KNOBS or k.endswith("_SECRET_NAME")) and v}
+# The accelerator travels resolved, not as read: its default comes from this Mac's config
+# file, which a pod cannot see, and a pod left to guess would ask for a T4 that a devbox
+# does not have.
+PROPAGATED["ACCELERATOR"] = ACCELERATOR
 
 # How many GPU tools one run may have in flight at once. 0 means no limit: "evaluate these
 # five" is five T4s. In a room of thirty people on one GPU pool, set it to 1 or 2 so a
