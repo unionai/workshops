@@ -196,19 +196,22 @@ Three ways to run it; pick one. The plain `flyte run` commands in the steps are 
 or a cluster; the `--local` lines are for Colab or a laptop with neither. Each path is spelled
 out in its own section below, folded.
 
-- **A Flyte devbox on your machine (recommended: the full workshop).** Docker Desktop
-  running, Python 3.10 or newer, [`uv`](https://docs.astral.sh/uv/), `pip install -r
-  requirements.txt`, then `flyte start devbox --apple-silicon` on an Apple Silicon Mac
-  (`flyte start devbox` elsewhere: an NVIDIA GPU, or the CPU with the small models). Every
-  step runs, the GPU work on your own GPU.
+- **A Flyte devbox on your machine (recommended).** Docker Desktop running, Python 3.10
+  or newer, [`uv`](https://docs.astral.sh/uv/), `pip install -r requirements.txt`, then
+  `flyte start devbox --apple-silicon` on an Apple Silicon Mac (`flyte start devbox`
+  elsewhere: an NVIDIA GPU, or the CPU with the small models). Steps 0 to 4, the deployed
+  router app, the bake-off, the approval gate and the crash (step 7) all run, the GPU work
+  on your own GPU. Only step 5 and the validate-on-promote trigger stay out: artifact
+  triggers are a Union feature.
 - **The notebook on Google Colab (no GPU needed).** A Google account and a model API key;
   the [Colab badge](https://colab.research.google.com/github/unionai/workshops/blob/factory/tutorials/langgraph-model-factory-agent/langgraph-model-factory-agent-tutorial.ipynb)
   opens it on a free T4 with nothing to install. Slightly pared down: steps 0 to 4 and the
-  bake-off; the live app (step 5) and kill-and-resume (step 7) need a Flyte deployment.
+  bake-off, with a folder standing in for the deployed app; the triggers (step 5) and
+  kill-and-resume (step 7) need a Flyte deployment.
 - **The workshop's Union cluster (`tryv2`).** Any laptop, with Python 3.10 or newer, `uv`
   and `pip install -r requirements.txt`; then one `flyte create config` command (below) and
-  a browser sign-in. The cluster's T4s do the work and every step runs, including the
-  triggers. The notebook does the same when its `LOCAL` switch is `False`.
+  a browser sign-in. The cluster's T4s do the work and every step runs, including step 5's
+  triggers: the full workshop. The notebook does the same when its `LOCAL` switch is `False`.
 
 The devbox and Colab paths also need a model API key (Anthropic by default, or OpenAI)
 with a few dollars of credit; the workshop cluster already holds one. The devbox and
@@ -270,6 +273,8 @@ the run graph, the cache, the retries, the logs and the reports:
 ```bash
 flyte start devbox --apple-silicon        # a Mac; elsewhere: flyte start devbox
 flyte create config --devbox              # writes .flyte/config.yaml pointing at localhost:30080
+# keeping a cluster config too? write this one elsewhere and name it instead:
+#   flyte create config --devbox -o .flyte/config.devbox.yaml && export FLYTECTL_CONFIG=.flyte/config.devbox.yaml
 flyte create secret anthropic-api-key --value sk-ant-...
 echo "ANTHROPIC_API_KEY_SECRET_NAME=anthropic-api-key" >> .env
 flyte run model_factory.py model_factory --fine_tune_too      # same commands as the cluster
@@ -279,11 +284,14 @@ Needs Docker Desktop running, `uv` on the PATH (the Apple Silicon bridge builds 
 environment per task image with it, about 3 minutes the first time, cached under
 `~/.flyte/apple-silicon/envs/`), and `flyte` 2.12 or later. The one knob is `ACCELERATOR`
 (`T4` | `L40s` | `apple` | `cpu`): it picks the pod shape for `run_eval` and `train_model`
-and the torch device. On a Mac whose `.flyte/config.yaml` points at a devbox it defaults
-to `apple`; a devbox without a GPU wants `ACCELERATOR=cpu` in `.env`, and then the
+and the torch device. On a Mac whose Flyte config (`.flyte/config.yaml`, or the file
+`FLYTECTL_CONFIG` names) points at a devbox it defaults to `apple`; a config that points
+at a cluster keeps the T4 default, and then the eval pods wait forever for an NVIDIA GPU
+the devbox does not have; a devbox without a GPU wants `ACCELERATOR=cpu` in `.env`, and then the
 encoder is the candidate to fine-tune (seconds, not the quarter hour a chat model takes
-on a CPU). Then every step runs as written, with the T4 swapped for your GPU: steps 0 to
-4, the bake-off, and the crash. Measured on an M5 Max, same code, same commands:
+on a CPU). Then every step but 5 runs as written, with the T4 swapped for your GPU: steps
+0 to 4, the bake-off, the approval gate and the crash. Measured on an M5 Max, same code,
+same commands:
 
 | | Union cluster (T4) | Apple Silicon devbox (M5 Max) |
 |---|---|---|
@@ -415,9 +423,11 @@ flyte create secret ANTHROPIC_API_KEY --value sk-ant-...
 On a shared cluster such as `tryv2`, set `FACTORY_TAG=<your handle>` in `.env`. It namespaces what has
 to be yours: the serving app (`ticket-router-<tag>`), the production artifacts, and the
 environments that carry triggers. The GPU training task stays shared, so each fine-tune
-is trained once for the whole room. Prefix your secret names the same way
-(`FLYTE_SECRET_PREFIX=SAGE_` makes the code ask for `SAGE_ANTHROPIC_API_KEY`), or point at
-an existing secret by name (`OPENAI_API_KEY_SECRET_NAME=my-openai-key`).
+is trained once for the whole room. The API key stays shared: on `tryv2` the project's
+`ANTHROPIC_API_KEY` is the one secret everyone uses, so leave `FLYTE_SECRET_PREFIX`
+unset. The prefix is for a cluster where each person brings their own key
+(`FLYTE_SECRET_PREFIX=SAGE_` makes the code ask for `SAGE_ANTHROPIC_API_KEY`); a secret
+with another name entirely is `OPENAI_API_KEY_SECRET_NAME=my-openai-key`.
 
 The first cluster run builds two images. The one with the training stack takes about six
 minutes, once.
