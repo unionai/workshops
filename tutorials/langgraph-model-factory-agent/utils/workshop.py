@@ -45,6 +45,7 @@ def run(task, *, local: bool = False, **kwargs):
     if local:
         # No cluster: the task and every tool it calls run in this process. Nothing to open;
         # the output of each step is the result below.
+        _reports_as_text()
         flyte.init(root_dir=root)
         print(f"local run: {getattr(task, 'name', task)} in this kernel (no cluster; it takes as long as the work does)")
         return _first(flyte.with_runcontext(mode="local").run(task, **kwargs).outputs())
@@ -72,6 +73,28 @@ def run(task, *, local: bool = False, **kwargs):
         print(str(ActionDetails.get(run_name=r.name, name="a0").pb2.error_info)[:1500])
         return None
     return _first(r.outputs())
+
+
+def _reports_as_text() -> None:
+    """Keep task reports working inside a Jupyter kernel.
+
+    flyte 2.12 renders a report as an IPython `HTML` object whenever an IPython shell is
+    active, and `flyte.report.flush()` then fails its own `isinstance(str)` check, so every
+    task that writes a report dies in local mode in a notebook (not from the CLI). Hand
+    `flush` the HTML text instead. Harmless once the SDK fixes it.
+    """
+    from flyte.report import _report
+
+    if getattr(_report.Report, "_workshop_patched", False):
+        return
+    original = _report.Report.get_final_report
+
+    def as_text(self):
+        out = original(self)
+        return getattr(out, "data", out)  # IPython's HTML keeps the markup in .data
+
+    _report.Report.get_final_report = as_text
+    _report.Report._workshop_patched = True
 
 
 def _config_path(root: Path = ROOT):

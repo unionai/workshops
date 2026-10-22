@@ -31,7 +31,8 @@ the agent against the record of what its tools actually returned rather than its
 
 The whole thing runs three ways: on a Union cluster, which is where the parallel GPUs, the
 artifacts, the deployed app and the triggers live (the notebook
-`langgraph-model-factory-agent-tutorial.ipynb` walks the same steps from Colab); on your own
+`langgraph-model-factory-agent-tutorial.ipynb` walks the same steps from Colab, against a
+cluster or on its own); on your own
 machine with a Flyte devbox, which on an Apple Silicon Mac puts the evals, the fine-tunes
 and the router app on the Mac's GPU (see [On your own machine](#on-your-own-machine-a-flyte-devbox));
 or with `flyte run --local` and no cluster at all, in Colab on its T4 or on a laptop (see
@@ -322,9 +323,11 @@ flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --ma
 flyte run --local support_agent.py agent_handle_tickets --n 10 --router oss
 ```
 
-The notebook is the same with `LOCAL = True` in its setup cell: the
+The notebook runs this way by default (`LOCAL = True` in its setup cell; set it to
+`False` for a cluster): the
 [Colab badge](https://colab.research.google.com/github/unionai/workshops/blob/factory/tutorials/langgraph-model-factory-agent/langgraph-model-factory-agent-tutorial.ipynb)
-opens it on a T4, where steps 0 to 4 and the bake-off run end to end.
+opens it on a T4, where steps 0 to 4 and the bake-off run end to end with nothing but a
+model API key.
 
 What stands in for the platform, in `tools.py`, decided at run time by `flyte.ctx()`:
 
@@ -594,8 +597,13 @@ with a lag: every ticket the support team re-routes by hand is a label, and the 
 rate is accuracy monitoring without a labeling project. That is the manual step this
 tutorial keeps: someone notices tickets in the wrong queue, adds the category, labels the
 batch, publishes it (step 5). Everything after that is automatic. If you want a label-free
-alarm as well, the better signal is novelty rather than confidence: the distance of a
-ticket's encoder embedding from the training tickets. Either signal can publish the
+alarm as well, two signals beat confidence. Novelty: the distance of a ticket's encoder
+embedding from the training tickets, which a new kind of ticket raises whatever the softmax
+says. And a judge: the API model that routed tickets in step 0 can shadow the router on a
+sample (one ticket in fifty, say) with one extra option the router does not have, "none of
+these queues". Disagreement is an accuracy estimate with no labels, and the extra option is
+exactly what the softmax cannot express. It spends a little of the API budget the router
+saved, on a sample, so the arithmetic still favors the router. Either signal can publish the
 `support-tickets` artifact itself and start the same loop.
 
 **Try it with a ticket the old model could not route:**
