@@ -1,67 +1,71 @@
-"""Show a local run's HTML report inside a notebook.
+"""Show a local run's HTML reports inside a notebook.
 
-`flyte run --local ...` in a notebook cell runs in a subshell, so you get no run
-object back — just text. These helpers find the report it wrote and render it.
+On a cluster every task's report is a tab in the Flyte UI. A local run (`run(task)` with
+`LOCAL = True`, or `flyte run --local`) writes the same files to its metadata folder
+instead, one `report.html` per task that has `report=True`. These helpers find and render
+them:
 
-    !flyte run --local model_factory.py model_factory
-
-    from utils.report_viewer import show_latest
-    show_latest()
+    from utils.workshop import run, show_reports
+    run(model_factory, fine_tune_too=True)   # local mode: the step's own report renders under the cell
+    show_reports(all=True)                   # every report of that run: each eval, each fine-tune
+    show_reports(latest=True)                # after `!flyte run --local ...`: the newest report on disk
 """
 
 from __future__ import annotations
 
+import html
 import pathlib
+import re
 
-LOCAL_METADATA = "/tmp/flyte/metadata"
+LOCAL_METADATA = pathlib.Path("/tmp/flyte/metadata")  # where `flyte run --local` keeps a run's reports
 
 
-def show_latest(n: int = 1):
-    """Render the most recently written local report.
+def reports_in(folder: str | pathlib.Path) -> list[pathlib.Path]:
+    """Every report under a local run's metadata folder, oldest first (the step's own report is last)."""
+    return sorted(pathlib.Path(folder).rglob("report.html"), key=lambda p: p.stat().st_mtime)
 
-    Steps that call step 0 as a subtask write several reports in one run (one
-    per task). The last one written is the step you actually invoked, which is
-    why this defaults to n=1. Pass n=2 to see the one before it.
-    """
-    from IPython.display import HTML, Markdown
 
-    reports = sorted(
-        pathlib.Path(LOCAL_METADATA).rglob("report.html"),
-        key=lambda p: p.stat().st_mtime,
+def title_of(path: pathlib.Path) -> str:
+    """What the report is about: its first heading, else its tab names."""
+    text = path.read_text(errors="ignore")
+    m = re.search(r"<h[12][^>]*>(.*?)</h[12]>", text, re.S)
+    if m:
+        return html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip()
+    tabs = re.findall(r'handleLinkClick\(this\)">([^<]*)<', text)
+    return ", ".join(t for t in tabs if t != "main") or path.parent.name
+
+
+def render(path: pathlib.Path, height: int = 640):
+    """The report in an iframe, so its own styles and tab script stay inside it."""
+    from IPython.display import HTML
+
+    doc = html.escape(path.read_text(errors="ignore"), quote=True)
+    return HTML(
+        f'<details open style="margin:6px 0"><summary style="cursor:pointer;font-family:sans-serif">'
+        f"{html.escape(title_of(path))}</summary>"
+        f'<iframe srcdoc="{doc}" style="width:100%;height:{height}px;border:1px solid #ddd;border-radius:4px"></iframe>'
+        "</details>"
     )
-    if not reports:
+
+
+def show_reports(folder: str | pathlib.Path | None = None, *, all: bool = False, latest: bool = False, height: int = 640):
+    """Render a local run's reports in the notebook.
+
+    `folder` is the run's metadata folder (`run()` remembers the last one it ran). With
+    `all=True` every report of the run is shown, oldest first; otherwise only the newest,
+    which is the step's own. `latest=True` ignores `folder` and shows the newest report on
+    disk, for a run started with `!flyte run --local`.
+    """
+    from IPython.display import Markdown, display
+
+    where = LOCAL_METADATA if latest else folder
+    if where is None:
+        return Markdown("No local run yet. Run a step with `LOCAL = True` first, or pass `latest=True`.")
+    found = reports_in(where)
+    if not found:
         return Markdown(
-            f"No report found under `{LOCAL_METADATA}`. Run a step with `--local` "
-            "first — and note that only tasks marked `@env.task(report=True)` "
-            "write one."
+            f"No report found under `{where}`. Only tasks declared with `report=True` write one, "
+            "and only after they finish."
         )
-    if n > len(reports):
-        n = len(reports)
-    return HTML(reports[-n].read_text())
-
-
-def show(run):
-    """Render a specific run's report, when you drove Flyte from Python.
-
-        import flyte
-        flyte.init()
-        run = flyte.run(search, question="...")
-        run.wait()
-        show(run)
-
-    A local run's `url` is its metadata directory, so the report is on disk. A
-    remote run's `url` is a console link, so you get the link instead.
-    """
-    from IPython.display import HTML, Markdown
-
-    url = str(getattr(run, "url", ""))
-    if url.startswith("http"):
-        return Markdown(f"Remote run — open the report in the Flyte UI: [{url}]({url})")
-
-    reports = sorted(
-        pathlib.Path(url or LOCAL_METADATA).rglob("report.html"),
-        key=lambda p: p.stat().st_mtime,
-    )
-    if not reports:
-        return Markdown(f"No report found for run `{getattr(run, 'name', '?')}`.")
-    return HTML(reports[-1].read_text())
+    for p in found if all else found[-1:]:
+        display(render(p, height=height))

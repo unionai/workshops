@@ -8,3 +8,4 @@ peft>=0.13
 trl>=0.12
 datasets>=3.0
 accelerate>=0.34
+torchao>=0.16.0  # Colab preinstalls 0.10, and peft's LoRA dispatch refuses anything older than 0.16

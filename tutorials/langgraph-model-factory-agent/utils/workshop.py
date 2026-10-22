@@ -1,9 +1,10 @@
 """Notebook helpers for running the steps from Python instead of the shell.
 
-    from utils.workshop import run, show
+    from utils.workshop import run, show, show_reports
     from ml_engineer import ml_engineer_agent
     result = run(ml_engineer_agent)                 # on the cluster in your flyte config
-    result = run(ml_engineer_agent, local=True)     # in this process, no cluster
+    result = run(ml_engineer_agent, local=True)     # in this process, no cluster; its report renders below the cell
+    show_reports(all=True)                          # and every tool's report from that local run
 
 `run` prints the run URL as soon as the run exists, waits for it (reconnecting if the
 watch stream drops), prints the phase, and returns the task's outputs. Open the URL for the
@@ -45,10 +46,18 @@ def run(task, *, local: bool = False, **kwargs):
     if local:
         # No cluster: the task and every tool it calls run in this process. Nothing to open;
         # the output of each step is the result below.
+        global LAST_LOCAL_RUN
         _reports_as_text()
         flyte.init(root_dir=root)
         print(f"local run: {getattr(task, 'name', task)} in this kernel (no cluster; it takes as long as the work does)")
-        return _first(flyte.with_runcontext(mode="local").run(task, **kwargs).outputs())
+        r = flyte.with_runcontext(mode="local").run(task, **kwargs)
+        outputs = r.outputs()
+        # A local run's `url` is its metadata folder, where every task's report.html landed.
+        # Show the step's own report here, the way the UI would; show_reports(all=True) has the rest.
+        LAST_LOCAL_RUN = Path(str(r.url)) if str(r.url).startswith("/") else None
+        if LAST_LOCAL_RUN is not None and _in_ipython():
+            show_reports(LAST_LOCAL_RUN)
+        return _first(outputs)
 
     from flyte.remote import ActionDetails, Run
 
@@ -73,6 +82,25 @@ def run(task, *, local: bool = False, **kwargs):
         print(str(ActionDetails.get(run_name=r.name, name="a0").pb2.error_info)[:1500])
         return None
     return _first(r.outputs())
+
+
+LAST_LOCAL_RUN: Path | None = None  # the metadata folder of the last local run (its reports)
+
+
+def show_reports(folder: Path | str | None = None, *, all: bool = False, latest: bool = False, height: int = 640):
+    """Render the reports of the last local run (or `folder`) in the notebook; see utils/report_viewer.py."""
+    from utils.report_viewer import show_reports as _show
+
+    return _show(LAST_LOCAL_RUN if folder is None else folder, all=all, latest=latest, height=height)
+
+
+def _in_ipython() -> bool:
+    try:
+        from IPython import get_ipython
+
+        return get_ipython() is not None
+    except ImportError:
+        return False
 
 
 def _reports_as_text() -> None:

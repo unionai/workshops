@@ -318,6 +318,7 @@ in the environment, which the cluster paths get from the image:
 
 ```bash
 uv pip install -r requirements-local.txt       # requirements.txt plus torch, transformers, peft, trl
+# (it also pins torchao>=0.16: Colab preinstalls 0.10, which peft's LoRA code refuses)
 flyte run --local model_factory.py model_factory --n 20 --models '["smollm2-360m"]'
 flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1
 flyte run --local support_agent.py agent_handle_tickets --n 10 --router oss
@@ -339,6 +340,11 @@ What stands in for the platform, in `tools.py`, decided at run time by `flyte.ct
   `Router` class that the app itself wraps, so steps 3 and 4 are the same code with no HTTP.
 - **One process, one GPU.** `FACTORY_MAX_PARALLEL_GPU` defaults to 1 here as on a Mac:
   the engineer still asks for several evals in one turn and they take turns.
+- **The reports, in the notebook.** Every task that writes a report on the cluster writes
+  the same `report.html` locally, into the run's metadata folder. In the notebook, `run()`
+  renders the step's own report under the cell, and `show_reports(all=True)` renders every
+  report of that run: each eval's table and confusion matrix, each fine-tune's loss curve,
+  the engineer's timeline and decision (`utils/report_viewer.py`).
 - **The run graph, in the terminal.** Add `--tui` to any `--local` command and the SDK
   opens its terminal UI on the run as it goes: the actions, their logs and outputs, the
   same tree the console shows for a cluster run (`flyte[tui]` is in `requirements.txt`).
@@ -350,7 +356,9 @@ Measured on an M5 Max with `--local` (Colab's T4 is in the same range): step 2 w
 candidates anyway, fine-tuned the 1.5B two epochs to 97.5% at 43 ms, promoted it, and the
 in-process test passed 12/12); step 3 on that router 100% at 52 ms; step 4 86.5% on v2 with
 14 tickets in an unknown queue; the by-hand fix 83 s (retrained on v2 to 97.5%, 3 runs), after which the support agent routes
-the 126 v2 tickets at 97.6% with none in an unknown queue.
+the 126 v2 tickets at 97.6% with none in an unknown queue. The notebook itself, every
+cell in local mode, ran end to end in 5 minutes on the same machine (that time the engineer
+promoted the encoder: 97.5% at 6 ms, then 99.2% on v2 after the by-hand fix).
 
 On a laptop CPU, keep to the small models (`--models '["smollm2-360m"]'`, or let the
 engineer find the encoder) and `--n 20`; a chat-model fine-tune on a CPU takes a quarter
