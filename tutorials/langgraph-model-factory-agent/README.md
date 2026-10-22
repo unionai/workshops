@@ -34,9 +34,8 @@ artifacts, the deployed app and the triggers live (the notebook
 `langgraph-model-factory-agent-tutorial.ipynb` walks the same steps from Colab, against a
 cluster or on its own); on your own
 machine with a Flyte devbox, which on an Apple Silicon Mac puts the evals, the fine-tunes
-and the router app on the Mac's GPU (see [On your own machine](#on-your-own-machine-a-flyte-devbox));
-or with `flyte run --local` and no cluster at all, in Colab on its T4 or on a laptop (see
-[No cluster at all](#no-cluster-at-all-flyte-run---local)).
+and the router app on the Mac's GPU (see [Setup](#setup));
+or with `flyte run --local` and no cluster at all, in Colab on its T4 or on a laptop (see [Setup](#setup)).
 
 | Step | You will | Needs |
 |---|---|---|
@@ -191,7 +190,42 @@ through the promotion to the fine-tune that produced the weights.
 
 ---
 
-## Before you start
+## Setup
+
+Three ways to run it; pick one. The plain `flyte run` commands in the steps are for a devbox
+or a cluster; the `--local` lines are for Colab or a laptop with neither. Each path is spelled
+out in its own section below, folded.
+
+- **A Flyte devbox on your machine (recommended: the full workshop).** Docker Desktop
+  running, Python 3.10 or newer, [`uv`](https://docs.astral.sh/uv/), `pip install -r
+  requirements.txt`, then `flyte start devbox --apple-silicon` on an Apple Silicon Mac
+  (`flyte start devbox` elsewhere: an NVIDIA GPU, or the CPU with the small models). Every
+  step runs, the GPU work on your own GPU.
+- **The notebook on Google Colab (no GPU needed).** A Google account and a model API key;
+  the [Colab badge](https://colab.research.google.com/github/unionai/workshops/blob/factory/tutorials/langgraph-model-factory-agent/langgraph-model-factory-agent-tutorial.ipynb)
+  opens it on a free T4 with nothing to install. Slightly pared down: steps 0 to 4 and the
+  bake-off; the live app (step 5) and kill-and-resume (step 7) need a Flyte deployment.
+- **The workshop's Union cluster (`tryv2`).** Any laptop, with Python 3.10 or newer, `uv`
+  and `pip install -r requirements.txt`; then one `flyte create config` command (below) and
+  a browser sign-in. The cluster's T4s do the work and every step runs, including the
+  triggers. The notebook does the same when its `LOCAL` switch is `False`.
+
+The devbox and Colab paths also need a model API key (Anthropic by default, or OpenAI)
+with a few dollars of credit; the workshop cluster already holds one. The devbox and
+`--local` paths download about 5 GB of models on the first run (no Hugging Face account).
+
+**Working with a coding agent?** Two skill sets teach Claude Code, Codex and friends the
+Flyte 2 SDK and Union, so they stop guessing at the API while you follow along or extend
+the tutorial:
+
+- [flyteorg/flyte-agent-plugins](https://github.com/flyteorg/flyte-agent-plugins): 21 skills
+  for building, deploying and running Flyte workflows, plus two MCP servers (Flyte docs
+  search, and acting on a cluster). `uvx flyte-skills install`, or in Claude Code
+  `/plugin marketplace add flyteorg/flyte-agent-plugins` then `/plugin install flyte@flyte-agent-plugins`.
+- [unionai-oss/union-skills](https://github.com/unionai-oss/union-skills): skills for
+  deploying and operating Union (connecting a cluster, running workflows, debugging one
+  that won't come up). `uvx union-skills install`, or `/plugin marketplace add unionai-oss/union-skills`
+  then `/plugin install union@union-skills`.
 
 What you need on your machine, by path:
 
@@ -225,29 +259,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 # AGENT_MODEL=openai:gpt-4.1
 ```
 
-### If you have a Union cluster (recommended)
-
-```bash
-flyte create config --endpoint <your-endpoint> --project flytesnacks --domain development --builder remote
-flyte create secret ANTHROPIC_API_KEY --value sk-ant-...
-```
-
-The first call opens your browser to sign in. Anywhere without a browser to hand off to
-(a hosted notebook, a remote shell) add `--auth-type headless`: the first call then prints a login URL
-and a code to paste back. Without it the browser flow fails silently and the first upload
-dies with an empty `ConnectError`; the notebook already passes the flag.
-
-On a shared cluster, set `FACTORY_TAG=<your handle>` in `.env`. It namespaces what has
-to be yours: the serving app (`ticket-router-<tag>`), the production artifacts, and the
-environments that carry triggers. The GPU training task stays shared, so each fine-tune
-is trained once for the whole room. Prefix your secret names the same way
-(`FLYTE_SECRET_PREFIX=SAGE_` makes the code ask for `SAGE_ANTHROPIC_API_KEY`), or point at
-an existing secret by name (`OPENAI_API_KEY_SECRET_NAME=my-openai-key`).
-
-The first cluster run builds two images. The one with the training stack takes about six
-minutes, once.
-
-### On your own machine: a Flyte devbox
+<details id="setup-devbox">
+<summary><b>On your own machine: a Flyte devbox (recommended)</b></summary>
 
 A devbox is a Flyte control plane in one container on your machine (Linux, Windows with
 WSL2, or a Mac). On an Apple Silicon Mac, start it with `--apple-silicon` and every task
@@ -309,7 +322,10 @@ The 0.5B LoRA needs about 8 GB of unified memory; the 1.5B several times that. O
 screen everything and watch the encoder win on a few hundred megabytes. The notebook
 works against a devbox as well: skip its "connect to the cluster" cell.
 
-### No cluster at all: `flyte run --local`
+</details>
+
+<details id="setup-colab">
+<summary><b>No devbox and no cluster: the notebook on Colab, or <code>flyte run --local</code></b></summary>
 
 Every step's `--local` line runs the task in your own process: Colab on its T4, or a
 laptop (Apple Silicon uses `mps`, anything else the CPU). No cluster, no devbox, no
@@ -365,13 +381,56 @@ On a laptop CPU, keep to the small models (`--models '["smollm2-360m"]'`, or let
 engineer find the encoder) and `--n 20`; a chat-model fine-tune on a CPU takes a quarter
 of an hour.
 
+</details>
+
+<details id="setup-cluster">
+<summary><b>On the workshop cluster (<code>tryv2</code>), or your own Union cluster</b></summary>
+
+The workshop runs in the `factorysea` project on `tryv2.hosted.unionai.cloud`. From
+a laptop, the whole setup is the config file:
+
+```bash
+flyte create config --endpoint tryv2.hosted.unionai.cloud --project factorysea --domain development --builder remote
+flyte get secret                    # ANTHROPIC_API_KEY is already there; nothing to create
+flyte run model_factory.py model_factory --fine_tune_too       # the first run signs you in
+```
+
+The config lands in `.flyte/config.yaml` next to the code, so every `flyte run` and the
+notebook's `run()` go to the cluster from then on (the `--local` lines keep working
+alongside). The first call opens your browser to sign in with the account the host gave
+you. Anywhere without a browser to hand off to (a hosted notebook, a remote shell) add
+`--auth-type headless`: the first call then prints a login URL and a code to paste back.
+Without it the browser flow fails silently and the first upload dies with an empty
+`ConnectError`. The notebook already does all of this when `LOCAL = False`: its connect
+cell writes the same config with the headless flag.
+
+On your own cluster, point the config at your endpoint and project and create the key
+yourself (`--value` matters: without it the command waits for input):
+
+```bash
+flyte create config --endpoint <your-endpoint> --project flytesnacks --domain development --builder remote
+flyte create secret ANTHROPIC_API_KEY --value sk-ant-...
+```
+
+On a shared cluster such as `tryv2`, set `FACTORY_TAG=<your handle>` in `.env`. It namespaces what has
+to be yours: the serving app (`ticket-router-<tag>`), the production artifacts, and the
+environments that carry triggers. The GPU training task stays shared, so each fine-tune
+is trained once for the whole room. Prefix your secret names the same way
+(`FLYTE_SECRET_PREFIX=SAGE_` makes the code ask for `SAGE_ANTHROPIC_API_KEY`), or point at
+an existing secret by name (`OPENAI_API_KEY_SECRET_NAME=my-openai-key`).
+
+The first cluster run builds two images. The one with the training stack takes about six
+minutes, once.
+
+</details>
+
 ---
 
 ## Step 0: the support agent, as it is today
 
 ```bash
-flyte run --local support_agent.py agent_handle_tickets --n 10 --router llm    # laptop
-flyte run support_agent.py agent_handle_tickets --router llm                   # cluster, 30 tickets
+flyte run --local support_agent.py agent_handle_tickets --n 10 --router llm    # Colab or a laptop with no devbox: 10 tickets
+flyte run support_agent.py agent_handle_tickets --router llm                   # devbox or cluster: 30 tickets
 ```
 
 **What you'll see.** Thirty held-out tickets go through the support agent: the router picks
@@ -407,8 +466,8 @@ app instead, which does not exist yet. Building it is the request.
 This is the factory with you at the controls: you pick the candidates and the epochs, the same tools do the work, and you look at what comes back. In step 2 the ML engineer takes over the controls. In the Flyte UI the evals appear side by side in a group called `baseline-evals`, and the fine-tune plus its recheck in `fine-tune-and-recheck`.
 
 ```bash
-flyte run --local model_factory.py model_factory --n 20 --models '["smollm2-360m"]'   # laptop: one quick eval
-flyte run model_factory.py model_factory --fine_tune_too                           # cluster: the full matrix
+flyte run --local model_factory.py model_factory --n 20 --models '["smollm2-360m"]'   # Colab or a laptop with no devbox: one quick eval
+flyte run model_factory.py model_factory --fine_tune_too                           # devbox or cluster: the full matrix
 ```
 
 **What you'll see.** The task report has a **Data** tab with the synthetic tickets (800
@@ -449,8 +508,8 @@ seconds, and so does everyone else in the project.
 ## Step 2: let the ML engineer build the router
 
 ```bash
-flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1   # laptop: keep it small
-flyte run ml_engineer.py ml_engineer_agent                                                       # cluster
+flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1   # Colab or a laptop with no devbox: keep it small
+flyte run ml_engineer.py ml_engineer_agent                                                       # devbox or cluster
 ```
 
 **What you'll see.** The terminal prints the run URL and, at the end, the decision as
