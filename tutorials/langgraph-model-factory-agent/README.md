@@ -205,11 +205,14 @@ out in its own section below, folded.
   the [Colab badge](https://colab.research.google.com/github/unionai/workshops/blob/factory/tutorials/langgraph-model-factory-agent/langgraph-model-factory-agent-tutorial.ipynb)
   opens it on a free T4 with nothing to install. Slightly pared down: steps 0 to 4 and the
   bake-off; the live app (step 5) and kill-and-resume (step 7) need a Flyte deployment.
-- **A Union cluster, if you have one.** Any laptop; the cluster's T4s do the work and every
-  step runs, including the triggers.
+- **The workshop's Union cluster (`tryv2`).** Any laptop, with Python 3.10 or newer, `uv`
+  and `pip install -r requirements.txt`; then one `flyte create config` command (below) and
+  a browser sign-in. The cluster's T4s do the work and every step runs, including the
+  triggers. The notebook does the same when its `LOCAL` switch is `False`.
 
-In every case: a model API key (Anthropic by default, or OpenAI) with a few dollars of
-credit, and about 5 GB of model downloads on the first run (no Hugging Face account).
+The devbox and Colab paths also need a model API key (Anthropic by default, or OpenAI)
+with a few dollars of credit; the workshop cluster already holds one. The devbox and
+`--local` paths download about 5 GB of models on the first run (no Hugging Face account).
 
 What you need on your machine, by path:
 
@@ -368,19 +371,35 @@ of an hour.
 </details>
 
 <details id="setup-cluster">
-<summary><b>If you have a Union cluster</b></summary>
+<summary><b>On the workshop cluster (<code>tryv2</code>), or your own Union cluster</b></summary>
+
+The workshop runs in the `workshopfactory` project on `tryv2.hosted.unionai.cloud`. From
+a laptop, the whole setup is the config file:
+
+```bash
+flyte create config --endpoint tryv2.hosted.unionai.cloud --project workshopfactory --domain development --builder remote
+flyte get secret                    # ANTHROPIC_API_KEY is already there; nothing to create
+flyte run model_factory.py model_factory --fine_tune_too       # the first run signs you in
+```
+
+The config lands in `.flyte/config.yaml` next to the code, so every `flyte run` and the
+notebook's `run()` go to the cluster from then on (the `--local` lines keep working
+alongside). The first call opens your browser to sign in with the account the host gave
+you. Anywhere without a browser to hand off to (a hosted notebook, a remote shell) add
+`--auth-type headless`: the first call then prints a login URL and a code to paste back.
+Without it the browser flow fails silently and the first upload dies with an empty
+`ConnectError`. The notebook already does all of this when `LOCAL = False`: its connect
+cell writes the same config with the headless flag.
+
+On your own cluster, point the config at your endpoint and project and create the key
+yourself (`--value` matters: without it the command waits for input):
 
 ```bash
 flyte create config --endpoint <your-endpoint> --project flytesnacks --domain development --builder remote
 flyte create secret ANTHROPIC_API_KEY --value sk-ant-...
 ```
 
-The first call opens your browser to sign in. Anywhere without a browser to hand off to
-(a hosted notebook, a remote shell) add `--auth-type headless`: the first call then prints a login URL
-and a code to paste back. Without it the browser flow fails silently and the first upload
-dies with an empty `ConnectError`; the notebook already passes the flag.
-
-On a shared cluster, set `FACTORY_TAG=<your handle>` in `.env`. It namespaces what has
+On a shared cluster such as `tryv2`, set `FACTORY_TAG=<your handle>` in `.env`. It namespaces what has
 to be yours: the serving app (`ticket-router-<tag>`), the production artifacts, and the
 environments that carry triggers. The GPU training task stays shared, so each fine-tune
 is trained once for the whole room. Prefix your secret names the same way
