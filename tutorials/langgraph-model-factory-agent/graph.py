@@ -38,7 +38,7 @@ from langchain_core.messages import (
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field, field_validator
 
-from config import GPU_TOOLS, gpu_slots
+from config import GPU_ARTICLE, GPU_TOOLS, gpu_slots
 from llm import DEFAULT_MODEL, chat_model
 from report import graph_html
 from tools import TOOLS
@@ -72,7 +72,7 @@ class Request:
             + f'- Measured on dataset {self.dataset}. Pass dataset="{self.dataset}" to every eval, fine-tune and promote.\n'
             f"- Open weights, so we can self-host it.\n"
             f"- At least {self.min_accuracy:.0%} accuracy on our held-out tickets.\n"
-            f"- Under {self.max_latency_ms:.0f} ms per ticket (p50, batch size 1, on a T4).\n"
+            f"- Under {self.max_latency_ms:.0f} ms per ticket (p50, batch size 1, on {GPU_ARTICLE}).\n"
             f"- Baseline up to {self.candidates_to_screen} candidate model(s). Fine-tune up to {self.max_fine_tunes} distinct candidates; "
             f"re-training the same candidate with more epochs or a bigger lora_r does not count as a new candidate.\n"
             f"- Spend at most {self.budget} eval or fine-tune runs in total. A run is one run_eval, run_eval_cpu or fine_tune call. "
@@ -153,6 +153,14 @@ class Decision(BaseModel):
     runs_spent: int = Field(description="Number of run_eval and fine_tune calls made.")
     evidence: list[str] = Field(description="Two to five concrete numbers from the tool results, as a list of strings.")
     rationale: str = Field(description="One paragraph the support team would understand.")
+
+    @field_validator("accuracy", mode="before")
+    @classmethod
+    def _accuracy_as_fraction(cls, v):
+        """Open models tend to write 97.5 where the schema says 0.975; take the percentage."""
+        if isinstance(v, str):
+            v = float(v.strip().rstrip("%"))
+        return v / 100 if isinstance(v, (int, float)) and 1 < v <= 100 else v
 
     @field_validator("evidence", mode="before")
     @classmethod

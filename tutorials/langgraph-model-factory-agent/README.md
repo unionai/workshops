@@ -29,10 +29,14 @@ Flyte runs every tool the engineer calls as its own durable container and record
 model turn, so a run that dies halfway replays what it already did, and the report scores
 the agent against the record of what its tools actually returned rather than its prose.
 
-The whole thing runs three ways: in Colab with `flyte run --local` (the fine-tunes use
-Colab's T4), on your laptop (CPU, slow, use small `--n`), or on a Union cluster, which is
-where the parallel GPUs, the artifacts, the deployed app and the triggers live. The
-notebook `langgraph-model-factory-agent-tutorial.ipynb` walks the same steps.
+The whole thing runs three ways: on a Union cluster, which is where the parallel GPUs, the
+artifacts, the deployed app and the triggers live (the notebook
+`langgraph-model-factory-agent-tutorial.ipynb` walks the same steps from Colab, against a
+cluster or on its own); on your own
+machine with a Flyte devbox, which on an Apple Silicon Mac puts the evals, the fine-tunes
+and the router app on the Mac's GPU (see [On your own machine](#on-your-own-machine-a-flyte-devbox));
+or with `flyte run --local` and no cluster at all, in Colab on its T4 or on a laptop (see
+[No cluster at all](#no-cluster-at-all-flyte-run---local)).
 
 | Step | You will | Needs |
 |---|---|---|
@@ -189,11 +193,27 @@ through the promotion to the fine-tune that produced the weights.
 
 ## Before you start
 
+What you need on your machine, by path:
+
+| | Union cluster | Devbox (your machine) | No cluster (`--local`) |
+|---|---|---|---|
+| Python | 3.10 or newer (3.11 used here) | same | same; Colab's is fine |
+| [`uv`](https://docs.astral.sh/uv/) | yes, for the venv | yes: it also builds the per-task Python envs on a Mac | yes, for the venv (Colab: `pip`) |
+| Docker | no | yes: Docker Desktop (or Docker Engine), running | no |
+| `flyte` | 2.12 or newer, from `requirements.txt` | same | same |
+| Python packages | `requirements.txt` | `requirements.txt` | `requirements-local.txt` (adds torch, transformers, peft, trl) |
+| GPU | the cluster's T4s | the Mac's GPU (Apple Silicon), else CPU | Colab's T4, a Mac's GPU, else CPU |
+| Model API key | as a Union secret | as a devbox secret | in `.env` or the environment |
+| Disk | | ~10 GB: the devbox image, the task images, the model weights | ~5 GB of models in `~/.cache/huggingface` |
+
+In every case, start here:
+
 ```bash
 git clone https://github.com/unionai/workshops
 cd workshops/tutorials/langgraph-model-factory-agent
 uv venv .venv --python 3.11 && source .venv/bin/activate
-uv pip install -r requirements.txt
+uv pip install -r requirements.txt            # the no-cluster path: requirements-local.txt instead
+flyte --version                               # 2.12 or newer
 ```
 
 Step 1 needs nothing else. For the agents, put a key in `.env`; `config.py` loads it:
@@ -226,6 +246,124 @@ an existing secret by name (`OPENAI_API_KEY_SECRET_NAME=my-openai-key`).
 
 The first cluster run builds two images. The one with the training stack takes about six
 minutes, once.
+
+### On your own machine: a Flyte devbox
+
+A devbox is a Flyte control plane in one container on your machine (Linux, Windows with
+WSL2, or a Mac). On an Apple Silicon Mac, start it with `--apple-silicon` and every task
+that asks for a GPU runs natively on the Mac, PyTorch on `mps`, while the devbox keeps
+the run graph, the cache, the retries, the logs and the reports:
+
+```bash
+flyte start devbox --apple-silicon        # a Mac; elsewhere: flyte start devbox
+flyte create config --devbox              # writes .flyte/config.yaml pointing at localhost:30080
+flyte create secret anthropic-api-key --value sk-ant-...
+echo "ANTHROPIC_API_KEY_SECRET_NAME=anthropic-api-key" >> .env
+flyte run model_factory.py model_factory --fine_tune_too      # same commands as the cluster
+```
+
+Needs Docker Desktop running, `uv` on the PATH (the Apple Silicon bridge builds a Python
+environment per task image with it, about 3 minutes the first time, cached under
+`~/.flyte/apple-silicon/envs/`), and `flyte` 2.12 or later. The one knob is `ACCELERATOR`
+(`T4` | `L40s` | `apple` | `cpu`): it picks the pod shape for `run_eval` and `train_model`
+and the torch device. On a Mac whose `.flyte/config.yaml` points at a devbox it defaults
+to `apple`; a devbox without a GPU wants `ACCELERATOR=cpu` in `.env`, and then the
+encoder is the candidate to fine-tune (seconds, not the quarter hour a chat model takes
+on a CPU). Then every step runs as written, with the T4 swapped for your GPU: steps 0 to
+4, the bake-off, and the crash. Measured on an M5 Max, same code, same commands:
+
+| | Union cluster (T4) | Apple Silicon devbox (M5 Max) |
+|---|---|---|
+| qwen2.5-0.5b zero-shot, p50 | 68 ms | 27 ms |
+| one LoRA epoch on the 0.5B | 42 s | 26 s, bf16 |
+| modernbert-base, 3 epochs, fine-tuned | 99.2%, 14 ms | 99.2%, 6 ms |
+| the support agent on the router (step 3) | 100%, 170 ms via a CPU pod | 100%, 15 ms, the app on `mps` |
+| drift and the fix by hand (step 4) | 88.9% on v2, then 100% | 88.1% on v2, then 100%; the engineer retrains the encoder on v2 and redeploys |
+| the bake-off (step 6), Haiku vs GPT-4.1 | 10 and 7 runs | both meet the request: Haiku 11 runs, 54k tokens; GPT-4.1 8 runs, 49k tokens |
+| the engineer on an open model (step 6), Qwen3-8B | on an L40s vLLM app: met, 12 runs, 33k tokens, 173 s | served on the Mac itself at ~22 tokens/s: met, 10 to 12 runs, 35k tokens, 5 to 7 min; promotes a fine-tuned smollm2-1.7b at 99 to 100%, 50 ms |
+| three brains at once (step 6), Haiku, GPT-4.1, Qwen3-8B | | all three meet it in one run: Haiku 8 runs, 52k tokens, 133 s; GPT-4.1 7 runs, 27k tokens, 108 s (both promote the encoder at 99.2%, 6 ms); Qwen 10 runs, 35k tokens, 295 s (the 1.7B at 100%, 50 ms) |
+| crash and resume (step 7) | fails once, succeeds on the retry | the same: two attempts, nothing retrained, promoted and live-tested 12/12 at 8 ms |
+| the agent, step 2, fine-tunes cached | 45 s warm, 4 to 5 min cold | 2 min 47 s warm: evals rerun, promote, deploy, live test (9 runs) |
+| first run | ~6 min image build | ~5 min: a linux/arm64 image plus a Mac Python env with torch |
+
+Three things are different on a devbox, and the code notices each one at run time:
+
+- **No artifact registry.** That is a Union feature. `tools.registry()` asks once; when
+  the answer is no, `fine_tune` hands back the storage path of its output directory as
+  the model reference, `promote` mounts that directory into the app directly, and
+  `production_status` asks the live app what it is serving. Same files, no versions to
+  roll back through (rollback says so, and promote the earlier reference again), no
+  lineage tab, and no artifact triggers: step 5 and the validate-on-promote trigger need
+  Union. `FACTORY_ARTIFACTS=0` forces this mode anywhere.
+- **One GPU.** `FACTORY_MAX_PARALLEL_GPU` defaults to 1 on a Mac: the engineer still asks
+  for four evals in one turn and they take turns. Raise it on a Mac with memory to spare.
+- **Promote runs on the Mac.** A devbox signs upload URLs for `localhost`, has no remote
+  image builder, and reports an app as plain ACTIVE with no revision history. So in
+  `apple` mode the tool tasks run on the host alongside the GPU ones, and `promote`
+  builds the app image with the local builder and takes the app's `/` as proof of the
+  rollout. The agent does not know any of this; its tools return the same text.
+
+Memory, not the pod request, is the limit: the pod only proxies a process on the Mac.
+The 0.5B LoRA needs about 8 GB of unified memory; the 1.5B several times that. On a
+16 GB Mac, give step 2 `--candidates_to_screen 2 --max_fine_tunes 1`, or let the engineer
+screen everything and watch the encoder win on a few hundred megabytes. The notebook
+works against a devbox as well: skip its "connect to the cluster" cell.
+
+### No cluster at all: `flyte run --local`
+
+Every step's `--local` line runs the task in your own process: Colab on its T4, or a
+laptop (Apple Silicon uses `mps`, anything else the CPU). No cluster, no devbox, no
+Docker, and still every tool call a recorded child action. It needs the training stack
+in the environment, which the cluster paths get from the image:
+
+```bash
+uv pip install -r requirements-local.txt       # requirements.txt plus torch, transformers, peft, trl
+# (it also pins torchao>=0.16: Colab preinstalls 0.10, which peft's LoRA code refuses)
+flyte run --local model_factory.py model_factory --n 20 --models '["smollm2-360m"]'
+flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1
+flyte run --local support_agent.py agent_handle_tickets --n 10 --router oss
+```
+
+The notebook runs this way by default (`LOCAL = True` in its setup cell; set it to
+`False` for a cluster): the
+[Colab badge](https://colab.research.google.com/github/unionai/workshops/blob/factory/tutorials/langgraph-model-factory-agent/langgraph-model-factory-agent-tutorial.ipynb)
+opens it on a T4, where steps 0 to 4 and the bake-off run end to end with nothing but a
+model API key.
+
+What stands in for the platform, in `tools.py`, decided at run time by `flyte.ctx()`:
+
+- **A folder is the registry and the app.** `promote` copies the winner into
+  `.factory/ticket-router/<version>/` next to the code and points `current.json` at it
+  (`FACTORY_LOCAL_DIR` moves it). `production_status` reads that, `test_deployment` loads
+  the current version in-process and measures it, and `rollback` makes an earlier version
+  current again. The support agent's `--router oss` loads the same directory through the
+  `Router` class that the app itself wraps, so steps 3 and 4 are the same code with no HTTP.
+- **One process, one GPU.** `FACTORY_MAX_PARALLEL_GPU` defaults to 1 here as on a Mac:
+  the engineer still asks for several evals in one turn and they take turns.
+- **The reports, in the notebook.** Every task that writes a report on the cluster writes
+  the same `report.html` locally, into the run's metadata folder. In the notebook, `run()`
+  renders the step's own report under the cell, and `show_reports(all=True)` renders every
+  report of that run: each eval's table and confusion matrix, each fine-tune's loss curve,
+  the engineer's timeline and decision (`utils/report_viewer.py`). A cached fine-tune did
+  not run again, so it has no new report.
+- **The run graph, in the terminal.** Add `--tui` to any `--local` command and the SDK
+  opens its terminal UI on the run as it goes: the actions, their logs and outputs, the
+  same tree the console shows for a cluster run (`flyte[tui]` is in `requirements.txt`).
+- **Not here.** Step 5's triggers and the validate-on-promote trigger need artifacts, and
+  step 7's retry needs the platform.
+
+Measured on an M5 Max with `--local` (Colab's T4 is in the same range): step 2 with
+`--candidates_to_screen 2 --max_fine_tunes 1` took 2 min 39 s (the engineer screened five
+candidates anyway, fine-tuned the 1.5B two epochs to 97.5% at 43 ms, promoted it, and the
+in-process test passed 12/12); step 3 on that router 100% at 52 ms; step 4 86.5% on v2 with
+14 tickets in an unknown queue; the by-hand fix 83 s (retrained on v2 to 97.5%, 3 runs), after which the support agent routes
+the 126 v2 tickets at 97.6% with none in an unknown queue. The notebook itself, every
+cell in local mode, ran end to end in 5 minutes on the same machine (that time the engineer
+promoted the encoder: 97.5% at 6 ms, then 99.2% on v2 after the by-hand fix).
+
+On a laptop CPU, keep to the small models (`--models '["smollm2-360m"]'`, or let the
+engineer find the encoder) and `--n 20`; a chat-model fine-tune on a CPU takes a quarter
+of an hour.
 
 ---
 
@@ -468,8 +606,13 @@ with a lag: every ticket the support team re-routes by hand is a label, and the 
 rate is accuracy monitoring without a labeling project. That is the manual step this
 tutorial keeps: someone notices tickets in the wrong queue, adds the category, labels the
 batch, publishes it (step 5). Everything after that is automatic. If you want a label-free
-alarm as well, the better signal is novelty rather than confidence: the distance of a
-ticket's encoder embedding from the training tickets. Either signal can publish the
+alarm as well, two signals beat confidence. Novelty: the distance of a ticket's encoder
+embedding from the training tickets, which a new kind of ticket raises whatever the softmax
+says. And a judge: the API model that routed tickets in step 0 can shadow the router on a
+sample (one ticket in fifty, say) with one extra option the router does not have, "none of
+these queues". Disagreement is an accuracy estimate with no labels, and the extra option is
+exactly what the softmax cannot express. It spends a little of the API budget the router
+saved, on a sample, so the arithmetic still favors the router. Either signal can publish the
 `support-tickets` artifact itself and start the same loop.
 
 **Try it with a ticket the old model could not route:**
@@ -549,7 +692,9 @@ that matters is runs spent and tokens rather than wall clock. Promotion publishe
 artifacts but does not deploy here (`FACTORY_DEPLOY=0`). On our cluster Claude Opus 5 met
 the request in 10 runs and 63k tokens; Claude Haiku 4.5 in 10 runs and 53k tokens;
 GPT-4.1 in 7 runs and 23k tokens; GPT-4.1-mini in 11 runs and 29k tokens. Same tools,
-different amount of flailing.
+different amount of flailing. On an Apple Silicon devbox the same bake-off (Haiku and GPT-4.1,
+the fine-tunes cached) came out the same way: both met the request, GPT-4.1 in 8 runs and
+49k tokens, Haiku in 11 runs and 54k tokens.
 
 **The engineer on an open model.** `vllm:qwen3-8b` is the same agent driven by Qwen3-8B,
 served by vLLM on a Union app with one L40s. Deploy it once (it prefetches the weights
@@ -572,6 +717,47 @@ cluster Qwen3-8B met the request too: it fine-tuned three candidates, promoted t
 100% and 84 ms, and passed the deployment test, in 12 runs, 33k tokens and 173 seconds. It
 spent the whole budget and picked a model ten times the size of the encoder that also
 passed, which is exactly the kind of judgment the report lets you compare.
+
+**The engineer on an open model, on your Mac.** On an Apple Silicon devbox the same thing
+runs on the Mac's GPU with no vLLM and no L40s:
+
+```bash
+flyte create secret VLLM_API_KEY --value anything     # the agent's environment asks for one
+python serve_model_apple.py                           # prefetch Qwen3-8B, serve it on mps, print the endpoint
+# VLLM_PREFETCH_RUN=<run name> python serve_model_apple.py                          # redeploy, same weights
+# VLLM_HF_REPO=Qwen/Qwen3-4B VLLM_MODEL_ID=qwen3-4b python serve_model_apple.py   # a 16 GB Mac
+```
+
+The weights are fetched once by a task (`flyte.prefetch.hf_model`, the same one the Union
+script uses), so the download is a run in the UI with the weights as its output, and the
+app mounts that output rather than pulling from Hugging Face at startup. Put the printed
+endpoint in `.env` as `VLLM_BASE_URL=http://.../v1`, add `vllm` to `FACTORY_PROVIDERS`,
+and bake off `vllm:qwen3-8b`. `openai_server.py` is the same small
+transformers server as the `apple-silicon-serving` tutorial: the model's own chat template
+renders the tools, the Hermes-style `<tool_call>` blocks Qwen emits are parsed back into
+OpenAI tool calls, thinking is off. One difference from vLLM is that this server has no
+JSON-schema mode, so the engineer asks for its typed decision through a tool call instead
+(`llm.py` does that for every self-served model; vLLM is fine with it too). Generation is
+one stream at a time, so a bake-off with several open-model agents takes turns.
+
+On an M5 Max, Qwen3-8B in bf16 answers at about 22 tokens a second, and the engineer it
+drives meets the request. In a three-way bake-off on the devbox, Haiku, GPT-4.1 and Qwen
+all met it in the same run: the two API models promoted the fine-tuned encoder (99.2%,
+6 ms) in 8 and 7 runs; Qwen screened five candidates, fine-tuned three, and promoted the
+fine-tuned smollm2-1.7b (100%, 50 ms) in 10 runs and 35k tokens, fewer tokens than Haiku's
+52k but 295 s against 133 s, nearly all of it generation on the Mac. A competent engineer,
+not the sharpest: it clears the bar with a bigger model than it needed. One thing the open
+model does that the API models do not: it writes `accuracy: 97.5` where the schema says
+`0.975`, so `graph.Decision` accepts a percentage and divides. Without that the whole
+trial failed at the last step, three attempts in a row, after all the work was done.
+
+Which means the engineer itself needs no API key. On a devbox with the Qwen app up:
+
+```bash
+flyte run ml_engineer.py ml_engineer_agent --model vllm:qwen3-8b
+```
+
+is the factory, the router and the engineer's brain, all on one laptop.
 
 Models are strings from `llm.py`: `anthropic:<model>`, `openai:<model>`, or
 `vllm:<model>@<url>/v1` for anything OpenAI-compatible you serve yourself.
@@ -628,13 +814,24 @@ FACTORY_APPROVAL=1 flyte run ml_engineer.py ml_engineer_agent
 
 With `FACTORY_APPROVAL=1`, `promote` creates a `flyte.new_condition` before it publishes
 anything: the run pauses, the Flyte UI shows a prompt with the model, its numbers and the
-agent's reasoning, and a person approves or declines (or signals it from the CLI with
-`flyte signal condition`). Decline, and the agent is told the promotion was refused and
-writes that up. No extra infrastructure; it is a native Flyte condition.
+agent's reasoning, and a person approves or declines. Decline, and the agent is told the
+promotion was refused and writes that up. No extra infrastructure; it is a native Flyte
+condition, and it works the same on a devbox. From a terminal, the run's condition action
+shows as PAUSED, and
+
+```bash
+flyte signal condition <run name> <action name> true      # false declines
+```
+
+prints the prompt and releases it. On the devbox the whole thing took 2 min 24 s of agent
+time plus however long the approver takes: eight runs, the encoder promoted at 99.2% and
+6 ms, the app rolled out after the signal, and the live test passed 12/12. The same gate
+applies wherever `promote` runs, including the trigger-started retrain in step 5. A local
+run (`--local`) has no conditions and skips the gate: its promote is a copy into a folder.
 
 ## Measuring on CPU
 
-`run_eval_cpu` is `run_eval` on a small CPU node. Training always goes to the T4, but the
+`run_eval_cpu` is `run_eval` on a small CPU node. Training always goes to the GPU, but the
 serving app is a CPU pod, so the CPU number is what production will look like. The
 fine-tuned encoder classifies a ticket in about 230 ms on the demo cluster's 2-vCPU nodes
 (14 ms on the T4); the fine-tuned 0.5B chat model takes about 1.3 s. The agent is told
@@ -652,8 +849,8 @@ T4 latency bar is not applied to them.
 | `tools.py` | The eight tools as Flyte tasks, plus `train_model` and `publish_router` behind them |
 | `graph.py` | The LangGraph graph, the request, the typed decision, the parallel tool node |
 | `llm.py` | The agent's model, from a string |
-| `config.py` | Environments, images, secrets |
-| `router_app.py` | The serving app that mounts the promoted artifact |
+| `config.py` | Environments, images, secrets, and the `ACCELERATOR` knob |
+| `router_app.py` | The serving app that mounts the promoted artifact, and the `Router` class a local run uses in-process |
 | `report.py` | HTML for the task reports |
 | `utils/workshop.py` | `run(task)` and `show()` for the notebook: submit, print the URL, wait, return outputs |
 | `support_agent.py` | The support agent: route, draft a reply. Steps 0, 3 and 4 |
@@ -665,13 +862,18 @@ T4 latency bar is not applied to them.
 | `crash_resume.py` | Step 7: crash and resume |
 | `validate_on_promote.py` | The artifact trigger: validate every new `ticket-router` version |
 | `serve_model.py` | Optional: serve an open model on a Union vLLM app to drive the agent with |
+| `serve_model_apple.py`, `openai_server.py` | The same on a Mac's GPU: a small OpenAI-compatible transformers server as a devbox app |
+| `requirements.txt`, `requirements-local.txt` | The venv; the second adds the training stack for runs with no cluster (`flyte run --local`, the notebook's `LOCAL = True`) |
 
 | Knob | Where | Default |
 |---|---|---|
 | the request | `--min_accuracy --max_latency_ms --candidates_to_screen --max_fine_tunes --budget` | 0.95, 150, 5, 3, 12 |
 | the agent's model | `AGENT_MODEL` in `.env`, or `--model` | `anthropic:claude-haiku-4-5` |
 | providers a task may use | `FACTORY_PROVIDERS` in `.env`: which secrets every agent task asks for. The agent's own provider is always included; add another before passing `model=` from it (step 6, or any step) | the agent's provider |
-| GPU tools in flight per run | `FACTORY_MAX_PARALLEL_GPU`: the engineer still asks for five evals in one turn, but only this many run at once. Set 1 or 2 for a room on one GPU pool | `0` (no limit) |
+| where the GPU work runs | `ACCELERATOR`: `T4`, `L40s`, `apple` (the Mac's GPU, on an Apple Silicon devbox), `cpu` | `T4`; `apple` on a Mac pointed at a devbox |
+| artifact registry | `FACTORY_ARTIFACTS=0` passes models around as task outputs instead (what a devbox does on its own) | detected |
+| the local registry | `FACTORY_LOCAL_DIR`: where a run with no cluster keeps what it promotes | `.factory/` next to the code |
+| GPU tools in flight per run | `FACTORY_MAX_PARALLEL_GPU`: the engineer still asks for five evals in one turn, but only this many run at once. Set 1 or 2 for a room on one GPU pool | `0` (no limit); `1` on a Mac and in a local run |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 6 sets `0`) |
 | the router app's pod | sized to the promoted model: the encoder 2 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
 | human approval before deploy | `FACTORY_APPROVAL` | `0` |
@@ -694,7 +896,7 @@ there is normal, not stuck.
   model that answers "The category is billing." pays for every token; a fine-tuned one
   answers `billing` and stops. That is why fine-tuning lowers latency too.
 - The T4 has no bf16. Training loads fp32 weights and uses fp16 autocast; at these sizes
-  that fits easily.
+  that fits easily. On Apple Silicon the same code uses bf16 autocast and ships bf16 weights.
 - `fine_tune` is a CPU-side wrapper around `train_model`, the GPU task that produces the
   artifact. A tool has to return text for the model, and an artifact has to be a task's
   top-level output, so they are two tasks. `promote` and `publish_router` split the same way.

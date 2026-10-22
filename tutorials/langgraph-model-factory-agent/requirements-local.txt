@@ -1,0 +1,11 @@
+# The training stack, for runs with no cluster (`flyte run --local`, the notebook's LOCAL
+# mode). On a cluster or a devbox these come from the image in config.py (ml_image); keep
+# the two lists in sync. Colab already has torch; the rest installs in a minute.
+-r requirements.txt
+torch>=2.4
+transformers>=4.45
+peft>=0.13
+trl>=0.12
+datasets>=3.0
+accelerate>=0.34
+torchao>=0.16.0  # Colab preinstalls 0.10, and peft's LoRA dispatch refuses anything older than 0.16

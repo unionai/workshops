@@ -111,13 +111,34 @@ class EvalResult:
 
 
 def device() -> str:
-    """cuda if there is one, else cpu. MPS is skipped on purpose: it is unreliable for these sizes."""
+    """cuda if there is one, else the Mac's GPU (mps), else cpu. FACTORY_DEVICE forces one."""
     forced = os.environ.get("FACTORY_DEVICE")
     if forced:
         return forced
     import torch
 
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def half_dtype(dev: str):
+    """The inference dtype: fp16 on a T4 (no bf16 there), bf16 on Apple Silicon, fp32 on a CPU."""
+    import torch
+
+    return {"cuda": torch.float16, "mps": torch.bfloat16}.get(dev, torch.float32)
+
+
+def sync(dev: str) -> None:
+    """Wait for the GPU, so a latency measurement is the whole forward pass."""
+    import torch
+
+    if dev == "cuda":
+        torch.cuda.synchronize()
+    elif dev == "mps":
+        torch.mps.synchronize()
 
 
 def resolve(model_ref: str) -> tuple[str, str]:
@@ -140,8 +161,7 @@ def _load(path: str, dev: str):
     tok.padding_side = "left"
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    dtype = torch.float16 if dev == "cuda" else torch.float32
-    model = AutoModelForCausalLM.from_pretrained(path, dtype=dtype).to(dev).eval()
+    model = AutoModelForCausalLM.from_pretrained(path, dtype=half_dtype(dev)).to(dev).eval()
     return tok, model
 
 
@@ -217,8 +237,7 @@ def evaluate(model_ref: str, n: int = 120, version: str = "v1") -> EvalResult:
                     as_chat(t, with_answer=False, version=version), tokenize=False, add_generation_prompt=True
                 )
                 inputs = tok(prompt, return_tensors="pt").to(dev)
-            if dev == "cuda":
-                torch.cuda.synchronize()
+            sync(dev)
             t1 = time.perf_counter()
             if kind == "encoder":
                 logits = model(**inputs).logits
@@ -226,8 +245,7 @@ def evaluate(model_ref: str, n: int = 120, version: str = "v1") -> EvalResult:
                 out = model.generate(
                     **inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False, pad_token_id=tok.pad_token_id
                 )
-            if dev == "cuda":
-                torch.cuda.synchronize()
+            sync(dev)
             if i > 0:  # the first call includes kernel warm-up
                 latencies.append((time.perf_counter() - t1) * 1000)
             if kind == "encoder":
@@ -323,8 +341,9 @@ def fine_tune(
     tok = AutoTokenizer.from_pretrained(path)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    # fp32 weights with fp16 autocast: the T4 has no bf16, and fp16 master weights are
-    # a bad idea for training. At these sizes fp32 fits with room to spare.
+    # fp32 master weights with autocast (fp16 on a T4, which has no bf16; bf16 on Apple
+    # Silicon): half-precision master weights are a bad idea for training, and at these
+    # sizes fp32 fits with room to spare.
     model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float32)
 
     peft_config = LoraConfig(
@@ -347,6 +366,7 @@ def fine_tune(
         save_strategy="no",
         report_to=[],
         fp16=(dev == "cuda"),
+        bf16=(dev == "mps"),
         max_length=256,
         use_cpu=(dev == "cpu"),
         seed=7,
@@ -368,7 +388,7 @@ def fine_tune(
         losses = [h["train_loss"] for h in trainer.state.log_history if "train_loss" in h]
 
     merged = trainer.model.merge_and_unload()
-    merged = merged.to(torch.float16) if dev == "cuda" else merged
+    merged = merged.to(half_dtype(dev)) if dev in ("cuda", "mps") else merged  # half the bytes to ship
     os.makedirs(output_dir, exist_ok=True)
     merged.save_pretrained(output_dir)
     tok.save_pretrained(output_dir)
@@ -434,6 +454,7 @@ def _fine_tune_encoder(
         save_strategy="no",
         report_to=[],
         fp16=(dev == "cuda"),
+        bf16=(dev == "mps"),
         use_cpu=(dev == "cpu"),
         seed=7,
     )

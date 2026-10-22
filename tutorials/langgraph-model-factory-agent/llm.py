@@ -3,7 +3,8 @@
     anthropic:claude-haiku-4-5              Claude, via the Anthropic API (the default: fast and cheap)
     anthropic:claude-opus-5                 the big Claude, for the bake-off in step 6
     openai:gpt-4.1                          OpenAI, if you have a key
-    vllm:qwen3-8b                           a model you serve yourself on a Union app
+    vllm:qwen3-8b                           a model you serve yourself: a Union vLLM app, or
+                                            `serve_model_apple.py` on a Mac's GPU
     vllm:qwen3-8b@https://host/v1           same, with the endpoint spelled out
 
 Everything else in the tutorial takes a LangChain chat model and does not care which.
@@ -16,7 +17,44 @@ import os
 DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "anthropic:claude-haiku-4-5")
 
 
+def _reach(url: str) -> str:
+    """A devbox app's public `*.localhost` URL, seen from inside a pod, is its in-cluster service name."""
+    from urllib.parse import urlparse
+
+    host = urlparse(url).hostname or ""
+    if host.endswith(".localhost") and os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return f"http://{host.removesuffix('.localhost')}.flyte.svc.cluster.local" + (urlparse(url).path or "")
+    return url
+
+
+def _self_served_class():
+    from langchain_openai import ChatOpenAI
+
+    class SelfServed(ChatOpenAI):
+        """ChatOpenAI that asks for structured output through a tool call.
+
+        `with_structured_output` defaults to OpenAI's `response_format` JSON schema, which vLLM
+        honors and a plain transformers server (openai_server.py) does not. A tool call is
+        something every chat template with tool support can render, so both work.
+        """
+
+        def with_structured_output(self, schema=None, **kwargs):
+            kwargs.setdefault("method", "function_calling")
+            return super().with_structured_output(schema, **kwargs)
+
+    return SelfServed
+
+
+_SelfServed = None
+
+
 def chat_model(spec: str | None = None):
+    global _SelfServed
+    if _SelfServed is None:
+        try:
+            _SelfServed = _self_served_class()
+        except ImportError:
+            pass
     spec = spec or DEFAULT_MODEL
     provider, _, rest = spec.partition(":")
 
@@ -38,11 +76,11 @@ def chat_model(spec: str | None = None):
         if not base_url:
             raise ValueError(
                 f"{spec!r} needs an endpoint: either vllm:<model>@<url>/v1 or VLLM_BASE_URL in the environment. "
-                "Deploy one with `python serve_model.py`."
+                "Deploy one with `python serve_model.py` (a Union GPU) or `python serve_model_apple.py` (a Mac)."
             )
-        return ChatOpenAI(
+        return _SelfServed(
             model=model_id,
-            base_url=base_url,
+            base_url=_reach(base_url),
             api_key=os.environ.get("VLLM_API_KEY", "not-needed"),
             temperature=0,
             max_tokens=2048,

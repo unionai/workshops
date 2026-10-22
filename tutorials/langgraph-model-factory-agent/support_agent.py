@@ -86,6 +86,8 @@ def build_support_graph(model, router: str, endpoint: str | None, model_name: st
 
     @flyte.trace
     async def route_with_app(ticket_id: str, text: str) -> dict:
+        if not isinstance(endpoint, str):  # a local run: the promoted model, in-process
+            return await asyncio.to_thread(endpoint.classify, text)
         import httpx
 
         async with httpx.AsyncClient(timeout=120) as client:
@@ -178,10 +180,19 @@ async def agent_handle_tickets(
     if router == "oss":
         ctx = flyte.ctx()
         if ctx is None or ctx.mode == "local":
-            raise ValueError(
-                "--router oss needs the deployed ticket-router app; run this on the cluster (or promote something first)"
-            )
-        endpoint = await _endpoint()
+            # No app off-platform: load whatever the last local promote made current.
+            from router_app import Router
+            from tools import local_current
+
+            current = local_current()
+            if not current:
+                raise ValueError(
+                    "--router oss needs a promoted router. Nothing has been promoted in this local registry yet: "
+                    "run step 1 with --fine_tune_too or step 2 first (on a cluster, the deployed ticket-router app is used instead)."
+                )
+            endpoint = Router(current["path"])
+        else:
+            endpoint = await _endpoint()
     graph = build_support_graph(chat, router, endpoint, short_name(model))
     usage = UsageMetadataCallbackHandler()
     config = {"callbacks": [usage]}
