@@ -273,8 +273,9 @@ the run graph, the cache, the retries, the logs and the reports:
 ```bash
 flyte start devbox --apple-silicon        # a Mac; elsewhere: flyte start devbox
 flyte create config --devbox              # writes .flyte/config.yaml pointing at localhost:30080
-# keeping a cluster config too? write this one elsewhere and name it instead:
-#   flyte create config --devbox -o .flyte/config.devbox.yaml && export FLYTECTL_CONFIG=.flyte/config.devbox.yaml
+# keeping a cluster config too? write this one elsewhere and pass it with -c on every command:
+#   flyte create config --devbox -o .flyte/config.devbox.yaml;  flyte -c .flyte/config.devbox.yaml run ...
+#   (the SDK reads .flyte/config.yaml before the FLYTECTL_CONFIG variable, so exporting it does nothing here)
 flyte create secret anthropic-api-key --value sk-ant-...
 echo "ANTHROPIC_API_KEY_SECRET_NAME=anthropic-api-key" >> .env
 flyte run model_factory.py model_factory --fine_tune_too      # same commands as the cluster
@@ -284,10 +285,10 @@ Needs Docker Desktop running, `uv` on the PATH (the Apple Silicon bridge builds 
 environment per task image with it, about 3 minutes the first time, cached under
 `~/.flyte/apple-silicon/envs/`), and `flyte` 2.12 or later. The one knob is `ACCELERATOR`
 (`T4` | `L40s` | `apple` | `cpu`): it picks the pod shape for `run_eval` and `train_model`
-and the torch device. On a Mac whose Flyte config (`.flyte/config.yaml`, or the file
-`FLYTECTL_CONFIG` names) points at a devbox it defaults to `apple`; a config that points
-at a cluster keeps the T4 default, and then the eval pods wait forever for an NVIDIA GPU
-the devbox does not have; a devbox without a GPU wants `ACCELERATOR=cpu` in `.env`, and then the
+and the torch device. On a Mac it follows the config the command uses (`-c`, else
+`.flyte/config.yaml`): a devbox config defaults it to `apple`; a cluster config keeps the
+T4 default, and then the eval pods wait forever for an NVIDIA GPU the devbox does not
+have; a devbox without a GPU wants `ACCELERATOR=cpu` in `.env`, and then the
 encoder is the candidate to fine-tune (seconds, not the quarter hour a chat model takes
 on a CPU). Then every step but 5 runs as written, with the T4 swapped for your GPU: steps
 0 to 4, the bake-off, the approval gate and the crash. Measured on an M5 Max, same code,
@@ -799,9 +800,19 @@ python serve_model_apple.py                           # prefetch Qwen3-8B, serve
 
 The weights are fetched once by a task (`flyte.prefetch.hf_model`, the same one the Union
 script uses), so the download is a run in the UI with the weights as its output, and the
-app mounts that output rather than pulling from Hugging Face at startup. Put the printed
-endpoint in `.env` as `VLLM_BASE_URL=http://.../v1`, add `vllm` to `FACTORY_PROVIDERS`,
-and bake off `vllm:qwen3-8b`. `openai_server.py` is the same small
+app mounts that output rather than pulling from Hugging Face at startup. Then bake off
+`vllm:qwen3-8b` with the endpoint and the provider set for that one run, so the other steps
+keep asking only for the Anthropic secret:
+
+```bash
+FACTORY_PROVIDERS=anthropic,vllm \
+VLLM_BASE_URL=http://factory-qwen3-8b-flytesnacks-development.localhost:30081/v1 \
+flyte run bakeoff.py bakeoff --models '["anthropic:claude-haiku-4-5", "vllm:qwen3-8b"]'
+```
+
+(The URL is the one `serve_model_apple.py` printed; putting the three in `.env` works too,
+but then every step asks for the vLLM secret, and a cluster config will not have it.)
+`openai_server.py` is the same small
 transformers server as the `apple-silicon-serving` tutorial: the model's own chat template
 renders the tools, the Hermes-style `<tool_call>` blocks Qwen emits are parsed back into
 OpenAI tool calls, thinking is off. One difference from vLLM is that this server has no

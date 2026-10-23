@@ -29,6 +29,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import shutil
 import tempfile
 import time
 
@@ -405,6 +406,7 @@ async def _train(model: str, epochs: float, lora_r: int, dataset: str) -> tuple[
         # fine-tunes would draw the same "random" output path from the SDK. Name it ourselves.
         dest = os.path.join(tempfile.mkdtemp(prefix="factory-weights-"), f"{base}-ft")
         weights = await Dir.from_local(local_out, remote_destination=dest)
+        shutil.rmtree(os.path.dirname(local_out), ignore_errors=True)  # copied; the temp dir would otherwise pile up
         # No registry and no upload endpoint off-platform: the directory is the output.
         summary = r.summary()
         await flyte.report.replace.aio(
@@ -415,6 +417,7 @@ async def _train(model: str, epochs: float, lora_r: int, dataset: str) -> tuple[
         await flyte.report.flush.aio()
         return weights, summary
     weights = await Dir.from_local(local_out)
+    shutil.rmtree(os.path.dirname(local_out), ignore_errors=True)  # uploaded; on a Mac this is the Mac's own disk
     name = f"{FT_PREFIX}-{base}-ft"
     version = f"{dataset}-{epochs:g}ep-r{lora_r}-{int(time.time())}"
     card = await artifacts.Card.create_from.aio(
