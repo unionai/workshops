@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import statistics
+import shutil
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
@@ -392,6 +393,7 @@ def fine_tune(
     os.makedirs(output_dir, exist_ok=True)
     merged.save_pretrained(output_dir)
     tok.save_pretrained(output_dir)
+    shutil.rmtree(os.path.dirname(args.output_dir), ignore_errors=True)  # the trainer's scratch
     with open(os.path.join(output_dir, "factory.json"), "w") as f:
         json.dump(
             {"base": base, "epochs": epochs, "steps": trainer.state.global_step, "lora_r": lora_r, "dataset": version},
@@ -467,6 +469,7 @@ def _fine_tune_encoder(
     os.makedirs(output_dir, exist_ok=True)
     model.save_pretrained(output_dir)
     tok.save_pretrained(output_dir)
+    shutil.rmtree(os.path.dirname(args.output_dir), ignore_errors=True)  # the trainer's scratch
     with open(os.path.join(output_dir, "factory.json"), "w") as f:
         json.dump(
             {"base": base, "kind": "encoder", "epochs": epochs, "steps": trainer.state.global_step, "dataset": version},

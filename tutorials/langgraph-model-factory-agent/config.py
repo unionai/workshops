@@ -53,21 +53,33 @@ def tagged(name: str) -> str:
 #     cpu     no GPU. Slow for the chat models; fine for the encoder.
 #
 # On a Mac whose Flyte config points at a devbox the default is `apple`; a cluster config
-# keeps the cluster default. The config is the one the CLI reads: `.flyte/config.yaml`
-# next to the code, or the file named by FLYTECTL_CONFIG (or UCTL_CONFIG) when you keep
-# a devbox config and a cluster config side by side. Set ACCELERATOR to override.
+# keeps the cluster default. The config is the one this process talks to: what `flyte -c`
+# named, or else what the SDK finds on its own (`./.flyte/config.yaml` first, then the
+# FLYTECTL_CONFIG / UCTL_CONFIG file, then ~/.flyte). Set ACCELERATOR to override.
+
+
+def _flyte_endpoint() -> str:
+    """The control plane this process is pointed at, or "" when there is none (`--local`)."""
+    try:  # `flyte run` and the notebook initialize before this module is imported
+        from flyte._initialize import _get_init_config
+
+        init = _get_init_config()
+        if init is not None and init.client is not None:
+            return init.client._session_config.endpoint or ""
+    except Exception:
+        pass
+    try:  # `python serve_model_apple.py` and friends: the file the SDK would pick
+        from flyte.config import auto
+
+        return auto().platform.endpoint or ""
+    except Exception:
+        return ""
 
 
 def _default_accelerator() -> str:
     if platform.system() == "Darwin" and platform.machine() == "arm64":
-        here = os.path.dirname(os.path.abspath(__file__))
-        cfg = os.environ.get("UCTL_CONFIG") or os.environ.get("FLYTECTL_CONFIG")
-        cfg = os.path.join(here, cfg) if cfg and not os.path.isabs(cfg) else cfg
-        try:
-            if "localhost:30080" in open(cfg or os.path.join(here, ".flyte", "config.yaml")).read():
-                return "apple"
-        except OSError:
-            pass
+        if "localhost:30080" in _flyte_endpoint():
+            return "apple"
     return "T4"
 
 
