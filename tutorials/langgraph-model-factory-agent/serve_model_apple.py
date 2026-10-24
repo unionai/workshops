@@ -84,7 +84,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Prefetch an open model and serve it on this Mac's GPU")
     parser.add_argument(
-        "--config", help="Flyte config file (default: the SDK's search, which finds .flyte/config.yaml)"
+        "--config",
+        help="Flyte config file (default: the SDK's search, which finds .flyte/config.yaml). ACCELERATOR is "
+        "decided at import from that search, so with a second config also set ACCELERATOR=apple.",
     )
     args = parser.parse_args()
     flyte.init_from_config(args.config)
