@@ -396,7 +396,8 @@ def _live_training_report(model: str, epochs: float, lora_r: int, dataset: str):
 async def _train(model: str, epochs: float, lora_r: int, dataset: str) -> tuple[Dir, str]:
     _dataset(dataset)
     path = await _materialize(model)
-    base = model if model in CANDIDATES else os.path.basename(path.rstrip("/"))
+    # The candidate id (even when the agent passed its Hugging Face id), else the directory's name.
+    base = next((cid for cid, c in CANDIDATES.items() if model in (cid, c["hf"])), None) or os.path.basename(path.rstrip("/"))
     local_out = os.path.join(tempfile.mkdtemp(prefix="factory-"), f"{base}-ft")
     max_steps = int(os.environ.get("FACTORY_MAX_STEPS", "-1"))  # deployment tests only
     live = [] if _is_local() else [_live_training_report(model, epochs, lora_r, dataset)]

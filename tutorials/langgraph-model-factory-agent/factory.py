@@ -146,6 +146,9 @@ def resolve(model_ref: str) -> tuple[str, str]:
     """(display name, path or hf id) for a candidate id or a fine-tuned directory."""
     if model_ref in CANDIDATES:
         return model_ref, CANDIDATES[model_ref]["hf"]
+    for cid, c in CANDIDATES.items():  # the Hugging Face id, which some agents copy from list_candidates
+        if model_ref.lower() == c["hf"].lower():
+            return cid, c["hf"]
     p = Path(model_ref)
     if p.exists() and (p / "config.json").exists():
         return p.name, str(p)
