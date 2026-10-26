@@ -403,12 +403,16 @@ async def _train(model: str, epochs: float, lora_r: int, dataset: str) -> tuple[
     r = _fine_tune(path, local_out, epochs=epochs, max_steps=max_steps, lora_r=lora_r, version=dataset, callbacks=live)
     if _is_local():
         # One process for the whole run, and training seeds Python's `random`, so two
-        # fine-tunes would draw the same "random" output path from the SDK. Name it ourselves.
-        dest = os.path.join(tempfile.mkdtemp(prefix="factory-weights-"), f"{base}-ft")
+        # fine-tunes would draw the same "random" output path from the SDK. Name it ourselves,
+        # under .factory/ next to the code rather than in the temp dir: the local cache hands this
+        # path back on every later run, so it has to outlive a temp cleanup.
+        weights_root = os.path.join(LOCAL_DIR, "fine-tunes")
+        os.makedirs(weights_root, exist_ok=True)
+        dest = os.path.join(tempfile.mkdtemp(prefix=f"{dataset}-{epochs:g}ep-", dir=weights_root), f"{base}-ft")
         weights = await Dir.from_local(local_out, remote_destination=dest)
         shutil.rmtree(os.path.dirname(local_out), ignore_errors=True)  # copied; the temp dir would otherwise pile up
         # No registry and no upload endpoint off-platform: the directory is the output.
-        summary = r.summary()
+        summary = r.summary().replace(local_out, dest)
         await flyte.report.replace.aio(
             training_html(
                 model, epochs, lora_r, dataset, r.history or [], summary=summary, seconds=r.seconds, device=r.device
@@ -481,6 +485,10 @@ async def fine_tune(model: str, epochs: float = 1.0, lora_r: int = 16, dataset: 
         train_model, short_name=f"train_model · {short} · {epochs:g}ep" + (f" · {dataset}" if dataset != "v1" else "")
     )
     weights, summary = await named(model, epochs, lora_r, dataset, _data_fingerprint(dataset))
+    if _is_local() and not os.path.isdir(weights.path):
+        # A cache hit whose folder is gone (a temp cleanup, `.factory/` deleted): train it again.
+        print(f"cached weights for {model} are gone from {weights.path}; training again (`flyte delete local-cache` to forget it)")
+        weights, summary = await named.override(cache="disable")(model, epochs, lora_r, dataset, _data_fingerprint(dataset))
     if await registry() == "outputs":
         # No artifact registry: the model is the output directory (local, or in the devbox's
         # object store); its path is the reference.
