@@ -272,7 +272,7 @@ the run graph, the cache, the retries, the logs and the reports:
 
 ```bash
 flyte start devbox --apple-silicon        # a Mac; elsewhere: flyte start devbox
-flyte create config --devbox              # writes .flyte/config.yaml pointing at localhost:30080
+flyte create config --devbox              # writes .flyte/config.yaml pointing at localhost:30080 (--force replaces one)
 # keeping a cluster config too? write this one elsewhere and pass it with -c on every command:
 #   flyte create config --devbox -o .flyte/config.devbox.yaml;  flyte -c .flyte/config.devbox.yaml run ...
 #   (the SDK reads .flyte/config.yaml before the FLYTECTL_CONFIG variable, so exporting it does nothing here)
@@ -357,9 +357,11 @@ model API key.
 
 What stands in for the platform, in `tools.py`, decided at run time by `flyte.ctx()`:
 
-- **A folder is the registry and the app.** `promote` copies the winner into
-  `.factory/ticket-router/<version>/` next to the code and points `current.json` at it
-  (`FACTORY_LOCAL_DIR` moves it). `production_status` reads that, `test_deployment` loads
+- **A folder is the registry and the app.** `fine_tune` writes its weights under
+  `.factory/fine-tunes/` next to the code, `promote` copies the winner into
+  `.factory/ticket-router/<version>/` and points `current.json` at it
+  (`FACTORY_LOCAL_DIR` moves both). The fine-tune cache remembers those paths, so a
+  deleted folder is trained again rather than failing (`flyte delete local-cache` forgets everything). `production_status` reads that, `test_deployment` loads
   the current version in-process and measures it, and `rollback` makes an earlier version
   current again. The support agent's `--router oss` loads the same directory through the
   `Router` class that the app itself wraps, so steps 3 and 4 are the same code with no HTTP.
