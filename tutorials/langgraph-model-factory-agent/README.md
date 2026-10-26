@@ -198,8 +198,8 @@ out in its own section below, folded.
 
 - **A Flyte devbox on your machine (recommended).** Docker Desktop running, Python 3.10
   or newer, [`uv`](https://docs.astral.sh/uv/), `pip install -r requirements.txt`, then
-  `flyte start devbox --apple-silicon` on an Apple Silicon Mac (`flyte start devbox`
-  elsewhere: an NVIDIA GPU, or the CPU with the small models). Steps 0 to 4, the deployed
+  `flyte start devbox --apple-silicon` on an Apple Silicon Mac (`flyte start devbox --gpu`
+  on an NVIDIA machine, `flyte start devbox` for the CPU with the small models). Steps 0 to 4, the deployed
   router app, the bake-off, the approval gate and the crash (step 7) all run, the GPU work
   on your own GPU. Only step 5 and the validate-on-promote trigger stay out: artifact
   triggers are a Union feature.
@@ -271,7 +271,7 @@ that asks for a GPU runs natively on the Mac, PyTorch on `mps`, while the devbox
 the run graph, the cache, the retries, the logs and the reports:
 
 ```bash
-flyte start devbox --apple-silicon        # a Mac; elsewhere: flyte start devbox
+flyte start devbox --apple-silicon        # a Mac; an NVIDIA machine: flyte start devbox --gpu; CPU only: flyte start devbox
 flyte create config --devbox              # writes .flyte/config.yaml pointing at localhost:30080 (--force replaces one)
 # keeping a cluster config too? write this one elsewhere and pass it with -c on every command:
 #   flyte create config --devbox -o .flyte/config.devbox.yaml;  flyte -c .flyte/config.devbox.yaml run ...
@@ -570,10 +570,11 @@ accuracy chip fails and "reported honestly" fails, because the decision claims t
 constraints were met), and the prompt now says the bar is the bar. Keep that report; it is
 the best argument for scoring an agent against the record rather than reading its prose.
 
-**Try the result.** The app's endpoint is on its page in the Flyte UI, or:
+**Try the result.** The app's URL is on its page in the Flyte UI and in the `Endpoint`
+column of `flyte get app`. On a devbox it is always the same:
 
 ```bash
-flyte get app ticket-router
+ENDPOINT=http://ticket-router-flytesnacks-development.localhost:30081   # devbox; on Union: the URL from the app's page
 curl -X POST "$ENDPOINT/classify" -H 'content-type: application/json' \
      -d '{"text": "I was charged twice this month, please refund one"}'
 # {"label":"refund","raw":"refund","latency_ms":1075.8}
@@ -751,6 +752,8 @@ back through.
 ```bash
 flyte run --local bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5"]'
 flyte run bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5", "vllm:qwen3-8b"]' --trials 2
+# vllm:qwen3-8b needs VLLM_BASE_URL (from serve_model.py, or serve_model_apple.py on a devbox: see the Apple
+# Silicon block below for the command with it set); without it those trials fail and score as 0 runs.
 ```
 
 **What you'll see.** One child action per (model, trial), in parallel. The report scores
