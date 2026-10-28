@@ -1,0 +1,9 @@
+flyte[tui]>=2.12
+torch>=2.4
+transformers>=4.51
+peft>=0.15
+datasets>=3.0
+python-dotenv
+fastapi
+uvicorn
+httpx

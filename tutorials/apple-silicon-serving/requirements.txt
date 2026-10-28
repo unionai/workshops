@@ -1,0 +1,10 @@
+flyte[tui]>=2.12
+torch>=2.4
+transformers>=4.51
+fastapi
+uvicorn
+httpx
+openai
+gradio>=5
+python-dotenv
+mlx-lm; sys_platform == 'darwin'
