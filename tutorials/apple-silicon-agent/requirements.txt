@@ -1,0 +1,11 @@
+flyte[tui]>=2.12
+torch>=2.4
+transformers>=4.51
+fastapi
+uvicorn
+httpx
+openai
+langgraph>=0.4
+langchain-openai>=0.3
+langchain-anthropic>=0.3
+python-dotenv
