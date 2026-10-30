@@ -31,7 +31,7 @@ and get called back when the data shifts.
 
 ## Bring
 
-A laptop with a browser. A Claude or OpenAI API key if you want to drive the agent yourself; we'll have a shared cluster and GPUs ready. A Grafana Cloud stack is optional; we'll show ours.
+A laptop with a browser. A Claude, OpenAI or Gemini (Google AI Studio) API key if you want to drive the agent yourself; we'll have a shared cluster and GPUs ready. A Grafana Cloud stack is optional; we'll show ours.
 
 ## Who it's for
 

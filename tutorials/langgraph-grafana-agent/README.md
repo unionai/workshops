@@ -215,13 +215,22 @@ ANTHROPIC_API_KEY=sk-ant-...
 # or, to drive the agent with OpenAI instead:
 # OPENAI_API_KEY=sk-...
 # AGENT_MODEL=openai:gpt-4.1
+# or with Gemini, using a Google AI Studio key (https://aistudio.google.com/apikey):
+# GEMINI_API_KEY=AIza...
+# AGENT_MODEL=google:gemini-3.8-flash
 ```
+
+A free-tier AI Studio key allows only about 20 requests per model per day, and one
+10-ticket run of step 0 makes 20 (route plus draft per ticket). Turn on billing for the
+key's project before using Gemini for anything past a smoke test.
 
 ### If you have a Union cluster (recommended)
 
 ```bash
 flyte create config --endpoint <your-endpoint> --project flytesnacks --domain development --builder remote
 flyte create secret ANTHROPIC_API_KEY --value sk-ant-...
+# or, for Gemini:
+# flyte create secret GEMINI_API_KEY --value AIza...
 ```
 
 The first call opens your browser to sign in. Anywhere without a browser to hand off to
@@ -622,8 +631,11 @@ cluster Qwen3-8B met the request too: it fine-tuned three candidates, promoted t
 spent the whole budget and picked a model ten times the size of the encoder that also
 passed, which is exactly the kind of judgment the report lets you compare.
 
-Models are strings from `llm.py`: `anthropic:<model>`, `openai:<model>`, or
-`vllm:<model>@<url>/v1` for anything OpenAI-compatible you serve yourself.
+Models are strings from `llm.py`: `anthropic:<model>`, `openai:<model>`,
+`google:<model>` (Gemini, with a Google AI Studio key in `GEMINI_API_KEY`), or
+`vllm:<model>@<url>/v1` for anything OpenAI-compatible you serve yourself. To put Gemini
+in a bake-off alongside Claude, set `FACTORY_PROVIDERS=anthropic,google` so the tasks
+ask for both secrets.
 
 ## Step 8: crash it, and watch it resume (optional)
 
