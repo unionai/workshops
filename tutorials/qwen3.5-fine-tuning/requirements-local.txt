@@ -1,0 +1,10 @@
+-r requirements.txt
+torch>=2.6
+transformers>=5.16.1,<5.23
+peft>=0.20.0,<0.22
+trl>=1.12.0,<1.18
+bitsandbytes>=0.48.0,<0.51; sys_platform == 'linux'
+flash-linear-attention>=0.5; sys_platform == 'linux'
+accelerate>=0.34.0
+anthropic>=0.40
+markdown
