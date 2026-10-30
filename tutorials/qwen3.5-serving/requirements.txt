@@ -1,0 +1,5 @@
+flyte>=2.12
+flyteplugins-vllm>=2.12
+openai>=1.50
+python-dotenv
+gradio>=5

@@ -1,0 +1,5 @@
+flyte>=2.12
+flyteplugins-vllm>=2.12
+python-dotenv
+datasets>=3.0.0
+transformers>=5.16.1,<5.23
