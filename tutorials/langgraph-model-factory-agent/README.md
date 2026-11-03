@@ -192,9 +192,9 @@ through the promotion to the fine-tune that produced the weights.
 
 ## Setup
 
-Three ways to run it; pick one. The plain `flyte run` commands in the steps are for a devbox
-or a cluster; the `--local` lines are for Colab or a laptop with neither. Each path is spelled
-out in its own section below, folded.
+Three ways to run it; pick one. The `flyte run` commands in the steps are the same on a devbox
+and on a cluster; with neither, add `--local` to any of them. Each path is spelled out in its
+own section below, folded.
 
 - **A Flyte devbox on your machine (recommended).** Docker Desktop running, Python 3.10
   or newer, [`uv`](https://docs.astral.sh/uv/), `pip install -r requirements.txt`, then
@@ -336,24 +336,24 @@ works against a devbox as well: skip its "connect to the cluster" cell.
 <details id="setup-colab">
 <summary><b>No devbox and no cluster: the notebook on Colab, or <code>flyte run --local</code></b></summary>
 
-Every step's `--local` line runs the task in your own process: Colab on its T4, or a
-laptop (Apple Silicon uses `mps`, anything else the CPU). No cluster, no devbox, no
+Add `--local` to any step's command and the task runs in your own process: Colab on its T4,
+or a laptop (Apple Silicon uses `mps`, anything else the CPU). No cluster, no devbox, no
 Docker, and still every tool call a recorded child action. It needs the training stack
 in the environment, which the cluster paths get from the image:
 
 ```bash
 uv pip install -r requirements-local.txt       # requirements.txt plus torch, transformers, peft, trl
 # (it also pins torchao>=0.16: Colab preinstalls 0.10, which peft's LoRA code refuses)
-flyte run --local model_factory.py model_factory --n 20 --models '["smollm2-360m"]'
-flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1
-flyte run --local support_agent.py agent_handle_tickets --n 10 --router oss
+flyte run --local support_agent.py agent_handle_tickets --n 10 --router llm                       # step 0: 10 tickets
+flyte run --local model_factory.py model_factory --n 20 --models '["smollm2-360m"]'               # step 1: one quick eval
+flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1    # step 2: keep it small
+flyte run --local support_agent.py agent_handle_tickets --n 10 --router oss                       # step 3
+flyte run --local bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5"]'   # step 6
 ```
 
-The notebook runs this way by default (`LOCAL = True` in its setup cell; set it to
-`False` for a cluster): the
-[Colab badge](https://colab.research.google.com/github/unionai/workshops/blob/factory/tutorials/langgraph-model-factory-agent/langgraph-model-factory-agent-tutorial.ipynb)
-opens it on a T4, where steps 0 to 4 and the bake-off run end to end with nothing but a
-model API key.
+The notebook does the same with `LOCAL = True` in its setup cell (the workshop copy ships
+with `LOCAL = False`, the cluster): on a kernel with a T4, steps 0 to 4 and the bake-off run
+end to end with nothing but a model API key.
 
 What stands in for the platform, in `tools.py`, decided at run time by `flyte.ctx()`:
 
@@ -411,8 +411,8 @@ as if the key were missing or duplicated; `--project` on its own is refused, it 
 `--domain` with it.)
 
 The config lands in `.flyte/config.yaml` next to the code, so every `flyte run` and the
-notebook's `run()` go to the cluster from then on (the `--local` lines keep working
-alongside). The first call opens your browser to sign in with the account the host gave
+notebook's `run()` go to the cluster from then on (`--local` keeps working alongside).
+The first call opens your browser to sign in with the account the host gave
 you. Anywhere without a browser to hand off to (a hosted notebook, a remote shell) add
 `--auth-type headless`: the first call then prints a login URL and a code to paste back.
 Without it the browser flow fails silently and the first upload dies with an empty
@@ -446,9 +446,12 @@ minutes, once.
 ## Step 0: the support agent, as it is today
 
 ```bash
-flyte run --local support_agent.py agent_handle_tickets --n 10 --router llm    # Colab or a laptop with no devbox: 10 tickets
-flyte run support_agent.py agent_handle_tickets --router llm                   # devbox or cluster: 30 tickets
+flyte run support_agent.py agent_handle_tickets --router llm
 ```
+
+(Every step's command is the same on a devbox and on the cluster. No cluster at all? Add
+`--local` and the task runs in your own process; the
+[no-cluster block in Setup](#setup-colab) has the smaller flags to use there.)
 
 **What you'll see.** Thirty held-out tickets go through the support agent: the router picks
 a queue, then the queue's drafting agent (the same model, prompted as that team) writes a
@@ -483,8 +486,7 @@ app instead, which does not exist yet. Building it is the request.
 This is the factory with you at the controls: you pick the candidates and the epochs, the same tools do the work, and you look at what comes back. In step 2 the ML engineer takes over the controls. In the Flyte UI the evals appear side by side in a group called `baseline-evals`, and the fine-tune plus its recheck in `fine-tune-and-recheck`.
 
 ```bash
-flyte run --local model_factory.py model_factory --n 20 --models '["smollm2-360m"]'   # Colab or a laptop with no devbox: one quick eval
-flyte run model_factory.py model_factory --fine_tune_too                           # devbox or cluster: the full matrix
+flyte run model_factory.py model_factory --fine_tune_too
 ```
 
 **What you'll see.** The task report has a **Data** tab with the synthetic tickets (800
@@ -525,8 +527,7 @@ seconds, and so does everyone else in the project.
 ## Step 2: let the ML engineer build the router
 
 ```bash
-flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1   # Colab or a laptop with no devbox: keep it small
-flyte run ml_engineer.py ml_engineer_agent                                                       # devbox or cluster
+flyte run ml_engineer.py ml_engineer_agent
 ```
 
 **What you'll see.** The terminal prints the run URL and, at the end, the decision as
@@ -754,7 +755,6 @@ back through.
 ## Step 6: bake off the engineer's brain (optional)
 
 ```bash
-flyte run --local bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5"]'
 flyte run bakeoff.py bakeoff --models '["anthropic:claude-opus-5", "anthropic:claude-haiku-4-5", "vllm:qwen3-8b"]' --trials 2
 # vllm:qwen3-8b needs VLLM_BASE_URL (from serve_model.py, or serve_model_apple.py on a devbox: see the Apple
 # Silicon block below for the command with it set); without it those trials fail and score as 0 runs.
