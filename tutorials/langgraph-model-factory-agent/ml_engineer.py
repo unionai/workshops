@@ -12,6 +12,7 @@ Needs the key for AGENT_MODEL's provider (locally in .env; on the cluster as a s
     flyte run --local ml_engineer.py ml_engineer_agent --candidates_to_screen 2 --max_fine_tunes 1
     flyte run ml_engineer.py ml_engineer_agent
     flyte run ml_engineer.py ml_engineer_agent --min_accuracy 0.9 --max_latency_ms 120 --budget 6
+    flyte run ml_engineer.py ml_engineer_agent --approval      # pause before the deploy for a person to look at the evals
 
 The task report shows the agent's timeline (model turns and tool calls) on one tab and
 the decision, checked against the request, on another. On the cluster, `promote` also
@@ -41,12 +42,19 @@ async def ml_engineer_agent(
     dataset: str = "v1",
     situation: str = "",
     model: str | None = None,
+    approval: bool = False,
 ) -> dict:
-    """Take the request, run the factory, return the decision with what it cost."""
+    """Take the request, run the factory, return the decision with what it cost.
+
+    `approval` puts a person in the loop: `promote` pauses the run (a `flyte.new_condition`)
+    with the model, its numbers and the agent's reasoning, and deploys only once someone
+    approves it in the Flyte UI or with `flyte signal condition <run> <action> true`. The
+    evals are this run's child actions, so the reviewer can read every report first.
+    """
     request = Request(
         min_accuracy, max_latency_ms, candidates_to_screen, max_fine_tunes, budget, dataset=dataset, situation=situation
     )
-    result = await _engineer(request, model_spec=model)
+    result = await _engineer(request, model_spec=model, approval=approval)
     await flyte.report.replace.aio(decision_html(result))
     await flyte.report.flush.aio()
     print(json.dumps(result, indent=2))

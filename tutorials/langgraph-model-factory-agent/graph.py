@@ -239,12 +239,16 @@ def think_node(model, tools, *, name: str = "think"):
     return _think
 
 
-def parallel_tool_node(tools, *, name: str = "tools"):
+def parallel_tool_node(tools, *, name: str = "tools", approval: bool = False):
     """Run every tool call in the last message concurrently; each is a durable child action.
 
     Same contract as the plugin's `tool_node` (a `ToolMessage` per call, in order, errors
     surfaced to the model as text), with `asyncio.gather` instead of a loop. On a cluster
     that turns "evaluate these three" into three containers running at the same time.
+
+    `approval=True` makes `promote` pause for a person before it deploys (see
+    `_ask_for_approval` in tools.py): the child action gets FACTORY_APPROVAL=1 in its
+    environment for this run only. The model never sees the knob.
     """
     registry = {getattr(t, "name", getattr(t, "__name__", "")): t for t in tools}
     timeline = ReportTimeline()
@@ -257,6 +261,8 @@ def parallel_tool_node(tools, *, name: str = "tools"):
         args = call.get("args") or {}
         try:
             task = getattr(selected, "flyte_task", None)
+            if task is not None and approval and call["name"] == "promote":
+                task = dataclasses.replace(task, env_vars={**(task.env_vars or {}), "FACTORY_APPROVAL": "1"})
             if task is not None and slots is not None and call["name"] in GPU_TOOLS:
                 async with slots:
                     named = dataclasses.replace(task, short_name=action_label(call["name"], args))
@@ -295,10 +301,10 @@ def parallel_tool_node(tools, *, name: str = "tools"):
     return _tools
 
 
-def build_graph(model, tools=TOOLS, max_tool_rounds: int = MAX_TOOL_ROUNDS):
+def build_graph(model, tools=TOOLS, max_tool_rounds: int = MAX_TOOL_ROUNDS, approval: bool = False):
     """Compile the graph around a LangChain chat model."""
     think = think_node(model, tools, name="think")
-    execute = parallel_tool_node(tools, name="tools")
+    execute = parallel_tool_node(tools, name="tools", approval=approval)
     structured = model.with_structured_output(Decision)
 
     pending: dict = {}
@@ -367,16 +373,17 @@ def build_graph(model, tools=TOOLS, max_tool_rounds: int = MAX_TOOL_ROUNDS):
     return builder.compile()
 
 
-async def engineer(request: Request, model_spec: str | None = None, model=None) -> dict:
+async def engineer(request: Request, model_spec: str | None = None, model=None, approval: bool = False) -> dict:
     """Run the graph on one request. Call this from inside a Flyte task.
 
     Returns the decision plus what the run cost: model turns, tool calls, tokens, seconds.
-    The token counts come from LangChain's usage callback.
+    The token counts come from LangChain's usage callback. `approval=True` puts a person
+    in front of the deploy: the run pauses at `promote` until someone approves it.
     """
     from langchain_core.callbacks import UsageMetadataCallbackHandler
 
     model = model or chat_model(model_spec)
-    graph = build_graph(model)
+    graph = build_graph(model, approval=approval)
 
     # A tab with the graph drawn, up before the first turn so people can look at it while
     # the run works. Outside a task (local runs) the report is a no-op.

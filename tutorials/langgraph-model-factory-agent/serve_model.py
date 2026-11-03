@@ -70,7 +70,7 @@ if __name__ == "__main__":
         import flyte.prefetch
 
         print(f"Prefetching {HF_REPO} into object storage…")
-        run = flyte.prefetch.hf_model(repo=HF_REPO)
+        run = flyte.prefetch.hf_model(repo=HF_REPO, hf_token_key=None)  # a public model: no HF_TOKEN secret needed
         print(run.url)
         run.wait()
         run_name = run.name
