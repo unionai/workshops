@@ -558,16 +558,23 @@ async def publish_router(
     return artifacts.new(weights, meta), version
 
 
-async def _ask_for_approval(model: str, accuracy: float, latency_p50_ms: float, reason: str) -> bool:
+def _approval_wanted() -> bool:
+    """FACTORY_APPROVAL from .env gates every promote; `--approval` on the agent sets it on this one action."""
+    return FACTORY_APPROVAL or os.environ.get("FACTORY_APPROVAL", "0") in ("1", "true", "yes")
+
+
+async def _ask_for_approval(model: str, accuracy: float, latency_p50_ms: float, reason: str, dataset: str) -> bool:
     """Pause the run until a person approves the deployment in the Flyte UI (or the CLI)."""
     condition = await flyte.new_condition.aio(
         "deploy-approval",
         prompt=(
             "## Deploy to production?\n\n"
-            f"The agent wants to promote **{model}**.\n\n"
+            f"The agent wants to promote **{model}** as the ticket router, measured on dataset `{dataset}`.\n\n"
             f"| accuracy | p50 latency |\n|---|---|\n| {accuracy:.1%} | {latency_p50_ms:.0f} ms |\n\n"
-            f"{reason}\n\n"
-            "Approve to publish the artifact and deploy the app."
+            f"**The agent's reasoning:** {reason}\n\n"
+            "The evals behind these numbers are this run's `run_eval` and `fine_tune` actions: open their "
+            "reports (per-category accuracy, confusion matrix, loss curve) before you decide.\n\n"
+            "Approve to publish the artifact and deploy the app; decline and nothing is published."
         ),
         prompt_type="markdown",
         data_type=bool,
@@ -594,7 +601,7 @@ async def promote(model: str, accuracy: float, latency_p50_ms: float, reason: st
     from flyte.remote import Artifact
 
     # 0. Optionally, a person has to say yes first. The run pauses here until they do.
-    if FACTORY_APPROVAL and not await _ask_for_approval(model, accuracy, latency_p50_ms, reason):
+    if _approval_wanted() and not await _ask_for_approval(model, accuracy, latency_p50_ms, reason, dataset):
         return f"promotion of {model} was DECLINED by the approver. Nothing was published or deployed."
 
     if await registry() == "outputs":

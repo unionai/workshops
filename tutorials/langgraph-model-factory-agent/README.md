@@ -397,14 +397,18 @@ of an hour.
 <details id="setup-cluster">
 <summary><b>On the workshop cluster (<code>tryv2</code>), or your own Union cluster</b></summary>
 
-The workshop runs in the `factorysea` project on `tryv2.hosted.unionai.cloud`. From
+The workshop runs in the `workshopfactory` project on `tryv2.hosted.unionai.cloud`. From
 a laptop, the whole setup is the config file:
 
 ```bash
-flyte create config --endpoint tryv2.hosted.unionai.cloud --project factorysea --domain development --builder remote
-flyte get secret                    # ANTHROPIC_API_KEY is already there; nothing to create
+flyte create config --endpoint tryv2.hosted.unionai.cloud --project workshopfactory --domain development --builder remote
+flyte get secret --project workshopfactory --domain development   # ANTHROPIC_API_KEY is already there; nothing to create
 flyte run model_factory.py model_factory --fine_tune_too       # the first run signs you in
 ```
+
+(`flyte get secret` with no flags lists every project's secrets in the org, which reads
+as if the key were missing or duplicated; `--project` on its own is refused, it needs
+`--domain` with it.)
 
 The config lands in `.flyte/config.yaml` next to the code, so every `flyte run` and the
 notebook's `run()` go to the cluster from then on (the `--local` lines keep working
@@ -894,12 +898,15 @@ to load the encoder as a chat model).
 ## A human in the loop
 
 ```bash
-FACTORY_APPROVAL=1 flyte run ml_engineer.py ml_engineer_agent
+flyte run ml_engineer.py ml_engineer_agent --approval       # this run pauses before the deploy
+FACTORY_APPROVAL=1 flyte run ml_engineer.py ml_engineer_agent   # the same, via .env: gates every promote, triggers included
 ```
 
-With `FACTORY_APPROVAL=1`, `promote` creates a `flyte.new_condition` before it publishes
+With `--approval`, `promote` creates a `flyte.new_condition` before it publishes
 anything: the run pauses, the Flyte UI shows a prompt with the model, its numbers and the
-agent's reasoning, and a person approves or declines. Decline, and the agent is told the
+agent's reasoning, and a person approves or declines. The evals the agent ran are the
+run's child actions, each with its own report, so the reviewer reads the per-category
+numbers and the confusion matrix before deciding, not the agent's summary of them. Decline, and the agent is told the
 promotion was refused and writes that up. No extra infrastructure; it is a native Flyte
 condition, and it works the same on a devbox. From a terminal, the run's condition action
 shows as PAUSED, and
@@ -961,7 +968,7 @@ T4 latency bar is not applied to them.
 | GPU tools in flight per run | `FACTORY_MAX_PARALLEL_GPU`: the engineer still asks for five evals in one turn, but only this many run at once. Set 1 or 2 for a room on one GPU pool | `0` (no limit); `1` on a Mac and in a local run |
 | deploy on promote | `FACTORY_DEPLOY` | `1` (step 6 sets `0`) |
 | the router app's pod | sized to the promoted model: the encoder 2 CPU / 2Gi, a chat model up to 0.5B 2 CPU / 4Gi, larger ones a T4. `ROUTER_CPU`, `ROUTER_MEMORY`, `ROUTER_GPU` override | by model |
-| human approval before deploy | `FACTORY_APPROVAL` | `0` |
+| human approval before deploy | `--approval` on `ml_engineer_agent` (one run), or `FACTORY_APPROVAL` (every promote) | off |
 | your namespace on a shared cluster | `FACTORY_TAG` | none (app and artifacts are then `ticket-router`) |
 | a note for the engineer | `--situation "..."` on step 2 | none (steps 4 and 5 set their own) |
 | fresh build vs. keep production | `Request.fresh` | `True` for steps 1 to 3, 6 and 7 ("ignore what is deployed, build one"); `False` for 4 and 5 ("check production first") |
