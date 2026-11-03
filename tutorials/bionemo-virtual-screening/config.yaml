@@ -1,0 +1,12 @@
+# Point this at your own Union tenant, or replace it with the output of
+# `flyte create config --endpoint <your-org>.hosted.unionai.cloud --project bionemo-playground --domain development --builder remote`
+admin:
+  endpoint: dns:///your-org.hosted.unionai.cloud
+  insecure: false
+  authType: Pkce
+task:
+  org: your-org
+  project: bionemo-playground
+  domain: development
+image:
+  builder: remote
