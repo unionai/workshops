@@ -9,7 +9,8 @@ Tutorials and examples for building AI agents, ML pipelines, and data workflows 
 
 ### **[tutorials/langgraph-model-factory-agent/](tutorials/langgraph-model-factory-agent/)**
 
-**[Open the notebook in SageMaker via AWS Workshop Studio](https://catalog.us-east-1.prod.workshops.aws/join)**
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/unionai/workshops/blob/factory/tutorials/langgraph-model-factory-agent/langgraph-model-factory-agent-tutorial.ipynb)
+<!-- branch: switch blob/factory to blob/main once merged -->
 
 *An ML engineer agent runs the model factory: evaluate, fine-tune, promote, deploy, and
 retrain when the data drifts. LangGraph for the agent, Flyte 2 for everything it touches.*
@@ -29,11 +30,10 @@ fine-tune leaves a report you can open.
   triggers, which are a Union feature.
 - **The workshop's Union cluster (`tryv2`), from any laptop.** One `flyte create config`
   command and a browser sign-in; the cluster's GPUs do the work. The full workshop.
-- **The notebook on SageMaker, via AWS Workshop Studio (nothing to install).** Click the
-  link above. It connects to the workshop cluster, so it is the full workshop in notebook
-  form. (Set `LOCAL = True` in its setup cell to run with no cluster at all: slightly pared
-  down, with a folder standing in for the deployed app, without the triggers and the
-  kill-and-resume step.)
+- **The notebook on Google Colab (nothing to install).** Click the badge. It connects to
+  the workshop cluster, so it is the full workshop in notebook form. (Set `LOCAL = True` in
+  its setup cell to run on Colab's own T4 with no cluster at all: slightly pared down, with a
+  folder standing in for the deployed app, without the triggers and the kill-and-resume step.)
 
 Bring a laptop. The devbox path needs a Claude or OpenAI API key; the cluster, which the
 notebook uses, already has one.
@@ -66,7 +66,7 @@ flyte run model_factory.py model_factory --fine_tune_too                # step 1
 | [Apple Silicon: fine-tune on your Mac's GPU](tutorials/apple-silicon-fine-tuning/) | `flyte start devbox --apple-silicon`, `gpu="AppleSilicon"`: LoRA on `mps` for text-to-SQL (5% → 62% exact match, 14 s of training), live loss chart, the adapter served on the same GPU; one env var moves it to a T4 |
 | [Apple Silicon: serve an LLM on your Mac](tutorials/apple-silicon-serving/) | Qwen3-1.7B behind an OpenAI-compatible Flyte app on the Metal GPU (streaming, tool calls), benchmarked from a task, torch on `mps` vs MLX native (79 vs 277 tok/s), a chat UI that finds the app by name |
 | [Apple Silicon: an agent whose model and tools run on your Mac](tutorials/apple-silicon-agent/) | A LangGraph SQL agent with Qwen3-4B served on the Mac's GPU as its brain and Flyte tasks as its tools: every query is a durable child action, 16 questions fanned out and scored (81%), swap the brain for Claude with one env var |
-| [Model Factory Agent](tutorials/langgraph-model-factory-agent/) | Tonight's workshop. A LangGraph agent plays ML engineer on Flyte 2: parallel evals, fine-tunes, promotion, a deployed router app it tests, drift and the retrain; runs on a Union cluster, on a Flyte devbox on your Mac, or in a SageMaker notebook with no cluster at all |
+| [Model Factory Agent](tutorials/langgraph-model-factory-agent/) | Tonight's workshop. A LangGraph agent plays ML engineer on Flyte 2: parallel evals, fine-tunes, promotion, a deployed router app it tests, drift and the retrain; runs on a Union cluster, on a Flyte devbox on your Mac, or in Colab with no cluster at all |
 | [Model Factory Agent + Grafana](tutorials/langgraph-grafana-agent/) | A LangGraph agent plays ML engineer: evaluates five candidates on T4s in parallel, fine-tunes the right ones (and discovers a 149M encoder beats the chat models), promotes it as a Union artifact, deploys it, tests the live app, and turns the factory again when the data changes; Grafana Agent Observability watches every turn |
 | [SkyRL SQL Agent](tutorials/skyrl-sql-agent/) | Multi-turn RL against a real database — write one SkyRL-Gym environment, then drive it with no model, with a 0.5B, with Claude, or with SkyRL's distributed trainer; GRPO rollouts fan out as durable Flyte tasks |
 | [RAG and Agentic Memory](tutorials/rag-agent-memory/) | One vector store, pointed two directions — build a RAG index, watch retrieval work with no model involved, visualize the embedding space, then let an agent write its own memories back into it |
