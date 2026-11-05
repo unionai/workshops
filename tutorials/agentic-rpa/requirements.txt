@@ -1,0 +1,8 @@
+flyte[tui]>=2.12.5
+anthropic[vertex]==1.13.0
+asyncssh==2.24.1
+httpx
+openpyxl
+pillow
+playwright==1.63.0
+python-dotenv

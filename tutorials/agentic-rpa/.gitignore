@@ -1,0 +1,5 @@
+.secrets/
+.env
+*.mp4
+.venv/
+.flyte/
