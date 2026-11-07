@@ -244,7 +244,8 @@ class LoopResult:
 @flyte.trace
 async def computer_step(step: int, actions: list[dict]) -> list[dict]:
     """One model turn's batch of desktop actions. Returns per-action outcome (images elided)."""
-    # Executed for real in run_loop; this traced stub records what was done for lineage.
+    # A record for lineage, not a checkpoint: run_loop has already executed these actions when it
+    # calls this. A retried computer_use task starts its session over from the current screen.
     return actions
 
 

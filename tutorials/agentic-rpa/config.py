@@ -61,7 +61,15 @@ ENV_VARS = {
     "RPA_ORCHESTRATOR_MODEL": ORCHESTRATOR_MODEL,
     "RPA_COMPUTER_USE_MODEL": COMPUTER_USE_MODEL,
     "RPA_APPROVAL_THRESHOLD": str(APPROVAL_THRESHOLD),
+    "RPA_SSH_USER": SSH_USER,
+    "PORTAL_USER": PORTAL_USER,
 }
+# Endpoint overrides go to the cluster only when set; otherwise tasks derive them from RPA_VM_HOST.
+for _name in ("RPA_CUA_URL", "RPA_ERP_URL", "RPA_PORTAL_URL"):
+    if os.environ.get(_name):
+        ENV_VARS[_name] = os.environ[_name]
+# ACME_API_KEY and PORTAL_PASSWORD are deliberately not forwarded: environment variables are visible
+# in the task spec. The toy apps' defaults are fine for the demo; for real ones, add Flyte secrets.
 
 # In the cluster these come from Flyte secrets; in a local run, from your environment.
 SECRETS = [flyte.Secret(key="rpa-vm-ssh-key", as_env_var="RPA_SSH_KEY")]

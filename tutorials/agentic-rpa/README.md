@@ -10,13 +10,13 @@ ends up in the Flyte run, so when the bot misbehaves you can see what it did and
 - An agent (`flyte.ai.agents.Agent`) whose tools are Flyte tasks. Each tool call is its own action
   in the run, so the run graph is a record of the agent's decisions.
 - Computer use with Claude's `computer_toolset_20260801`, driving a real desktop through
-  [CUA](https://github.com/trycua/cua)'s computer server. Every model turn is a `flyte.trace`
-  step, and the report tab shows a live screenshot timeline and the mp4 recording.
+  [CUA](https://github.com/trycua/cua)'s computer server. Every model turn is recorded as a
+  `flyte.trace` step, and the report tab shows a live screenshot timeline and the mp4 recording.
 - Separate task environments per mechanism: a Playwright image for the browser rung, a light one
   for everything else.
 - A deterministic twin of the same workflow, to show that "agentic" is a choice per workflow, not
   a rewrite.
-- An approval gate (`flyte.new_condition`), a daily `flyte.Trigger`, and durable resume.
+- An approval gate (`flyte.new_condition`) and a daily `flyte.Trigger`.
 
 ## The scenario: daily supplier price update
 
@@ -71,8 +71,13 @@ mkdir -p .secrets && ssh-keygen -t ed25519 -N "" -f .secrets/rpa_ssh
 # Build and start the target VM (the first build takes a few minutes)
 docker build -t agentic-rpa-vm target_vm
 docker run -d --name agentic-rpa-vm -e RPA_SSH_PUBKEY="$(cat .secrets/rpa_ssh.pub)" \
-  -p 2222:22 -p 6080:6080 -p 8000:8000 -p 8001:8001 -p 8002:8002 agentic-rpa-vm
+  -p 127.0.0.1:2222:22 -p 127.0.0.1:6080:6080 -p 127.0.0.1:8000:8000 \
+  -p 127.0.0.1:8001:8001 -p 127.0.0.1:8002:8002 agentic-rpa-vm
 ```
+
+The ports are bound to `127.0.0.1` on purpose. noVNC (6080) and CUA's computer server (8000) have
+no authentication: anyone who can reach them can watch and drive the desktop. Don't publish them on
+a network interface.
 
 Open http://localhost:6080/vnc.html to watch the VM's desktop live: you should see the Acme ERP
 Price Maintenance window. The portal is at http://localhost:8002 (user `acme-buyer`, password
@@ -107,8 +112,10 @@ one to enter the prices in the desktop client. Watch them on the noVNC tab while
 ## Run on a Flyte devbox
 
 `flyte start devbox` runs a single-node Flyte 2 cluster in Docker, with the UI, so you get the run
-graph, the report tabs and the recordings. Tasks there run in pods, so they reach the VM through your
-machine's address (`host.docker.internal` on Docker Desktop) rather than `localhost`.
+graph, the report tabs and the recordings. Tasks there run in pods inside the devbox container. Both
+containers are on Docker's default bridge network, so the pods reach the VM container at its own
+address on that network, with SSH on port 22. Nothing needs to be published on your machine's
+network interfaces.
 
 ```bash
 flyte start devbox && flyte create config --devbox
@@ -116,17 +123,16 @@ flyte start devbox && flyte create config --devbox
 flyte create secret rpa-vm-ssh-key --from-file .secrets/rpa_ssh
 flyte create secret ANTHROPIC_API_KEY            # paste the key when asked
 
-export RPA_VM_HOST=host.docker.internal
+export RPA_VM_HOST=$(docker inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' agentic-rpa-vm)
+export RPA_SSH_PORT=22
 flyte run agentic.py price_update --chaos
 flyte run scripted.py price_update_scripted
 flyte run tools.py reset_demo
 ```
 
 `flyte run` prints a link to the run in the devbox UI. The first run builds the two task images
-(the Playwright one takes a few minutes).
-
-On Docker for Linux, pods may not resolve `host.docker.internal`. Use your machine's IP address
-instead, for example `export RPA_VM_HOST=$(hostname -I | awk '{print $1}')`.
+(the Playwright one takes a few minutes). The VM's address on the bridge network can change when
+the container restarts, so set `RPA_VM_HOST` again after a restart.
 
 To put the bot on its 06:00 America/Chicago schedule, deploy it instead of running it:
 
@@ -146,8 +152,11 @@ flyte delete trigger daily-price-update agentic-rpa.price_update        # when y
 - **The output** of `price_update`: the agent's report (how it got the price file, how many changes,
   which mechanism entered them, the verification, and what a person should look at).
 
-Kill a run halfway through and run it again with the same inputs: completed tool calls replay from
-their recorded outputs instead of running again.
+**Retries and fresh runs.** Within one run, if a task is retried (give it `retries=` to allow that),
+the child actions it already completed are replayed from their recorded outputs instead of running
+again. That makes the scripted twin cheap to recover. The agent is different: its model calls aren't
+recorded, so on a retry it plans again and may choose different tools. A new `flyte run` is always a
+fresh run and repeats every step, including the ones with side effects, so run `reset_demo` first.
 
 ## How it works
 
@@ -161,7 +170,7 @@ price_update (agentic.py)                price_update_scripted (scripted.py)
       ├─ portal_download_prices     HTTP ──────┤       • Acme ERP REST API       :8001
       │    (Playwright, own image)             ├──►    • BuildSupply portal      :8002
       ├─ computer_use               CUA, SSH ──┤       • Acme ERP desktop app (Tk)
-      │    (each model turn a flyte.trace)     │       • CUA computer server     :8000
+      │    (each model turn traced)            │       • CUA computer server     :8000
       └─ request_approval                      │       • sshd :22, noVNC :6080
            (flyte.new_condition)
 ```
@@ -181,12 +190,25 @@ Some details worth knowing:
 
 - **Keyboard input goes through `xdotool`**, run on the VM through CUA. pynput's keyboard injection
   does nothing under Xvfb, and xdotool key names are what Claude's computer toolset emits anyway.
-- **Recording** is ffmpeg `x11grab` on the VM, started over SSH and stopped with SIGINT in a
-  `finally` block, so a failed session still keeps its recording. The mp4 is a `flyte.io.File`
-  output of the `computer_use` task, so it sits in lineage next to the inputs that caused it.
-- **Guardrails are in code:** more than `RPA_APPROVAL_THRESHOLD` (10) changes pauses the run for a
-  person; prices only ever come from the supplier file; every run ends with an independent check
-  through the ERP's own data.
+- **Recording** is ffmpeg `x11grab` on the VM, started over SSH and stopped with SIGINT so the
+  mp4 is finalized. On success the mp4 is a `flyte.io.File` output of the `computer_use` task, so it
+  sits in lineage next to the inputs that caused it. If the session fails, the recording is still
+  uploaded and embedded in the report tab before the error is raised.
+- **The computer-use traces are a record, not a checkpoint.** Each model turn's actions are logged
+  as a `flyte.trace` step after they run. If a `computer_use` task is retried, the session starts
+  over from whatever is on the screen now. Write goals that are safe to repeat: the price-entry goal
+  sets exact prices, so entering one twice leaves the same price (and an extra audit entry).
+- **What's enforced in code, and what's only an instruction:**
+  - Code: the scripted twin pauses for a person on more than `RPA_APPROVAL_THRESHOLD` (10) changes.
+    `build_price_changes` refuses a supplier file whose effective date isn't the run date. Prices
+    are compared in whole cents. Both workflows end with a check through the ERP's own data, and the
+    agentic run fails if the agent reports an error.
+  - Instructions only: in the agentic version, the approval threshold and "prices only come from the
+    supplier file" are rules in [`instructions.md`](instructions.md). The agent has `computer_use`
+    and an unrestricted `vm_shell`, so it could break them. For production, gate the price-writing
+    tools in code: for example `tool(..., requires_approval=True)` with an `approval_callback` that
+    checks the staged workbook, or a dedicated price-entry tool that takes the validated workbook
+    instead of a free-form goal.
 - **Pointing it at a real machine:** everything that touches the VM is in `vm.py` (SSH and SFTP),
   `tools.py` (the shell commands) and `computer_use.py` (CUA and the recorder). Run
   `target_vm/provision.sh` on a Debian VM and set `RPA_VM_HOST` and `RPA_SSH_PORT=22`, or swap those

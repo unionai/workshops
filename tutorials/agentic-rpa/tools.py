@@ -31,6 +31,11 @@ def _today(run_date: str) -> str:
     return run_date or date.today().isoformat()
 
 
+def cents(price: float) -> int:
+    """Compare prices in whole cents: float differences like 19.68 - 19.67 come out under 0.01."""
+    return round(price * 100)
+
+
 def _erp() -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=config.ERP_URL, headers={"X-API-Key": config.ERP_API_KEY}, timeout=30)
 
@@ -139,8 +144,13 @@ async def build_price_changes(supplier_csv: File, run_date: str = "") -> File:
     """Diff the supplier price file against current ERP prices; write price_changes_<date>.xlsx (only changed SKUs)."""
     from openpyxl import Workbook
 
+    d = _today(run_date)
     async with supplier_csv.open("rb") as f:
         rows = list(csv.DictReader(io.StringIO(bytes(await f.read()).decode())))
+    # Never apply another day's price list under this run's date.
+    dates = {row.get("effective_date") for row in rows}
+    if dates != {d}:
+        raise ValueError(f"supplier file is for {sorted(map(str, dates))}, not the run date {d}: get the price list for {d}")
     async with _erp() as c:
         r = await c.get("/skus")
         r.raise_for_status()
@@ -153,9 +163,9 @@ async def build_price_changes(supplier_csv: File, run_date: str = "") -> File:
     for row in rows:
         cur = erp.get(row["sku"])
         new = round(float(row["supplier_price"]), 2)
-        if cur and abs(new - cur["price"]) >= 0.01:
+        if cur and cents(new) != cents(cur["price"]):
             ws.append([row["sku"], row["description"], cur["price"], new, round(100 * (new - cur["price"]) / cur["price"], 1)])
-    out = os.path.join(tempfile.mkdtemp(), f"price_changes_{_today(run_date)}.xlsx")
+    out = os.path.join(tempfile.mkdtemp(), f"price_changes_{d}.xlsx")
     wb.save(out)
     return await File.from_local(out)
 
@@ -193,6 +203,9 @@ async def portal_download_prices(run_date: str = "") -> File:
             await page.fill("#username", config.PORTAL_USER)
             await page.fill("#password", config.PORTAL_PASSWORD)
             await page.click("#login-btn")
+            step = "open the dashboard"
+            await page.wait_for_url("**/dashboard*", timeout=10_000)
+            await page.goto(f"{config.PORTAL_URL}/dashboard?d={d}", timeout=20_000)
             step = "find #export-btn"
             async with page.expect_download(timeout=10_000) as dl:
                 await page.click("#export-btn", timeout=8_000)
@@ -228,6 +241,24 @@ class ComputerUseResult:
     recording: File | None = None
 
 
+async def _save_recording(rec: cu.Recorder, failed: bool = False) -> File | None:
+    """Stop the recorder, upload the mp4 to Flyte storage, and embed it in the report tab."""
+    local = await rec.stop()
+    if not local:
+        return None
+    recording = await File.from_local(local)
+    tab = flyte.report.get_tab(cu.REPORT_TAB)
+    title = "Recording (the session failed)" if failed else "Recording"
+    tab.log(f"<h3>{title}</h3><p><small>{html.escape(recording.path)}</small></p>")
+    if os.path.getsize(local) < 25_000_000:
+        import base64
+
+        b64 = base64.b64encode(open(local, "rb").read()).decode()
+        tab.log(f"<video controls style='width:960px' src='data:video/mp4;base64,{b64}'></video>")
+    await flyte.report.flush.aio()
+    return recording
+
+
 @cu_env.task(report=True)
 async def computer_use(goal: str, max_steps: int = 40) -> ComputerUseResult:
     """Operate the VM's desktop like a person (screenshots, mouse, keyboard) to accomplish `goal`.
@@ -237,17 +268,15 @@ async def computer_use(goal: str, max_steps: int = 40) -> ComputerUseResult:
     await rec.start()
     try:
         res = await cu.run_loop(goal, max_steps=max_steps)
-    finally:
-        local = await rec.stop()
-    recording = await File.from_local(local) if local else None
-    if local and os.path.getsize(local) < 25_000_000:
-        import base64
-
-        b64 = base64.b64encode(open(local, "rb").read()).decode()
-        flyte.report.get_tab(cu.REPORT_TAB).log(
-            f"<h3>Recording</h3><video controls style='width:960px' src='data:video/mp4;base64,{b64}'></video>"
-        )
-        await flyte.report.flush.aio()
+    except BaseException:
+        # A failed session keeps its recording too: save it, then re-raise the original error.
+        try:
+            await _save_recording(rec, failed=True)
+        except Exception as e:
+            flyte.report.get_tab(cu.REPORT_TAB).log(f"<p>Recording could not be saved: {html.escape(str(e))}</p>")
+            await flyte.report.flush.aio()
+        raise
+    recording = await _save_recording(rec)
     return ComputerUseResult(res.status, res.summary, res.steps, res.actions, recording)
 
 

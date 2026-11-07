@@ -28,7 +28,8 @@ async def price_update_scripted(run_date: str = "", chaos: bool = False) -> dict
             fallback = await tools.computer_use(
                 f"In the desktop web browser, open the supplier portal ({config.PORTAL_URL_ON_VM}), sign in as "
                 f"'{config.PORTAL_USER}' with password '{config.PORTAL_PASSWORD}', and download the supplier "
-                f"price list CSV for {d}. Confirm prices_{d}.csv is in {config.DOWNLOADS_DIR}. "
+                f"price list CSV for {d} (after signing in, {config.PORTAL_URL_ON_VM}/dashboard?d={d} shows that day's list). "
+                f"Confirm prices_{d}.csv is in {config.DOWNLOADS_DIR}. "
                 f"(The scripted download failed: {e})",
                 max_steps=30,
             )
@@ -60,7 +61,7 @@ async def price_update_scripted(run_date: str = "", chaos: bool = False) -> dict
 
     with flyte.group("verify"):
         current = {s["sku"]: s["price"] for s in await tools.erp_list_skus()}
-        mismatches = [c["sku"] for c in changes if abs(current.get(c["sku"], -1) - c["new_price"]) >= 0.01]
+        mismatches = [c["sku"] for c in changes if tools.cents(current.get(c["sku"], -1)) != tools.cents(c["new_price"])]
 
     return {
         "date": d,

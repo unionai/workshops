@@ -10,6 +10,7 @@ Playwright selectors written against the normal layout fail; a person (or comput
 from __future__ import annotations
 
 import csv
+import html
 import io
 import os
 from datetime import date
@@ -54,7 +55,7 @@ def _authed(request: Request) -> bool:
 
 @app.get("/", response_class=HTMLResponse)
 def login_page(error: str = "") -> str:
-    msg = f"<p style='color:#b00020'>{error}</p>" if error else ""
+    msg = f"<p style='color:#b00020'>{html.escape(error)}</p>" if error else ""
     return f"""<html><head><title>BuildSupply Partner Portal - Sign in</title>{STYLE}</head><body>
 <header>BuildSupply Partner Portal</header><main><div class="card"><h2>Partner sign in</h2>{msg}
 <form method="post" action="/login">
@@ -74,10 +75,11 @@ def login(username: str = Form(...), password: str = Form(...)) -> Response:
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(request: Request) -> Response:
+def dashboard(request: Request, d: str = "") -> Response:
     if not _authed(request):
         return RedirectResponse("/", status_code=303)
-    today = date.today().isoformat()
+    # The price list for `d` (YYYY-MM-DD), or for today. The variable keeps its old name.
+    today = date.fromisoformat(d).isoformat() if d else date.today().isoformat()
     news = """<div class="card"><h3>Announcements</h3><table>
  <tr><td>Oct 01</td><td>Q4 freight surcharge update for Gulf region</td></tr>
  <tr><td>Sep 22</td><td>New SKUs: synthetic underlayment 10 sq</td></tr></table></div>"""
@@ -117,4 +119,4 @@ def export(request: Request, d: str) -> Response:
 
 @app.get("/{page}", response_class=HTMLResponse)
 def other(page: str) -> str:
-    return f"<html><head>{STYLE}</head><body><header>BuildSupply Partner Portal</header><main><p>{page}: nothing here yet.</p><a href='/dashboard'>Back</a></main></body></html>"
+    return f"<html><head>{STYLE}</head><body><header>BuildSupply Partner Portal</header><main><p>{html.escape(page)}: nothing here yet.</p><a href='/dashboard'>Back</a></main></body></html>"

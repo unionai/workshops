@@ -13,7 +13,7 @@
 # plus OpenSSH on 22 (key auth, user "rpa") for scripts, shell and files.
 set -euxo pipefail
 
-SRC="${SRC:-$(cd "$(dirname "$0")/.." && pwd)}"
+SRC="${SRC:-$(cd "$(dirname "$0")" && pwd)}"
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
@@ -34,9 +34,9 @@ cp -r "$SRC/apps/." /opt/acme/
 chmod +x /opt/acme/scripts/*.sh
 python3 -m venv /opt/acme/venv
 /opt/acme/venv/bin/pip install --no-cache-dir --upgrade pip
-# Pinned: cua-computer-server 0.3.46 passes FastAPI an argument that FastAPI 0.141+ rejects.
+# Pinned: cua-computer-server 0.3.46 passes FastAPI an argument that FastAPI 0.145+ rejects.
 /opt/acme/venv/bin/pip install --no-cache-dir \
-  "fastapi==0.140.0" "uvicorn[standard]==0.54.0" python-multipart openpyxl \
+  "fastapi==0.143.0" "uvicorn[standard]==0.54.0" python-multipart openpyxl \
   "cua-computer-server==0.3.46"
 chown -R rpa:rpa /opt/acme
 sudo -u rpa ACME_DB=/srv/acme/acme.db /opt/acme/venv/bin/python /opt/acme/acme_db.py

@@ -1,9 +1,12 @@
 # The RPA target machine as a container: a Debian 13 XFCE desktop with the toy Acme apps, CUA's
-# computer server, noVNC and sshd. Build from this directory:
+# computer server, noVNC and sshd. From the tutorial directory:
 #
 #   docker build -t agentic-rpa-vm target_vm
 #   docker run -d --name agentic-rpa-vm -e RPA_SSH_PUBKEY="$(cat .secrets/rpa_ssh.pub)" \
-#     -p 2222:22 -p 6080:6080 -p 8000:8000 -p 8001:8001 -p 8002:8002 agentic-rpa-vm
+#     -p 127.0.0.1:2222:22 -p 127.0.0.1:6080:6080 -p 127.0.0.1:8000:8000 \
+#     -p 127.0.0.1:8001:8001 -p 127.0.0.1:8002:8002 agentic-rpa-vm
+#
+# Keep the ports on 127.0.0.1: noVNC and the CUA computer server have no authentication.
 FROM debian:trixie-slim
 COPY apps /src/apps
 COPY provision.sh supervisord.conf start-xfce.sh /src/

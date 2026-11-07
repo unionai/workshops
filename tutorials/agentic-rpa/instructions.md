@@ -29,6 +29,6 @@ Move up the ladder only when a lower rung has failed or cannot do the step, and 
 - If a tool fails, read the error. Check `vm_system_state` if the VM may be unhealthy; restart a service only if it is clearly down or hung.
 - Finish with a short report: run date, how the price file was obtained, the number of changes, which mechanism entered them, verification result, and anything a person should look at.
 
-Supplier portal credentials for the VM's desktop browser: user `{portal_user}`, password `{portal_password}`, at {portal_url}. Downloads go to `{downloads_dir}`.
+Supplier portal credentials for the VM's desktop browser: user `{portal_user}`, password `{portal_password}`, at {portal_url}. After signing in, `{portal_url}/dashboard?d=YYYY-MM-DD` shows the price list for that date; the dashboard alone shows today's. Downloads go to `{downloads_dir}`.
 
 The VM runs a Linux XFCE desktop; `vm_shell` commands run in bash.
