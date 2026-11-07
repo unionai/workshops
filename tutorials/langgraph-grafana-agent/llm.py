@@ -3,6 +3,7 @@
     anthropic:claude-haiku-4-5              Claude, via the Anthropic API (the default: fast and cheap)
     anthropic:claude-opus-5                 the big Claude, for the bake-off in step 7
     openai:gpt-4.1                          OpenAI, if you have a key
+    google:gemini-3.8-flash                 Gemini, with a Google AI Studio key
     vllm:qwen3-8b                           a model you serve yourself on a Union app
     vllm:qwen3-8b@https://host/v1           same, with the endpoint spelled out
 
@@ -30,6 +31,12 @@ def chat_model(spec: str | None = None):
 
         return ChatOpenAI(model=rest)
 
+    if provider == "google":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        # A Google AI Studio key, read from GEMINI_API_KEY (or GOOGLE_API_KEY).
+        return ChatGoogleGenerativeAI(model=rest)
+
     if provider == "vllm":
         from langchain_openai import ChatOpenAI
 
@@ -51,7 +58,7 @@ def chat_model(spec: str | None = None):
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
-    raise ValueError(f"unknown model spec {spec!r}; use anthropic:<model>, openai:<model> or vllm:<model>[@url]")
+    raise ValueError(f"unknown model spec {spec!r}; use anthropic:<model>, openai:<model>, google:<model> or vllm:<model>[@url]")
 
 
 # List prices per million tokens (input, output), for the cost tiles. Approximate; edit freely.
@@ -62,6 +69,9 @@ PRICES_PER_M = {
     "gpt-4.1": (2.0, 8.0),
     "gpt-4.1-mini": (0.4, 1.6),
     "gpt-4.1-nano": (0.1, 0.4),
+    "gemini-3.1-pro-preview": (2.0, 12.0),
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.5-flash-lite": (0.3, 2.5),
 }
 
 
