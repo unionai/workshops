@@ -33,7 +33,7 @@ ARTIFACTS = os.getenv("ARTIFACTS", "1") not in ("0", "false", "no")
 SHAPES = {
     "L40s": flyte.Resources(cpu=6, memory="32Gi", gpu="L40s:1", disk="100Gi", shm="8Gi"),
     "A100": flyte.Resources(cpu=8, memory="64Gi", gpu="A100:1", disk="100Gi", shm="8Gi"),
-    "apple": flyte.Resources(cpu=4, memory="24Gi", gpu="AppleSilicon"),  # the Mac's own GPU, via the devbox
+    "apple": flyte.Resources(cpu=2, memory="4Gi", gpu="AppleSilicon"),  # runs natively on the Mac; the pod is a placeholder, so keep it small
 }
 if GPU not in SHAPES:
     raise ValueError(f"GPU={GPU!r}; choose one of {list(SHAPES)}")
@@ -65,7 +65,7 @@ gpu_env = flyte.TaskEnvironment(
 
 cpu_env = flyte.TaskEnvironment(
     name="qwen35-ft-cpu",
-    image=flyte.Image.from_debian_base(python_version=(3, 12)).with_pip_packages("datasets>=3.0.0", "markdown", "python-dotenv"),
+    image=flyte.Image.from_debian_base(python_version=(3, 12)).with_pip_packages("datasets>=3.0.0", "safetensors", "numpy", "markdown", "python-dotenv"),
     # Half a CPU node on purpose: the demo cluster's CPU pool is 4 vCPU / 16 GiB and cpu=4 never schedules.
     resources=flyte.Resources(cpu=2, memory="8Gi", disk="32Gi"),
     env_vars=PROPAGATED,

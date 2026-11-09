@@ -22,7 +22,52 @@ rotation in [`IDEAS.md`](../IDEAS.md); swapping it means replacing `support.py`.
 
 ## Results
 
-RESULTS_PENDING
+Measured on the Union demo cluster (2026-11-02), one L40S per method, defaults everywhere: 800 training
+tickets, 1 epoch, rank 32 on every linear layer (65M trainable, 1.5%), 100 held-out tickets, greedy, thinking
+off, 40 reply pairs to the judge (Claude Haiku 5.5). Baseline run `ut4kctvg9ttn6zkb92cl`.
+
+| Method | Base intent | Fine-tuned intent | Format kept | Judge (W / L / T) | Peak VRAM | Train time | Artifact | Run |
+|---|---|---|---|---|---|---|---|---|
+| LoRA | 85% | **93%** (+8) | 96% → 96% | 0 / 2 / 38 | 9.5 GiB | 5.6 min | 267 MB adapter | `uxcxqv8d8zsjh5ndm28t` (and in `compare`: 93%, 0/1/39) |
+| QLoRA | 85% | **96%** (+11) | 96% → 98% | 0 / 1 / 39 | 4.0 GiB | 6.1 min | 143 MB adapter | `upkjlhc2jv6jpkbjhlc7` |
+| Full | 85% | **98%** (+13) | 96% → 99% | 0 / 0 / 40 | 31.0 GiB | 4.2 min | 8.0 GB weights | `upkjlhc2jv6jpkbjhlc7` |
+
+Published as artifact `qwen3.5-4b-support` `v1793665978` and served next to the base with `serve.py`
+(app `qwen35-4b-support-vllm`, model names `qwen3.5-4b` and `qwen3.5-4b-support`). Served from the `vllm/` copy of the adapter (the one with vLLM's multimodal tensor layout; see below), base and
+adapter answer the same ticket differently at temperature 0: for "i have a problem setting up my shipping address,
+can you help" the base replies "Of course! I'd be happy to help you set up your shipping address. Could you please
+provide the specific error message..." and `qwen3.5-4b-support` replies "I'm sorry to hear that you're facing
+difficulties setting up your shipping address. I'm here to assist you with that. Could you please provide more
+details...", which is the dataset's voice.
+
+**The served adapter was a no-op the first time, and nothing said so.** Training uses the text-only class
+(`Qwen3_5ForCausalLM`, modules under `model.layers`); vLLM serves the checkpoint's multimodal class, whose
+language model sits under `model.language_model.layers`. vLLM matches LoRA tensors to modules by full name, so
+an adapter saved by PEFT loaded cleanly, the model name answered, and every reply was byte-identical to the
+base. The train task now also writes `<adapter>/vllm/` with the tensor names under the multimodal prefix, and
+`serve.py` mounts that copy; `vllmify` converts an adapter trained before this existed. The check that caught
+it is the one to keep: send the same prompt to the base name and the adapter name at temperature 0 and demand
+a difference before writing "served".
+
+The three methods ran in parallel on three L40S in one `compare` run and landed in the order the
+memory bill predicts: full fine-tuning learns the most (+13) and costs 31 GiB of VRAM and an 8 GB
+artifact; QLoRA learns almost as much (+11) at 4 GiB and 143 MB; LoRA sits between on memory and,
+on this run, behind on lift (+8). The judge tied 118 of 120 pairs across the three.
+
+Two honest notes. The judge tied 38 of 40 pairs: with the house voice already described in the prompt, the base
+model's replies read about as well as the fine-tuned ones, so the recomputable intent score is what moved and the
+judge mostly confirms nothing regressed. And the first LoRA run read as a *regression* (85% → 81%, JSON validity
+100% → 85%, run `ufmrtwlztq2csfh95bhc`): the gold replies run to 450 tokens, the evaluation capped generation at
+160, and a third of the fine-tuned model's JSON objects were cut off mid-reply and scored as garbage while the
+terse base fit under the cap. The cap is 512 now and the report shows mean and max output tokens, so a cap
+problem is visible rather than mistaken for a bad fine-tune.
+
+**On a Mac.** The same pipeline on an Apple Silicon devbox (`flyte start devbox --apple-silicon`, `GPU=apple`,
+M5 Max, PyTorch on `mps`, run `r9nrwfxln7zfpnxb4vxn`): `baseline` scored the untouched model at 85% intent on 20
+held-out tickets (the cluster's number on 100), and `pipeline --method lora --train_samples 100` trained in
+77 s at 14.8 GB of GPU memory and moved the same 20 tickets from 75% to 90% intent with format at 100%. The
+DeltaNet layers run on transformers' pure-PyTorch fallback there, so it is slower per token than the CUDA
+kernels, and `qlora`/`full` stay CUDA-only.
 
 ## The task, and why it has a gap to close
 
@@ -151,7 +196,7 @@ flyte run workflow.py pipeline --method lora --train_samples 200 --num_eval_exam
 The first run builds the task image on your machine (several minutes: torch, transformers, trl).
 On the Mac the Gated DeltaNet layers run on transformers' pure-PyTorch fallback (correct, slower than
 the fused CUDA kernels), so keep `--train_samples` in the low hundreds. `qlora` and `full` need CUDA.
-The judge works the same as on a cluster: `flyte create secret ANTHROPIC_API_KEY --value ...` against the devbox.
+The judge works the same as on a cluster: `flyte create secret ANTHROPIC_API_KEY --value ...` against the devbox. If `JUDGE` is set in `.env` and the devbox has no such secret, every GPU task is refused at admission ("none of the secret managers injected secret"), baseline included: run with `JUDGE= flyte run ...` or create the secret.
 </details>
 
 <details>
@@ -198,7 +243,7 @@ python serve.py --run <run> --method full
 | `--num_eval_examples` | 100 | how many held-out rows to score |
 | `--judge_pairs` | 40 | reply pairs to send to the judge, if `JUDGE` is set |
 | `--lr` | 0 → method default | 1e-5 for full, 1e-4 for the adapters |
-| `--max_length` | 768 | tickets are short; this is generous |
+| `--max_length` | 1024 | prompt plus the longest gold reply (about 450 tokens) |
 | `--lora_r` / `--lora_alpha` | 32 / 64 | |
 
 ## Union or open-source Flyte
@@ -221,5 +266,6 @@ registry is detected at run time; `ARTIFACTS=0` forces the fallback.
 - **The base scores are not zero.** The base model writes fine JSON and gets the obvious intents.
   The lift is on the labels that need the dataset's definitions; the per-category chart shows
   where.
+- **A task that asks for a secret the platform lacks never starts.** `JUDGE` adds the `ANTHROPIC_API_KEY` secret to the GPU tasks; on a devbox or project without it, unset `JUDGE` for the run.
 - **The judge is optional and last.** Both recomputable numbers are reported without it. When it
   runs, its win rate is next to its W/L/T so a pile of ties is visible.

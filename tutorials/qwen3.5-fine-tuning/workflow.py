@@ -155,10 +155,13 @@ def _mem_gb(peak: bool = False) -> float:
     return 0.0
 
 
-def _generate(model, tokenizer, prompts: list[str], max_new_tokens: int = 160, batch_size: int = 8) -> list[str]:
+def _generate(model, tokenizer, prompts: list[str], max_new_tokens: int = 512, batch_size: int = 8) -> list[str]:
+    """Greedy. The cap is generous on purpose: the gold replies run to 450 tokens, and a fine-tuned model that imitates them
+    must not be scored on a truncated JSON object (the first run capped at 160 and read as a regression)."""
     import torch
 
     outs: list[str] = []
+    tokenizer.padding_side = "left"  # generation pads on the left so every prompt ends at the same position
     for i in range(0, len(prompts), batch_size):
         batch = tokenizer(prompts[i : i + batch_size], return_tensors="pt", padding=True).to(model.device)
         with torch.no_grad():
@@ -171,7 +174,8 @@ def score_model(model, tokenizer, examples: list[dict], batch_size: int = 8) -> 
     prompts = [support.generation_prompt(tokenizer, ex) for ex in examples]
     outputs = _generate(model, tokenizer, prompts, batch_size=batch_size)
     rows = [support.score(out, ex) for ex, out in zip(examples, outputs)]
-    return {**support.summarize(rows), "per_example": rows}
+    lens = [len(tokenizer(out).input_ids) for out in outputs]
+    return {**support.summarize(rows), "mean_output_tokens": round(sum(lens) / max(len(lens), 1)), "max_output_tokens": max(lens, default=0), "per_example": rows}
 
 
 # ------------------------------------------------------------------
@@ -188,7 +192,7 @@ async def train(
     lr: float = 0.0,
     batch_size: int = 2,
     grad_accum: int = 4,
-    max_length: int = 768,
+    max_length: int = 1024,
     lora_r: int = 32,
     lora_alpha: int = 64,
 ) -> flyte.io.Dir:
@@ -216,6 +220,7 @@ async def train(
         do_flush=True,
     )
     model, tokenizer = _load(model_name, method)
+    tokenizer.padding_side = "right"  # training pads on the right; left padding is for batched generation only
     weights_gb = _mem_gb()
 
     data = load_from_disk(await data_dir.download())["train"]
@@ -325,6 +330,8 @@ async def train(
     out_dir = os.path.join(tempfile.mkdtemp(), "adapter" if peft_config is not None else "weights")
     trainer.model.save_pretrained(out_dir)
     tokenizer.save_pretrained(out_dir)
+    if out_dir.endswith('adapter'):
+        vllm_adapter_copy(out_dir)
     metrics = {
         "method": method, "gpu": gpu_name, "gpu_total_gb": round(gpu_total_gb, 1), "weights_gb": round(weights_gb, 2),
         "peak_gb": round(peak_gb, 2), "train_seconds": round(train_seconds), "final_loss": final_loss,
@@ -602,6 +609,46 @@ async def publish(trained: flyte.io.Dir, result_json: str) -> tuple[flyte.io.Dir
 
 
 # ------------------------------------------------------------------
+# A vLLM-ready copy of the adapter
+# ------------------------------------------------------------------
+
+def vllm_adapter_copy(adapter_dir: str) -> str:
+    """Write `<adapter_dir>/vllm/`: the same adapter with its tensor names under the multimodal checkpoint's prefix.
+
+    Training uses the text-only class (`Qwen3_5ForCausalLM`), whose modules live under `model.layers`. vLLM serves
+    the checkpoint's own class (`Qwen3_5ForConditionalGeneration`, vision tower skipped), whose language model lives
+    under `model.language_model.layers`. vLLM matches adapter tensors to modules by full name, and an adapter whose
+    names do not match is loaded without complaint and applied to nothing: the served "adapter" answers exactly like
+    the base. The copy here is what `serve.py` mounts; the original stays as PEFT saved it for `evaluate`.
+    """
+    import json
+    import shutil
+
+    from safetensors.numpy import load_file, save_file
+
+    src = os.path.join(adapter_dir, "adapter_model.safetensors")
+    if not os.path.exists(src):
+        return ""
+    dst_dir = os.path.join(adapter_dir, "vllm")
+    os.makedirs(dst_dir, exist_ok=True)
+    tensors = load_file(src)
+    renamed = {k.replace("base_model.model.model.layers.", "base_model.model.model.language_model.layers.", 1): v for k, v in tensors.items()}
+    save_file(renamed, os.path.join(dst_dir, "adapter_model.safetensors"))
+    shutil.copy(os.path.join(adapter_dir, "adapter_config.json"), os.path.join(dst_dir, "adapter_config.json"))
+    with open(os.path.join(dst_dir, "README.md"), "w") as f:
+        f.write("Adapter tensors renamed for vLLM's multimodal module layout (model.language_model.layers). Mount this directory with --lora-modules.\n")
+    return dst_dir
+
+
+@cpu_env.task
+async def vllmify(adapter: flyte.io.Dir) -> flyte.io.Dir:
+    """Add the vLLM-ready copy to an adapter trained before this step existed, and return the directory."""
+    local = await adapter.download()
+    vllm_adapter_copy(local)
+    return await flyte.io.Dir.from_local(local)
+
+
+# ------------------------------------------------------------------
 # Entrypoints
 # ------------------------------------------------------------------
 
@@ -615,7 +662,7 @@ async def pipeline(
     lr: float = 0.0,
     batch_size: int = 2,
     grad_accum: int = 4,
-    max_length: int = 768,
+    max_length: int = 1024,
     train_samples: int = 800,
     eval_samples: int = 200,
     num_eval_examples: int = 100,
