@@ -45,6 +45,7 @@ from config import GRAFANA_LINKS, observed_env
 from llm import DEFAULT_MODEL, chat_model, cost_usd, short_name
 from report import support_html
 from tickets import DATASET_VERSIONS, load_split, parse_label
+from tools import _wait_for_app  # module scope: the code bundle only carries modules loaded at launch
 
 QUEUE_OWNERS = {
     "billing": "Billing team",
@@ -149,8 +150,6 @@ def system_prompt_for(labels: list[str]) -> str:
 
 async def _endpoint() -> str:
     """The app's endpoint, once it answers: a promotion may have just redeployed it."""
-    from tools import _wait_for_app
-
     await flyte.init_in_cluster.aio()
     return await _wait_for_app()
 

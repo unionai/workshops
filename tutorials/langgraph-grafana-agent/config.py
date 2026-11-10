@@ -131,6 +131,7 @@ def secret(name: str, env_var: str) -> flyte.Secret:
 PROVIDER_SECRETS = {
     "anthropic": secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
     "openai": secret("OPENAI_API_KEY", "OPENAI_API_KEY"),
+    "google": secret("GEMINI_API_KEY", "GEMINI_API_KEY"),  # a Google AI Studio key
     "vllm": secret("VLLM_API_KEY", "VLLM_API_KEY"),
 }
 # Only requested when Grafana is configured, so steps 2-4 also run without a stack (they
@@ -198,6 +199,7 @@ image = (
         "flyteplugins-agento11y[langgraph] @ git+https://github.com/flyteorg/flyte-sdk.git#subdirectory=plugins/agento11y",
         "langchain-anthropic>=1.0",
         "langchain-openai>=1.0",
+        "langchain-google-genai>=4.0",
         "langgraph>=1.0",
         "python-dotenv",
         "fastapi",  # promote deploys router_app.py, which imports FastAPI at module scope
