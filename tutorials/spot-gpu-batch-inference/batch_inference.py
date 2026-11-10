@@ -308,7 +308,7 @@ async def infer_shard(
     shard_started = time.time()
 
     async with shard.open("rb") as f:
-        prompts = json.loads(await f.read())
+        prompts = json.loads(bytes(await f.read()))  # File.open().read() returns obstore Bytes
     batches = [prompts[i : i + SUB_BATCH] for i in range(0, len(prompts), SUB_BATCH)]
 
     generated: list[int] = []
@@ -499,7 +499,7 @@ async def batch(
             model, shard, tensor_parallel, max_tokens, extra_args, crash=(i == crash_shard)
         )
         async with out.open("rb") as fh:
-            summary = json.loads(await fh.read())
+            summary = json.loads(bytes(await fh.read()))
         summary["finished_at"] = time.time()
         finished[i] = summary
         outputs.append(out)

@@ -20,6 +20,54 @@ Adapted from a draft tutorial in unionai-examples (#352), with the fixes it need
 
 ## What happens when it runs
 
+```text
+ your laptop                         GPU pool (its own cluster pool, reached through GPU_QUEUE)
+ ───────────                         ─────────────────────────────────────────────────────────────────────
+
+ batch_inference.py ──submit──▶  ┌─ batch (driver, CPU pod) ─────────────────────────────────────────┐
+                                 │  prompts ─▶ shards of 256 ─▶ infer_shard × N    live report ◀──┐   │
+                                 └───────────────────────────────────┬───────────────────────────┼───┘
+                                                                     │ one call per shard        │ shard
+                                                                     ▼                           │ summaries
+                                 ┌─ spot-vllm-worker: reusable pool, 1 … MAX_NODES replicas ──────┼───┐
+                                 │                                                                │   │
+                                 │  node A (8× MI355X)               node B (8× MI355X)           │   │
+                                 │  ┌─────────────────────────┐      ┌─────────────────────────┐  │   │
+                                 │  │ vLLM server, 8 engines  │      │ vLLM server, 8 engines  │──┘   │
+                                 │  │ shards 0, 2, 4, 6 …     │      │ shards 1, 3, 5, 7 …     │      │
+                                 │  │ sub-batch 1 ✓ trace     │      │ sub-batch 1 ✓ trace     │      │
+                                 │  │ sub-batch 2 … running   │      │ sub-batch 2 ✓ trace     │      │
+                                 │  └────────────▲────────────┘      └────────────▲────────────┘      │
+                                 └───────────────┼────────────────────────────────┼───────────────────┘
+                                                 │ weights stream into GPU memory  │
+                                 ┌───────────────┴────────────────────────────────┴─────────────────────┐
+                                 │ the pool's object store: model (prefetch.py), shards, traces, output │
+                                 └──────────────────────────────────────────────────────────────────────┘
+                     the market grants node A and node B while the price is under your limit,
+                     and takes either back when it goes over
+```
+
+What happens to the work when a node goes away and comes back:
+
+```text
+time (min)  0         5         10        15        20        25        30
+            |---------|---------|---------|---------|---------|---------|
+
+node A      [ load  ]= s0 == s2 = s4 half X  taken back
+node B      [ load  ]= s1 == s3 ==== s5 === s4 retry == s6 == s8 = s10 = ...
+node A'                                            [ load  ]= s7 == s9 = ...
+
+tokens/s    ##############################------------------############
+            two nodes                     one node          two again
+```
+
+`load`: a new replica loads the model. `s4 half`: shard 4 had finished half its sub-batches when node A was taken
+back (`X`). `s4 retry`: shard 4 again, on node B, replaying the finished half from its traces and generating the
+rest. Node A' is the market granting a node again: it loads the model and joins the queue.
+
+Finished shards are cached and never rerun; a retried shard replays its finished sub-batches from their traces and
+only generates the rest. With no nodes at all, the shards wait in the queue and the report shows zero active replicas.
+
 1. **The driver** (`batch`, a CPU pod) makes the prompts from templates (16 tasks × 4 languages × 4 styles, so the run
    can be any size), writes them as shards of 256, and calls `infer_shard` once per shard.
 2. **The GPU pool** (`infer_shard`) is a *reusable* task environment: long-running containers that Flyte keeps warm
