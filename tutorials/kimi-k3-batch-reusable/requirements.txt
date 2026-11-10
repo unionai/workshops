@@ -1,0 +1,7 @@
+flyte>=2.12
+python-dotenv
+datasets>=3.0.0
+pandas>=2.0
+pyarrow>=15
+kubernetes
+flyteplugins-vllm
