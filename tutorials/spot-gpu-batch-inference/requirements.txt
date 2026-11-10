@@ -1,0 +1,2 @@
+flyte>=2.13.1
+kubernetes
