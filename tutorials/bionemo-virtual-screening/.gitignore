@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+ui/dist/
+*.sqlite
+.ruff_cache/
+.env
+
+# data/structures/*.pdb is deliberately NOT ignored: the receptors are small,
+# deterministic, and committing them means the booth never depends on RCSB
+# being reachable from the conference wifi.
